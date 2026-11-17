@@ -527,6 +527,14 @@ def _default_agents() -> list[dict[str, Any]]:
             "fallback_note": "降级后：免费积分用完则回院子休息，等下月刷新或每日签到领分",
             "attached_tools": [],
             "skills": ["table-cleanup", "cheap-code-jobs", "doc-drafting-frame"],
+            "sub_models": [
+                "Hy4 flash (限时免费 0.00x - 优先白嫖)",
+                "GLM-5.3-Flash 高 (0.08x)",
+                "DeepSeek (夜间折扣 0.11x)",
+                "Hy4 高 (0.29x)",
+                "GLM-5.3 高 (0.69x)",
+                "GLM-5.2 (夜间折扣 0.79x)",
+            ],
             "icon_kind": "text",
         },
     ]
@@ -1500,6 +1508,40 @@ class OfficeStore:
                 synced.append({"id": agent["id"], "mode": "web_or_desktop", "session": has_session})
         self.save()
         return {"synced_at": now, "count": len(synced), "details": synced}
+
+    def exporttaskmd(self, payload: dict[str, Any]) -> dict[str, Any]:
+        """Export a task to ai-team/tasks/inbox/<task_id>.md for desktop agents (@file trigger)."""
+        task = self._find_task(payload.get("task_id") or payload.get("id"))
+        out_dir = Path(__file__).resolve().parents[1] / "ai-team" / "tasks" / "inbox"
+        out_dir.mkdir(parents=True, exist_ok=True)
+        rel_path = f"ai-team/tasks/inbox/{task['id']}.md"
+        file_path = out_dir / f"{task['id']}.md"
+
+        sub_model_hint = ""
+        worker_id = task.get("assigned_to") or ""
+        if worker_id:
+            try:
+                w = self._find_agent(worker_id)
+                subs = w.get("sub_models") or []
+                if subs:
+                    sub_model_hint = f"\n- **建议切换内置子模型**：{subs[0]}（优先使用最低倍率/限时免费档）"
+            except KeyError:
+                pass
+
+        md_body = (
+            f"# 工单 {task['id']} — {task['title']}\n\n"
+            f"- **派单经理**：{task['manager_name']}\n"
+            f"- **执行员工**：{task['assigned_name']}{sub_model_hint}\n"
+            f"- **状态**：{task['status']}\n\n"
+            f"## 1. 目标\n{task['goal']}\n\n"
+            f"## 2. 输入\n{task['input_text']}\n\n"
+            f"## 3. 强制输出格式\n{task['output_format']}\n\n"
+            f"## 4. 验收标准\n{task['acceptance']}\n\n"
+            f"## 5. 红线\n{task['rule_footer']}\n"
+        )
+        file_path.write_text(md_body, encoding="utf-8")
+        trigger_text = f"@{rel_path} 严格按此工单要求执行（如有 0.00x 限时免费模型请优先切换），完成后直接保存结果。"
+        return {"rel_path": rel_path, "file_path": str(file_path), "trigger_text": trigger_text}
 
     # ------------------------------------------------------------------
     # Internal helpers

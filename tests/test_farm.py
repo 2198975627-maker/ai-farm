@@ -6,6 +6,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from ai_farm.adapters.base import AgentReply, Quota
+from ai_farm.adapters.cli_agent import CLIAdapter
 from ai_farm.adapters.registry import get_adapter, register, registered_slugs
 from ai_farm.dispatcher import Task, dispatch
 from ai_farm.office_store import OfficeStore
@@ -77,6 +78,24 @@ def test_builtin_adapters_registered():
     assert "gemini-web" in registered_slugs()
     assert "dola-web" in registered_slugs()
     assert "qwen-intl-web" in registered_slugs()
+    assert "codex-cli" in registered_slugs()
+    assert "cli-generic" in registered_slugs()
+
+
+def test_cli_adapter_missing_executable_triggers_fallback():
+    cli = CLIAdapter(
+        vendor="TestCLI",
+        model_id="test-m",
+        executable="nonexistent_cli_tool_xyz_999",
+    )
+    assert not cli.is_installed()
+    try:
+        cli.chat("hello")
+        raise AssertionError("Missing CLI executable must raise so dispatcher falls back")
+    except RuntimeError:
+        pass
+    q = cli.check_quota()
+    assert "未安装" in q.note
 
 
 def test_load_example_roster_and_12_seed_skills():

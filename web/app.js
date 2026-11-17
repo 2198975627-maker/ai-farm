@@ -622,6 +622,7 @@ function renderSelectedAgentProfile() {
         <div class="kv-row"><span>到期时间</span><span>${escapeHTML(agent.expires_at || (agent.access_kind === 'api' ? '按余额消耗无固定到期日' : '未填/待同步'))}</span></div>
         <div class="kv-row"><span>真实模型版本</span><span><code>${escapeHTML(agent.model)}</code> ${agent.verified_version ? '✅已核实' : '⚠️待核实'}</span></div>
         ${(agent.available_models && agent.available_models.length) ? `<div class="kv-row"><span>接口实查可用模型</span><span><code>${escapeHTML(agent.available_models.join(', '))}</code></span></div>` : ''}
+        ${(agent.sub_models && agent.sub_models.length) ? `<div class="kv-row"><span>内置子模型与倍率</span><span>${agent.sub_models.map(m => `<span class="vendor-chip">${escapeHTML(m)}</span>`).join(' ')}</span></div>` : ''}
         ${agent.last_synced_at ? `<div class="kv-row"><span>上次同步时间</span><span>${escapeHTML(agent.last_synced_at)}</span></div>` : ''}
         <div class="kv-row"><span>接入通道</span><span>${escapeHTML(agent.access_kind)} (${escapeHTML(agent.badge)})</span></div>
         <div class="kv-row"><span>降级规则</span><span style="color:#93c5fd;">${escapeHTML(agent.fallback_note || '未指定')}</span></div>
@@ -786,6 +787,9 @@ function renderSelectedTaskThread() {
           </button>
           <button class="btn btn-ghost" onclick="handleCopyWorkerPrompt('${task.id}')" title="一键复制标准指令，直接粘贴给 WorkBuddy 桌面端或网页端执行">
             📋 复制工单指令 (给桌面/网页跑)
+          </button>
+          <button class="btn btn-ghost" onclick="handleExportTaskMd('${task.id}')" title="生成工单 .md 文件并复制 @文件 触发句，可直接贴进 WorkBuddy @引用文件执行">
+            📂 导出 .md + 复制 @触发句
           </button>
           <button class="btn btn-primary" onclick="handleDeliverFinalResult('${task.id}')">
             📦 经理统筹交付总结果给 Gao
@@ -1009,6 +1013,17 @@ async function handleCopyWorkerPrompt(taskId) {
     showToast("📋 已复制标准派单指令！直接切到 WorkBuddy 桌面端粘贴运行，完成后把结果贴回下方汇报框即可。");
   } catch (_) {
     showToast("复制失败，请手动从下方系统消息框复制指令", true);
+  }
+}
+
+async function handleExportTaskMd(taskId) {
+  const res = await callOfficeAction("exporttaskmd", { task_id: taskId });
+  if (!res) return;
+  try {
+    await navigator.clipboard.writeText(res.trigger_text);
+    showToast(`📂 已生成 ${res.rel_path} 并复制 @触发句！直接去 WorkBuddy 粘贴按回车即可。`);
+  } catch (_) {
+    showToast(`📂 已生成 ${res.rel_path}，触发句：${res.trigger_text}`);
   }
 }
 

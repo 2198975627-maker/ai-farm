@@ -34,6 +34,7 @@ def registered_slugs() -> list[str]:
 
 
 # Built-in API adapters.
+from .cli_agent import CLIAdapter, codex_cli  # noqa: E402
 from .openai_compatible import (  # noqa: E402
     OpenAICompatibleAdapter,
     deepseek,
@@ -75,3 +76,7 @@ register("dola-web", DolaFreeWebAdapter)
 register("qwen-web", QwenFreeWebAdapter)
 register("qwen-intl-web", QwenChatIntlWebAdapter)
 register("custom-web", WebAdapter)
+
+# Built-in CLI Agent adapters.
+register("codex-cli", codex_cli)
+register("cli-generic", CLIAdapter)
