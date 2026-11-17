@@ -115,20 +115,20 @@ def test_recruit_new_vendor_in_under_30_lines():
     assert adapter.chat("ping").text == "ok"
 
 
-def test_office_26_actions_and_hard_rules():
+def test_office_clean_starter_and_4_channels():
     with tempfile.TemporaryDirectory() as tmp:
         store = OfficeStore(state_path=Path(tmp) / "office.json")
-        # 1. Verify 17 model icons + real quotas (Gemini 82%, GLM 0%, others None)
+        # 1. Clean OSS starter: only 1 generic Chief slot (no hardcoded personal accounts)
         ag_res = store.listagents()
-        assert len(ag_res["agents"]) == 17
-        gemini = next(a for a in ag_res["agents"] if a["id"] == "gemini-4-argon")
-        glm = next(a for a in ag_res["agents"] if a["id"] == "glm-5-3-flash")
-        kex = next(a for a in ag_res["agents"] if a["id"] == "k-exaone-2-5")
-        assert gemini["quota_percent"] == 82.0
-        assert glm["quota_percent"] == 0.0
-        assert kex["quota_percent"] is None
+        assert len(ag_res["agents"]) == 1
+        assert ag_res["agents"][0]["access_kind"] == "chief"
 
-        # 2. Two-path recruit validation: reject raw secret key, accept ENV VAR NAME
+        # 2. Optional anonymous sample team loader works cleanly
+        sample_res = store.loadsampleteam()
+        assert sample_res["added_count"] == 4
+        assert len(store.listagents()["agents"]) == 5
+
+        # 3. API recruit validation: reject raw secret key, accept ENV VAR NAME
         try:
             store.createagent({
                 "name": "Bad Key Agent",
@@ -142,25 +142,44 @@ def test_office_26_actions_and_hard_rules():
             pass
 
         new_api = store.createagent({
-            "name": "SiliconFlow Free",
-            "vendor": "SiliconFlow",
-            "model": "待核实具体版本",
+            "name": "My Free API Worker",
+            "vendor": "VendorX",
+            "model": "x-flash",
             "access_kind": "api",
             "paid": False,
-            "key_env": "SILICONFLOW_API_KEY",
-            "base_url": "https://api.siliconflow.cn/v1",
+            "key_env": "VENDOR_X_API_KEY",
+            "base_url": "https://api.vendorx.example/v1",
         })
         assert new_api["badge"] == "免费·API"
         assert new_api["quota_percent"] is None
 
-        # 3. Group chat task -> claim -> private report (no body leak in group!) -> cross-vendor transfer -> final delivery -> Gao accept
+        # CLI & Desktop channels recruit cleanly
+        new_cli = store.createagent({
+            "name": "My CLI Tool",
+            "vendor": "CLI-Vendor",
+            "model": "cli-model",
+            "access_kind": "cli",
+            "executable": "my-cli",
+        })
+        assert new_cli["badge"] == "免费·CLI"
+
+        new_desktop = store.createagent({
+            "name": "My Desktop App",
+            "vendor": "Desktop-Vendor",
+            "model": "app-pool",
+            "access_kind": "desktop",
+            "sub_models": ["free-fast (0.00x)"],
+        })
+        assert new_desktop["badge"] == "免费·桌面端"
+
+        # 4. Group chat task -> claim -> private report (no body leak in group!) -> cross-vendor transfer -> final delivery -> accept
         task = store.seedexampletask()
-        store.claimtask({"task_id": task["id"], "worker_id": "deepseek-v4-flash"})
+        store.claimtask({"task_id": task["id"], "worker_id": new_api["id"]})
 
         secret_report_body = "PRIVATE_WORKER_TABLE_ROW_999"
         store.postmessage({
             "task_id": task["id"],
-            "sender_id": "deepseek-v4-flash",
+            "sender_id": new_api["id"],
             "text": secret_report_body,
             "is_delivery": True,
         })
@@ -170,27 +189,26 @@ def test_office_26_actions_and_hard_rules():
 
         # Same-vendor reassignment must be blocked; different-vendor allowed
         try:
-            store.reassigntask({"task_id": task["id"], "to_worker_id": "deepseek-v4-flash"})
+            store.reassigntask({"task_id": task["id"], "to_worker_id": new_api["id"]})
             raise AssertionError("Same-vendor reassignment must be blocked")
         except ValueError:
             pass
 
-        store.reassigntask({"task_id": task["id"], "to_worker_id": "k-exaone-2-5"})
+        store.reassigntask({"task_id": task["id"], "to_worker_id": new_cli["id"]})
         store.deliverfinalresult({"task_id": task["id"]})
-        assert any("🏁" in m["text"] and "给 Gao" in m["text"] for m in store.listgroupmessages())
+        assert any("🏁" in m["text"] and "最终交付" in m["text"] for m in store.listgroupmessages())
 
         reviewed = store.reviewfinalresult({"task_id": task["id"], "decision": "verified"})
         assert reviewed["status"] == "accepted_done"
 
-        # 4. Senior model skill judgment & apply
-        judged = store.analyzeskillassignments({"judge_id": "muse"})
-        assert judged["judge"] == "Muse（总管）"
-        if judged["recommendations"]:
-            applied = store.applyskillassignments({
-                "judge": judged["judge"],
-                "assignments": judged["recommendations"][:2],
-            })
-            assert applied["applied_count"] >= 1
+        # 5. Senior model skill judgment & apply
+        judged = store.analyzeskillassignments({"judge_id": "chief"})
+        assert len(judged["recommendations"]) >= 1
+        applied = store.applyskillassignments({
+            "judge": judged["judge"],
+            "assignments": judged["recommendations"][:2],
+        })
+        assert applied["applied_count"] >= 1
 
 
 if __name__ == "__main__":

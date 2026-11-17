@@ -1,14 +1,16 @@
-"""Office state engine implementing all 26 actions from office/office-actions.json.
+"""Office state engine implementing the AI Farm Office workbench.
 
-Enforces all hard rules from 01-HANDOFF-FOR-ANTIGRAVITY.md:
-1. One icon = one model + one access mode. Same vendor paid + free = two icons.
-   Codex is a tool (running DeepSeek V4 Pro), NOT a model icon.
-2. One free account per vendor. Reassignment (转交) ONLY to a DIFFERENT vendor.
-3. Managers think, workers do. Workers report in a private thread (group gets a 🔒
-   notice only); managers consolidate into a final delivery card for Gao.
-4. Quotas are REAL: Gemini 4 Argon (82% 5h / 91% weekly), GLM-5.3-Flash (0% red
-   flashing), all unverified quotas are None ("额度未填"). Never invent numbers.
-5. Keys never enter the store or UI: API recruitment only accepts env var NAME.
+Pure open-source framework:
+- Ships with an empty workbench (only 1 generic Chief slot) so every user
+  recruits their own managers, workers, CLI tools, or desktop agents.
+- Supports all 4 recruitment channels:
+  1) API (env var NAME only — never plaintext keys)
+  2) Web / Subscription (one-time browser login on vendor's own site)
+  3) CLI Agent (headless subprocess execution in workspace)
+  4) Desktop GUI Agent (workspace file-mailbox + @task.md handoff)
+- Enforces hard rules: one icon = one model/pool, cross-vendor only
+  reassignment, private worker reports (🔒 notice in group), real quotas
+  ("额度未填" when unknown, <=10% red alert).
 """
 from __future__ import annotations
 
@@ -29,522 +31,104 @@ def _now_iso() -> str:
 
 
 def _default_agents() -> list[dict[str, Any]]:
-    """The 17 verified model icons (6 manager/chief + 9 worker + 2 rest).
-    Codex is a tool sharing DeepSeek V4 Pro's balance, not a model icon.
+    """Open-source clean starter: only the generic Chief (总管) slot.
+    Managers, workers, and rest-floor agents are recruited by the user.
     """
     return [
-        # === 2楼 经理层 (含总管 Muse) ===
         {
-            "id": "muse",
-            "name": "Muse（总管）",
-            "brand": "Meta (Muse)",
-            "vendor": "Meta",
-            "model": "Muse 总管（唯一入口）",
-            "verified_version": True,
+            "id": "chief",
+            "name": "总管 (Chief)",
+            "brand": "Orchestrator",
+            "vendor": "Chief",
+            "model": "待绑定你的统筹模型",
+            "verified_version": False,
             "access_kind": "chief",
             "paid": False,
             "floor": "manager",
-            "role_label": "第1层 总管 / 第2层 统筹经理",
+            "role_label": "第1层 总管 · 唯一对接口",
             "badge": "总管·唯一入口",
             "badge_color": "blue",
             "status": "ready",
-            "account_status": "✅ 已核实有号（当前总管，持全量上下文）",
-            "specialty": "听任务、拆单、派单、记账、质检、整合、汇报、中文理解",
+            "account_status": "工作台已就绪：请点击左下角「➕ 招募 AI Agent」接入你自己的模型或点击顶部「🎭 载入示例团队」体验。",
+            "specialty": "听任务、拆单、派单、记账、质检、整合汇报",
             "quota_kind": "none",
             "quota_percent": None,
-            "quota_note": "总管唯一对接口，无独立查额度链接",
+            "quota_note": "总管槽位，不绑死特定厂商",
             "usage_url": "",
             "login_url": "",
             "key_env": "",
             "base_url": "",
-            "fallback_note": "降级后：常驻总管，经理缺席时顶上",
+            "fallback_note": "由当前最高层级助手或你指定的统筹模型担任",
             "attached_tools": [],
             "skills": ["doc-drafting-frame"],
-            "icon_kind": "muse",
-        },
-        {
-            "id": "gemini-4-argon",
-            "name": "Gemini 4 Argon",
-            "brand": "Google Gemini",
-            "vendor": "Gemini",
-            "model": "gemini-4-argon",
-            "verified_version": True,
-            "access_kind": "subscription",
-            "paid": True,
-            "floor": "manager",
-            "role_label": "2楼 经理层 · 前端/长代码/文档",
-            "badge": "付费·订阅",
-            "badge_color": "orange",
-            "status": "ready",
-            "account_status": "✅ 已核实有号（新加坡区，2026-12-15到期/订阅页写12-14，已取消自动续费）",
-            "specialty": "前端、大块长代码、Canvas文档、架构设计",
-            "quota_kind": "subscription",
-            "quota_percent": 82.0,
-            "quota_note": "2026-11-16 22:21实查：5小时周期已用18%（剩约82%，2:39重置）；每周已用9%（剩约91%，11月22日0:39重置）",
-            "usage_url": "https://gemini.google.com/usage",
-            "login_url": "https://gemini.google.com/",
-            "key_env": "",
-            "base_url": "",
-            "fallback_note": "降级后：Gemini Flash-Lite（订阅制到限额不真停，降级后只能干小活）",
-            "attached_tools": [],
-            "skills": ["doc-drafting-frame", "code-review-checklist"],
-            "icon_kind": "text",
-            "adapter_slug": "gemini-web",
-        },
-        {
-            "id": "deepseek-v4-pro",
-            "name": "DeepSeek V4 Pro",
-            "brand": "DeepSeek",
-            "vendor": "DeepSeek",
-            "model": "deepseek-v4-pro",
-            "verified_version": True,
-            "access_kind": "api",
-            "paid": True,
-            "floor": "manager",
-            "role_label": "2楼 经理层 · 代码实现/审查",
-            "badge": "付费·API",
-            "badge_color": "orange",
-            "status": "ready",
-            "account_status": "✅ 已核实有号（API直连；与 DeepSeek V4 Flash、工具 Codex 共用同一余额）",
-            "specialty": "中文代码实现、代码审查、架构落地、高性价比推理",
-            "quota_kind": "api",
-            "quota_percent": None,
-            "quota_note": "额度未填（2026-11-16网页登录受阻；设好 DEEPSEEK_API_KEY 后可调 GET /user/balance 实时读余额）",
-            "usage_url": "https://platform.deepseek.com/usage",
-            "login_url": "",
-            "key_env": "DEEPSEEK_API_KEY",
-            "base_url": "https://api.deepseek.com/v1",
-            "fallback_note": "降级后：API余额归0或402真停（先换免费员工，不硬烧）",
-            "attached_tools": ["🔧 工具 Codex CLI（非模型，不占独立图标，共用本账号 DeepSeek 余额）"],
-            "skills": ["code-review-checklist"],
-            "icon_kind": "text",
-            "adapter_slug": "deepseek-pro",
-        },
-        {
-            "id": "gpt-plus",
-            "name": "GPT Plus",
-            "brand": "OpenAI ChatGPT",
-            "vendor": "ChatGPT",
-            "model": "待核实具体版本",
-            "verified_version": False,
-            "access_kind": "subscription",
-            "paid": True,
-            "floor": "manager",
-            "role_label": "2楼 经理层 · 架构/复杂推理",
-            "badge": "付费·订阅",
-            "badge_color": "orange",
-            "status": "pending",
-            "account_status": "❓ 待确认（Gao 已确认没有订 Plus，目前只有 ChatGPT 免费版）",
-            "specialty": "复杂推理、架构对比、代码审查",
-            "quota_kind": "subscription",
-            "quota_percent": None,
-            "quota_note": "额度未填（未开通 Plus，不编造数字）",
-            "usage_url": "https://chatgpt.com/#settings/Usage",
-            "login_url": "https://chatgpt.com/",
-            "key_env": "",
-            "base_url": "",
-            "fallback_note": "降级后：mini（订阅制到周期限额切 mini，不真停）",
-            "attached_tools": [],
-            "skills": [],
-            "icon_kind": "text",
-            "adapter_slug": "chatgpt-plus-web",
-        },
-        {
-            "id": "grok-paid",
-            "name": "Grok 付费版",
-            "brand": "xAI Grok",
-            "vendor": "Grok",
-            "model": "待核实具体版本",
-            "verified_version": False,
-            "access_kind": "subscription",
-            "paid": True,
-            "floor": "manager",
-            "role_label": "2楼 经理层 · 实时情报/舆情",
-            "badge": "付费·订阅",
-            "badge_color": "orange",
-            "status": "pending",
-            "account_status": "❓ 待确认（Gao 已确认使用的是 Grok 免费版，未确认付费版）",
-            "specialty": "X 实时热点、舆情分析、快速情报检索",
-            "quota_kind": "subscription",
-            "quota_percent": None,
-            "quota_note": "额度未填（待确认是否付费）",
-            "usage_url": "https://grok.com/",
-            "login_url": "https://grok.com/",
-            "key_env": "",
-            "base_url": "",
-            "fallback_note": "降级后：待核实具体降级档位",
-            "attached_tools": [],
-            "skills": [],
-            "icon_kind": "text",
-            "adapter_slug": "grok-web",
-        },
-        {
-            "id": "qwen-max",
-            "name": "千问 Max",
-            "brand": "阿里千问 Qwen",
-            "vendor": "Qwen",
-            "model": "待核实具体版本",
-            "verified_version": False,
-            "access_kind": "api",
-            "paid": True,
-            "floor": "manager",
-            "role_label": "2楼 经理层 · 中文长文/总结",
-            "badge": "付费·API",
-            "badge_color": "orange",
-            "status": "pending",
-            "account_status": "❓ 待确认（只提过千问名字，尚未确认是否有 Max API Key）",
-            "specialty": "中文长文统筹、深度总结、专业翻译审校",
-            "quota_kind": "api",
-            "quota_percent": None,
-            "quota_note": "额度未填（去阿里百炼控制台查看）",
-            "usage_url": "https://bailian.console.aliyun.com/",
-            "login_url": "",
-            "key_env": "QWEN_API_KEY",
-            "base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1",
-            "fallback_note": "降级后：API余额归0真停",
-            "attached_tools": [],
-            "skills": [],
-            "icon_kind": "text",
-            "adapter_slug": "qwen-api",
-        },
-
-        # === 1楼 员工层 (9个免费/便宜动手模型) ===
-        {
-            "id": "k-exaone-2-5",
-            "name": "K-EXAONE 2.5",
-            "brand": "LG EXAONE",
-            "vendor": "K-EXAONE",
-            "model": "k-exaone_v2.5",
-            "verified_version": True,
-            "access_kind": "api",
-            "paid": False,
-            "floor": "worker",
-            "role_label": "1楼 员工层 · 批量初稿/英韩处理",
-            "badge": "免费·API",
-            "badge_color": "green",
-            "status": "ready",
-            "account_status": "⚠️ 已核实有号（免费至2026-12-10；仅限非商业、仅韩语/英语，单次上限524,288 tokens；2026-11-17早3次真调：前2次401、第3次403 Access denied，需在EXAONE控制台核对模型权限）",
-            "specialty": "512k长上下文、英文/韩语批量初稿、批量分类打标、批量翻译",
-            "quota_kind": "api",
-            "quota_percent": None,
-            "quota_note": "额度未填（无总额度API，仅靠每次响应头 x-day-rate-limit-remaining 读取；id.exaone.ai 登录两次被拒，勿反复重试）",
-            "usage_url": "https://docs.exaone.ai/en/my-profile/api-key",
-            "login_url": "",
-            "key_env": "KEXAONE_API_KEY",
-            "base_url": "https://api.exaone.ai/v1",
-            "fallback_note": "降级后：API报429/403真停（立即换 DeepSeek Flash 或其他免费员工）",
-            "attached_tools": [],
-            "skills": ["batch-translate", "batch-classify", "english-writing"],
-            "icon_kind": "text",
-            "adapter_slug": "kexaone",
-        },
-        {
-            "id": "deepseek-v4-flash",
-            "name": "DeepSeek V4 Flash",
-            "brand": "DeepSeek",
-            "vendor": "DeepSeek",
-            "model": "deepseek-v4-flash（含V3.2）",
-            "verified_version": True,
-            "access_kind": "api",
-            "paid": False,
-            "floor": "worker",
-            "role_label": "1楼 员工层 · 写测试/便宜代码",
-            "badge": "免费·API",
-            "badge_color": "green",
-            "status": "ready",
-            "account_status": "✅ 已核实有号（替代2026-07-24停用的 deepseek-chat；与 DeepSeek V4 Pro 共用同一余额）",
-            "specialty": "写单元测试、便宜代码小活、批量翻译、格式化",
-            "quota_kind": "api",
-            "quota_percent": None,
-            "quota_note": "额度未填（与 DeepSeek V4 Pro 共用同一 API 余额，设 Key 后可自动读）",
-            "usage_url": "https://platform.deepseek.com/usage",
-            "login_url": "",
-            "key_env": "DEEPSEEK_API_KEY",
-            "base_url": "https://api.deepseek.com/v1",
-            "fallback_note": "降级后：API余额归0真停（换 ChatGPT 免费或千问免费网页）",
-            "attached_tools": [],
-            "skills": ["test-cases", "cheap-code-jobs", "batch-translate"],
-            "icon_kind": "text",
-            "adapter_slug": "deepseek-flash",
-        },
-        {
-            "id": "qwen-free-web",
-            "name": "千问 免费网页",
-            "brand": "阿里通义千问",
-            "vendor": "Qwen",
-            "model": "待核实具体版本",
-            "verified_version": False,
-            "access_kind": "web",
-            "paid": False,
-            "floor": "worker",
-            "role_label": "1楼 员工层 · 中文整理/翻译",
-            "badge": "免费·网页",
-            "badge_color": "green",
-            "status": "pending",
-            "account_status": "❓ 待确认（待点「登录一次」确认是否有通义千问免费网页号）",
-            "specialty": "中文批量翻译、名单整理成表格、中文润色、批量分类",
-            "quota_kind": "unknown",
-            "quota_percent": None,
-            "quota_note": "额度未填（去通义千问网页端查看）",
-            "usage_url": "https://tongyi.aliyun.com/",
-            "login_url": "https://tongyi.aliyun.com/",
-            "key_env": "",
-            "base_url": "",
-            "fallback_note": "降级后：今日限流则休息到明天，轮换给豆包/Kimi",
-            "attached_tools": [],
-            "skills": ["table-cleanup", "chinese-polish", "batch-translate"],
-            "icon_kind": "text",
-            "adapter_slug": "qwen-web",
-        },
-        {
-            "id": "qwen-paid-api",
-            "name": "千问 付费 API",
-            "brand": "阿里百炼 Qwen",
-            "vendor": "Qwen",
-            "model": "待核实具体版本",
-            "verified_version": False,
-            "access_kind": "api",
-            "paid": True,
-            "floor": "worker",
-            "role_label": "1楼 员工层 · API批量格式化/摘要",
-            "badge": "付费·API",
-            "badge_color": "orange",
-            "status": "pending",
-            "account_status": "❓ 待确认（与千问免费网页拆成两个独立图标；待确认百炼 API Key）",
-            "specialty": "API并行批量摘要、分类打标、表格格式化",
-            "quota_kind": "api",
-            "quota_percent": None,
-            "quota_note": "额度未填（去阿里百炼控制台查看）",
-            "usage_url": "https://bailian.console.aliyun.com/",
-            "login_url": "",
-            "key_env": "QWEN_API_KEY",
-            "base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1",
-            "fallback_note": "降级后：API余额归0真停",
-            "attached_tools": [],
-            "skills": ["table-cleanup", "batch-classify"],
-            "icon_kind": "text",
-            "adapter_slug": "qwen-api",
-        },
-        {
-            "id": "gemini-flash-lite",
-            "name": "Gemini Flash-Lite",
-            "brand": "Google Gemini",
-            "vendor": "Gemini",
-            "model": "待核实具体版本",
-            "verified_version": False,
-            "access_kind": "web",
-            "paid": False,
-            "floor": "worker",
-            "role_label": "1楼 员工层 · 长上下文小活/Pro降级形态",
-            "badge": "免费·网页",
-            "badge_color": "green",
-            "status": "ready",
-            "account_status": "✅ 已核实有号（Gemini 免费档 / Pro 额度用尽后的自动降级形态）",
-            "specialty": "长上下文速读、轻量问答、小批量摘要",
-            "quota_kind": "subscription",
-            "quota_percent": None,
-            "quota_note": "额度未填（见 gemini.google.com/usage 实时页面）",
-            "usage_url": "https://gemini.google.com/usage",
-            "login_url": "https://gemini.google.com/",
-            "key_env": "",
-            "base_url": "",
-            "fallback_note": "降级后：本身即为降级轻量模型，只接边角小任务",
-            "attached_tools": [],
-            "skills": ["long-text-speed-read"],
-            "icon_kind": "text",
-            "adapter_slug": "gemini-flash-web",
-        },
-        {
-            "id": "chatgpt-free",
-            "name": "ChatGPT 免费",
-            "brand": "OpenAI ChatGPT",
-            "vendor": "ChatGPT",
-            "model": "待核实具体版本",
-            "verified_version": False,
-            "access_kind": "web",
-            "paid": False,
-            "floor": "worker",
-            "role_label": "1楼 员工层 · 英文写作/小代码",
-            "badge": "免费·网页",
-            "badge_color": "green",
-            "status": "ready",
-            "account_status": "✅ 已核实有号（Gao 本人确认有免费版账号，与 GPT Plus 拆开独立计算）",
-            "specialty": "英文写作小活、简单代码、单元测试草稿",
-            "quota_kind": "subscription",
-            "quota_percent": None,
-            "quota_note": "额度未填（去 ChatGPT Settings -> Usage 查看）",
-            "usage_url": "https://chatgpt.com/#settings/Usage",
-            "login_url": "https://chatgpt.com/",
-            "key_env": "",
-            "base_url": "",
-            "fallback_note": "降级后：mini（免费档达到周期限额后自动降级为 mini，不真停）",
-            "attached_tools": [],
-            "skills": ["english-writing", "cheap-code-jobs"],
-            "icon_kind": "text",
-            "adapter_slug": "chatgpt-web",
-        },
-        {
-            "id": "grok-free",
-            "name": "Grok 免费",
-            "brand": "xAI Grok",
-            "vendor": "Grok",
-            "model": "待核实具体版本",
-            "verified_version": False,
-            "access_kind": "web",
-            "paid": False,
-            "floor": "worker",
-            "role_label": "1楼 员工层 · 网页问答/宣传口号",
-            "badge": "免费·网页",
-            "badge_color": "green",
-            "status": "ready",
-            "account_status": "✅ 已核实有号（Gao 确认免费版，网页 grok.com 可用，手机 GBox App 暂打不开）",
-            "specialty": "宣传口号、英文/中文短平快问答、热点摘要",
-            "quota_kind": "subscription",
-            "quota_percent": None,
-            "quota_note": "额度未填（去 Grok Settings -> Usage 查看）",
-            "usage_url": "https://grok.com/",
-            "login_url": "https://grok.com/",
-            "key_env": "",
-            "base_url": "",
-            "fallback_note": "降级后：触发冷却休息到明天，轮换给其他免费员工",
-            "attached_tools": [],
-            "skills": ["promo-slogans"],
-            "icon_kind": "text",
-            "adapter_slug": "grok-web",
-        },
-        {
-            "id": "kimi-free",
-            "name": "Kimi 免费",
-            "brand": "Moonshot Kimi",
-            "vendor": "Kimi",
-            "model": "待核实具体版本",
-            "verified_version": False,
-            "access_kind": "web",
-            "paid": False,
-            "floor": "worker",
-            "role_label": "1楼 员工层 · 长文三档摘要/速读",
-            "badge": "免费·网页",
-            "badge_color": "green",
-            "status": "pending",
-            "account_status": "❓ 待确认（待点「登录一次」看看是否有号，无号可当场免费注册）",
-            "specialty": "长文三档摘要、长文速读、资料归纳",
-            "quota_kind": "subscription",
-            "quota_percent": None,
-            "quota_note": "额度未填（去 kimi.com 设置 -> 订阅 查看）",
-            "usage_url": "https://kimi.com/",
-            "login_url": "https://kimi.com/",
-            "key_env": "",
-            "base_url": "",
-            "fallback_note": "降级后：今日累了休息，轮换给豆包/Gemini Flash-Lite",
-            "attached_tools": [],
-            "skills": ["three-tier-summary", "long-text-speed-read"],
-            "icon_kind": "text",
-            "adapter_slug": "kimi-web",
-        },
-        {
-            "id": "doubao-free",
-            "name": "豆包 免费",
-            "brand": "字节豆包 Doubao",
-            "vendor": "Doubao",
-            "model": "待核实具体版本",
-            "verified_version": False,
-            "access_kind": "web",
-            "paid": False,
-            "floor": "worker",
-            "role_label": "1楼 员工层 · 中文日常问答/润色",
-            "badge": "免费·网页",
-            "badge_color": "green",
-            "status": "pending",
-            "account_status": "❓ 待确认（待点「登录一次」确认是否有号；简单问答不限，重活有限额）",
-            "specialty": "中文润色、三档摘要、名单整理成表格、宣传口号",
-            "quota_kind": "unknown",
-            "quota_percent": None,
-            "quota_note": "额度未填（官方不给固定数字，无独立查额度页）",
-            "usage_url": "",
-            "login_url": "https://www.doubao.com/",
-            "key_env": "",
-            "base_url": "",
-            "fallback_note": "降级后：重活排队时轮换给千问/Kimi",
-            "attached_tools": [],
-            "skills": ["three-tier-summary", "chinese-polish", "table-cleanup"],
-            "icon_kind": "text",
-            "adapter_slug": "doubao-web",
-        },
-
-        # === 院子休息 (2个：已耗尽 / 待确认) ===
-        {
-            "id": "glm-5-3-flash",
-            "name": "GLM-5.3-Flash",
-            "brand": "智谱 / 国家超算 scnet",
-            "vendor": "GLM",
-            "model": "glm-5.3-flash",
-            "verified_version": True,
-            "access_kind": "api",
-            "paid": False,
-            "floor": "rest",
-            "role_label": "院子休息 · 额度已耗尽 (0%)",
-            "badge": "已耗尽·API",
-            "badge_color": "red",
-            "status": "exhausted",
-            "account_status": "⛔ 已核实有号（10M免费额度4天已用完，2026-11-15实查剩0%，休息等新额度）",
-            "specialty": "批量小任务（当前已停用休息）",
-            "quota_kind": "api",
-            "quota_percent": 0.0,
-            "quota_note": "剩 0%（实查已耗尽，≤10%红条闪烁告警，API归0真停，在院子休息）",
-            "usage_url": "https://www.scnet.cn/",
-            "login_url": "",
-            "key_env": "GLM_API_KEY",
-            "base_url": "https://open.bigmodel.cn/api/paas/v4",
-            "fallback_note": "降级后：API余额 0% 真停（等新活动额度再拖回1楼）",
-            "attached_tools": [],
-            "skills": [],
-            "icon_kind": "text",
-            "adapter_slug": "glm-flash",
-        },
-        {
-            "id": "workbuddy",
-            "name": "WorkBuddy 桌面端",
-            "brand": "腾讯 WorkBuddy",
-            "vendor": "WorkBuddy",
-            "model": "内置免费积分池（多模型路由）",
-            "verified_version": True,
-            "access_kind": "desktop",
-            "paid": False,
-            "floor": "worker",
-            "role_label": "1楼 员工层 · 桌面智能体（本地文件/表格/代码）",
-            "badge": "免费·桌面端",
-            "badge_color": "green",
-            "status": "ready",
-            "account_status": "✅ 已核实本机已安装（AppData\\Local\\WorkBuddy），走官方每月免费积分+签到积分，不花外部API余额",
-            "specialty": "本地文件整理、批量格式转换、表格/文档初稿、本地代码小活（桌面端手动复制交接）",
-            "quota_kind": "subscription",
-            "quota_percent": None,
-            "quota_note": "额度未填（请在 WorkBuddy 客户端内查看每月剩余免费积分）",
-            "usage_url": "",
-            "login_url": "",
-            "key_env": "",
-            "base_url": "",
-            "fallback_note": "降级后：免费积分用完则回院子休息，等下月刷新或每日签到领分",
-            "attached_tools": [],
-            "skills": ["table-cleanup", "cheap-code-jobs", "doc-drafting-frame"],
-            "sub_models": [
-                "Hy4 flash (限时免费 0.00x - 优先白嫖)",
-                "GLM-5.3-Flash 高 (0.08x)",
-                "DeepSeek (夜间折扣 0.11x)",
-                "Hy4 高 (0.29x)",
-                "GLM-5.3 高 (0.69x)",
-                "GLM-5.2 (夜间折扣 0.79x)",
-            ],
-            "icon_kind": "text",
-        },
+            "icon_kind": "chief",
+            "tier": "总管插槽",
+            "expires_at": "",
+        }
     ]
+
+
+SAMPLE_DEMO_TEAM: list[dict[str, Any]] = [
+    {
+        "name": "示例经理 (API)",
+        "vendor": "Vendor-Manager",
+        "model": "manager-model-id",
+        "access_kind": "api",
+        "paid": True,
+        "floor": "manager",
+        "key_env": "SAMPLE_MANAGER_API_KEY",
+        "base_url": "https://api.example.com/v1",
+        "usage_url": "",
+        "specialty": "架构规划、只审 diff / 摘要、最终整合",
+        "tier": "付费·API",
+    },
+    {
+        "name": "示例员工 A (免费 API)",
+        "vendor": "Vendor-Alpha",
+        "model": "alpha-flash",
+        "access_kind": "api",
+        "paid": False,
+        "floor": "worker",
+        "key_env": "SAMPLE_ALPHA_API_KEY",
+        "base_url": "https://api.alpha.example.com/v1",
+        "usage_url": "",
+        "specialty": "批量翻译、单元测试生成、便宜代码小活",
+        "tier": "免费·API",
+    },
+    {
+        "name": "示例员工 B (免费网页)",
+        "vendor": "Vendor-Beta",
+        "model": "待核实具体版本",
+        "access_kind": "web",
+        "paid": False,
+        "floor": "worker",
+        "login_url": "https://example.com/",
+        "usage_url": "",
+        "specialty": "三档摘要、中文润色、名单整理成表格",
+        "tier": "Free 免费版",
+    },
+    {
+        "name": "示例桌面 Agent (桌面端)",
+        "vendor": "Vendor-Desktop",
+        "model": "客户端内置积分池",
+        "access_kind": "desktop",
+        "paid": False,
+        "floor": "worker",
+        "specialty": "本地文件夹整理、@工单.md 读写文件执行",
+        "tier": "Free 免费积分",
+        "sub_models": [
+            "轻量免费子模型 (0.00x 优先)",
+            "标准子模型 (0.30x)",
+        ],
+    },
+]
 
 
 GENERIC_EXAMPLE_TASKS: list[dict[str, Any]] = [
     {
-        "title": "【通用示例 1/4】10 条日常用品英文短句批量翻译成中英对照表",
-        "manager_id": "muse",
-        "assigned_to": "deepseek-v4-flash",
+        "title": "【通用示例 1/4】10 条日用品英文短句批量翻译成中英对照表",
+        "manager_id": "chief",
+        "assigned_to": "",
         "goal": "将 10 条通用日用品英文短句逐条翻译为中文，合成 1 次调用完成，省经理 Token。",
         "input_text": (
             "1. Insulated stainless steel water bottle keeps drinks cold for 24 hours.\n"
@@ -563,15 +147,15 @@ GENERIC_EXAMPLE_TASKS: list[dict[str, Any]] = [
         "skill_slug": "batch-translate",
     },
     {
-        "title": "【通用示例 2/4】杂乱社团活动报名名单去重并整理成标准表格",
-        "manager_id": "muse",
-        "assigned_to": "qwen-free-web",
-        "goal": "把杂乱的社团报名文本去重、对齐列、标出缺失项，由免费中文员工完成。",
+        "title": "【通用示例 2/4】杂乱活动报名名单去重并整理成标准表格",
+        "manager_id": "chief",
+        "assigned_to": "",
+        "goal": "把杂乱的报名文本去重、对齐列、标出缺失项，由免费员工完成。",
         "input_text": (
-            "- 张三 / 人工智能2401班 / 负责宣传海报\n"
-            "- 李四，软件工程2402班，联系电话未填，负责场地签到\n"
-            "- 张三 (重复提交) 人工智能2401班 负责宣传海报\n"
-            "- 王五 | 大数据2401班 | 负责设备调试\n"
+            "- 张三 / 班级A / 负责宣传海报\n"
+            "- 李四，班级B，联系电话未填，负责场地签到\n"
+            "- 张三 (重复提交) 班级A 负责宣传海报\n"
+            "- 王五 | 班级C | 负责设备调试\n"
             "- 赵六 / 班级未写 / 负责摄影记录"
         ),
         "output_format": "Markdown 表格：| 姓名 | 班级 | 分工 | 备注(缺失项标[缺失]) |",
@@ -580,33 +164,33 @@ GENERIC_EXAMPLE_TASKS: list[dict[str, Any]] = [
     },
     {
         "title": "【通用示例 3/4】科普短文生成三档摘要（一句话 / 100字 / 要点清单）",
-        "manager_id": "muse",
-        "assigned_to": "kimi-free",
+        "manager_id": "chief",
+        "assigned_to": "",
         "goal": "对通用科普材料生成三档摘要，供经理 10 秒钟审阅完核心数字与结论。",
         "input_text": (
-            "2026年校园节能改造示范报告（通用示例文本）：教学楼A栋于2026年3月15日完成照明与空调自控改造，"
-            "共更换LED感应灯具420盏、加装温控模块36套。经过90天连续监测，日均耗电量由改造前的1,250千瓦时"
-            "降至875千瓦时，节电率达30.0%，负责巡检的陈工与林工确认设备零故障运行。"
+            "教学楼A栋于2026年3月15日完成照明与空调自控改造，共更换LED感应灯具420盏、"
+            "加装温控模块36套。经过90天连续监测，日均耗电量由改造前的1,250千瓦时降至875千瓦时，"
+            "节电率达30.0%，负责巡检的陈工与林工确认设备零故障运行。"
         ),
         "output_format": "严格分三块：1.【一句话结论】 2.【百字摘要】 3.【关键数字核对清单】",
-        "acceptance": "日期(2026-03-15)、灯具(420盏)、模块(36套)、耗电(1250->875)、节电率(30.0%)、人名(陈工/林工)与原文100%一致。不许自由发挥。",
+        "acceptance": "日期、数字、人名与原文100%一致；字数按去空白后全部字符计。不许自由发挥。",
         "skill_slug": "three-tier-summary",
     },
     {
-        "title": "【通用示例 4/4】通用价格折扣计算纯函数的 3 个边界单元测试用例生成",
-        "manager_id": "deepseek-v4-pro",
-        "assigned_to": "deepseek-v4-flash",
-        "goal": "为通用示例纯函数 calc_discount(price, rate) 编写正常、边界、异常 3 个单元测试。",
-        "input_text": "函数签名：def calc_discount(price: float, rate: float) -> float: # rate in [0.0, 1.0], raises ValueError if price < 0 or rate not in [0, 1]",
-        "output_format": "仅输出 Python unittest/assert 测试函数代码 + 3 行覆盖说明，不改业务代码。",
-        "acceptance": "包含正常折扣(100, 0.8 -> 80)、0折/满折边界(100, 0 -> 0)、负数异常(ValueError)三类断言。不许自由发挥。",
+        "title": "【通用示例 4/4】纯函数 calc_discount 的 3 个边界单元测试生成",
+        "manager_id": "chief",
+        "assigned_to": "",
+        "goal": "为纯函数 calc_discount(price, rate) 编写正常、边界、异常 3 个单元测试。",
+        "input_text": "def calc_discount(price: float, rate: float) -> float: # rate in [0.0, 1.0], raises ValueError if invalid",
+        "output_format": "仅输出 Python 测试函数代码 + 3 行覆盖说明，不改业务代码。",
+        "acceptance": "包含正常折扣(100, 0.8 -> 80)、边界(100, 0 -> 0)、异常(ValueError)三类断言。不许自由发挥。",
         "skill_slug": "test-cases",
     },
 ]
 
 
 class OfficeStore:
-    """Persistent state store backing the 26 office actions + adapter execution."""
+    """Persistent state store backing the office workbench + AgentAdapter execution."""
 
     def __init__(self, state_path: Path | None = None):
         self.state_path = state_path or (Path.home() / ".ai-farm" / "office_state.json")
@@ -659,22 +243,37 @@ class OfficeStore:
         self.state["group_messages"] = [
             {
                 "id": "msg-welcome-1",
-                "sender_id": "muse",
-                "sender_name": "Muse（总管）",
+                "sender_id": "chief",
+                "sender_name": "总管 (Chief)",
                 "sender_role": "chief",
                 "kind": "system_welcome",
                 "text": (
-                    "👋 欢迎来到 **AI 农场办公室**！我是总管 **Muse**。\n"
-                    "• **核心分工**：经理动脑（只看 diff / 摘要），免费员工动手（做翻译、表格、摘要、写测试等边角活），把 Token 和额度开销从付费经理挪到免费员工身上。\n"
-                    "• **真实账本**：左侧 **17 个模型图标**严格按「一个图标 = 一个模型」拆分；Codex 是跑代码的 CLI 工具（挂在 DeepSeek V4 Pro 下共用同一余额，不单占模型图标）。\n"
-                    "• **真实法力值**：目前已实查 **Gemini 4 Argon**（5小时剩 82% / 每周剩 91%）与 **GLM-5.3-Flash**（0% 已用完红条闪烁）；其余未核实的统一标为「**额度未填**」，绝不编造数字。\n"
-                    "• **先搭工作台**：点上方 `🧪 一键塞入通用示例任务` 可体验「群里派单 → 员工认领 → 🔒 私聊汇报（不刷群） → 经理统筹交付 → @你(Gao) 验收」完整闭环！"
+                    "👋 欢迎来到 **AI Farm 开源多级协同工作台**！\n"
+                    "• **纯框架、零预设绑定**：本工作台只提供规范接口与协作场地——你要用什么网页端 AI、接哪家 API、还是用 CLI / 桌面端 Agent，全部由你自己在左下角 **「➕ 招募新 AI Agent」** 按需接入。\n"
+                    "• **四大标准接口**：支持 `🔌 API (环境变量)`、`🌐 网页/订阅 (登录一次)`、`⌨️ CLI 工具`、`🖥️ 桌面应用 (@工单.md)`。\n"
+                    "• **快速体验**：可以先点顶部 **「🎭 载入示例团队」** 体验一次完整的「派单 → 员工认领 → 🔒私聊汇报 → 经理交付 → 验收」流程！"
                 ),
                 "created_at": _now_iso(),
             }
         ]
         self.save()
         return self.state
+
+    def loadsampleteam(self) -> dict[str, Any]:
+        """Populate anonymous placeholder agents so new OSS users can test the workflow."""
+        added = []
+        for item in SAMPLE_DEMO_TEAM:
+            try:
+                ag = self.createagent(dict(item))
+                if item.get("sub_models"):
+                    ag["sub_models"] = list(item["sub_models"])
+                if item.get("tier"):
+                    ag["tier"] = item["tier"]
+                added.append(ag["name"])
+            except ValueError:
+                pass
+        self.save()
+        return {"added_count": len(added), "added": added}
 
     # ------------------------------------------------------------------
     # Action 1: listagents
@@ -696,7 +295,7 @@ class OfficeStore:
         return {"agents": agents, "grouped": grouped, "low_quota_alerts": low_quota}
 
     # ------------------------------------------------------------------
-    # Action 2: createagent (Two-path Recruit Modal: API vs Web/Subscription)
+    # Action 2: createagent (4 Channels: API / Web-Sub / CLI / Desktop)
     # ------------------------------------------------------------------
     def createagent(self, payload: dict[str, Any]) -> dict[str, Any]:
         name = (payload.get("name") or "").strip()
@@ -709,12 +308,12 @@ class OfficeStore:
 
         if not name or not vendor:
             raise ValueError("招募失败：名字（name）和厂商（vendor）不能为空。")
-        if access_kind not in ("api", "web", "subscription"):
-            raise ValueError("招募失败：接入方式只能是 api / web / subscription。")
+        if access_kind not in ("api", "web", "subscription", "cli", "desktop"):
+            raise ValueError("招募失败：接入方式只能是 api / web / subscription / cli / desktop。")
         if floor not in ("manager", "worker", "rest"):
             raise ValueError("招募失败：楼层只能是 manager / worker / rest。")
 
-        # Rule 1 & Rule 2 check: no duplicate vendor + model + access_kind
+        # Rule 1 & Rule 2: one icon = one model + one access mode (no cloning same pool)
         for existing in self.state["agents"]:
             if (existing["vendor"].lower() == vendor.lower()
                     and existing["model"].lower() == model.lower()
@@ -728,11 +327,12 @@ class OfficeStore:
         base_url = (payload.get("base_url") or "").strip()
         login_url = (payload.get("login_url") or "").strip()
         usage_url = (payload.get("usage_url") or "").strip()
+        executable = (payload.get("executable") or "").strip()
         fallback_note = (payload.get("fallback_note") or "").strip()
 
         if access_kind == "api":
             if not key_env:
-                raise ValueError("API 招募必须填写环境变量名（如 DEEPSEEK_API_KEY），不能留空。")
+                raise ValueError("API 招募必须填写环境变量名（如 MY_API_KEY），不能留空。")
             if not re.fullmatch(r"[A-Z][A-Z0-9_]*", key_env) or key_env.startswith("SK-"):
                 raise ValueError(
                     "安全拦截：环境变量名必须是大写字母+下划线（如 DEEPSEEK_API_KEY）。"
@@ -741,9 +341,28 @@ class OfficeStore:
             badge = f"{'付费' if paid else '免费'}·API"
             badge_color = "orange" if paid else "green"
             quota_kind = "api"
-            account_status = f"✅ 已招募 API 接口（读取环境变量 ${key_env}，密钥不落盘）"
+            account_status = f"✅ 已接入 API 接口（读取系统环境变量 ${key_env}，密钥不落盘）"
+            adapter_slug = payload.get("adapter_slug") or "custom-api"
             if not fallback_note:
                 fallback_note = "降级后：API余额归0或429真停（自动换其他免费员工）"
+        elif access_kind == "cli":
+            if not executable:
+                raise ValueError("CLI 工具招募必须填写可执行命令名（如 codex / codebuddy）。")
+            badge = f"{'付费' if paid else '免费'}·CLI"
+            badge_color = "orange" if paid else "green"
+            quota_kind = "unknown"
+            account_status = f"⌨️ 本地 CLI Agent（命令：{executable}，通过 subprocess 读写工作区）"
+            adapter_slug = payload.get("adapter_slug") or "cli-generic"
+            if not fallback_note:
+                fallback_note = "降级后：CLI 未安装或报错时自动换其他员工"
+        elif access_kind == "desktop":
+            badge = f"{'付费' if paid else '免费'}·桌面端"
+            badge_color = "orange" if paid else "green"
+            quota_kind = "subscription"
+            account_status = "🖥️ 桌面端 Agent（走工作空间 @工单.md 半自动协同）"
+            adapter_slug = ""
+            if not fallback_note:
+                fallback_note = "降级后：免费积分用完则回院子休息或切 0.00x 子模型"
         else:
             if not login_url:
                 raise ValueError("网页 / 订阅制招募必须填写厂商登录页 URL（login_url）。")
@@ -754,6 +373,7 @@ class OfficeStore:
             badge_color = "orange" if is_sub else "green"
             quota_kind = "subscription" if is_sub else "unknown"
             logged_in = bool(payload.get("logged_in", False))
+            adapter_slug = payload.get("adapter_slug") or "custom-web"
             account_status = (
                 "✅ 已在厂商页面点过「登录一次」（本地会话 ~/.ai-farm/sessions/）"
                 if logged_in else "❓ 待点「登录一次」在厂商官网登录自己的账号"
@@ -785,17 +405,21 @@ class OfficeStore:
             "account_status": account_status,
             "specialty": specialty,
             "quota_kind": quota_kind,
-            "quota_percent": None,  # Never invent a quota percentage on recruit!
-            "quota_note": payload.get("quota_note") or "额度未填（新招募，未实查前不编造百分比）",
+            "quota_percent": None,  # Never invent a quota percentage on recruit
+            "quota_note": payload.get("quota_note") or "额度未填（未实查前不编造百分比）",
             "usage_url": usage_url,
             "login_url": login_url,
             "key_env": key_env,
             "base_url": base_url,
+            "executable": executable,
             "fallback_note": fallback_note,
             "attached_tools": [],
             "skills": [],
+            "sub_models": list(payload.get("sub_models") or []),
+            "tier": payload.get("tier") or badge,
+            "expires_at": payload.get("expires_at") or "",
             "icon_kind": "text",
-            "adapter_slug": "custom-api" if access_kind == "api" else "custom-web",
+            "adapter_slug": adapter_slug,
         }
         if access_kind in ("web", "subscription") and payload.get("logged_in"):
             sdir = session_dir(slug_id)
@@ -805,9 +429,10 @@ class OfficeStore:
                 encoding="utf-8",
             )
         self.state["agents"].append(agent)
+        chief = self._chief_agent()
         self._append_group_msg(
-            sender_id="muse",
-            sender_name="Muse（总管）",
+            sender_id=chief["id"],
+            sender_name=chief["name"],
             kind="system_notice",
             text=f"🎉 新招募成员入驻：**{name}**（`{badge}` · 厂商：{vendor} · 模型：{model}），已安排至 **{agent['role_label']}**。",
         )
@@ -820,7 +445,8 @@ class OfficeStore:
     def updateagent(self, payload: dict[str, Any]) -> dict[str, Any]:
         agent = self._find_agent(payload.get("id") or payload.get("agent_id"))
         for field in ("name", "brand", "vendor", "model", "specialty", "status",
-                      "account_status", "usage_url", "login_url", "base_url", "fallback_note"):
+                      "account_status", "usage_url", "login_url", "base_url",
+                      "fallback_note", "tier", "expires_at", "executable"):
             if field in payload and payload[field] is not None:
                 agent[field] = payload[field]
         if "key_env" in payload and payload["key_env"]:
@@ -848,9 +474,10 @@ class OfficeStore:
         elif new_floor in ("manager", "worker") and agent["status"] == "tired":
             agent["status"] = "ready"
         if old_floor != new_floor:
+            chief = self._chief_agent()
             self._append_group_msg(
-                sender_id="muse",
-                sender_name="Muse（总管）",
+                sender_id=chief["id"],
+                sender_name=chief["name"],
                 kind="system_notice",
                 text=f"🔄 岗位调动：**{agent['name']}** 已从「{floor_names.get(old_floor, old_floor)}」移至「**{floor_names[new_floor]}**」。",
             )
@@ -862,8 +489,8 @@ class OfficeStore:
     # ------------------------------------------------------------------
     def deleteagent(self, payload: dict[str, Any]) -> dict[str, Any]:
         agent_id = payload.get("id") or payload.get("agent_id")
-        if agent_id == "muse":
-            raise ValueError("总管 Muse 是唯一对接口，不能移除。")
+        if agent_id in ("chief", "muse"):
+            raise ValueError("总管是唯一对接口，不能移除。")
         before = len(self.state["agents"])
         self.state["agents"] = [a for a in self.state["agents"] if a["id"] != agent_id]
         if len(self.state["agents"]) == before:
@@ -901,12 +528,12 @@ class OfficeStore:
         return self.state["group_messages"]
 
     def postgroupmessage(self, payload: dict[str, Any]) -> dict[str, Any]:
-        sender_id = payload.get("sender_id") or "gao"
+        sender_id = payload.get("sender_id") or "owner"
         text = (payload.get("text") or "").strip()
         if not text:
             raise ValueError("群聊消息内容不能为空。")
-        if sender_id == "gao":
-            sender_name = "你 (Gao)"
+        if sender_id in ("owner", "gao"):
+            sender_name = "你 (董事长)"
             sender_role = "chairman"
         else:
             ag = self._find_agent(sender_id)
@@ -948,12 +575,15 @@ class OfficeStore:
         title = (payload.get("title") or "").strip()
         if not title:
             raise ValueError("任务标题不能为空。")
-        manager_id = payload.get("manager_id") or "muse"
-        manager = self._find_agent(manager_id)
+        chief = self._chief_agent()
+        manager_id = payload.get("manager_id") or chief["id"]
+        try:
+            manager = self._find_agent(manager_id)
+        except KeyError:
+            manager = chief
         assigned_to = payload.get("assigned_to") or ""
         assigned_agent = self._find_agent(assigned_to) if assigned_to else None
 
-        # Enforce Rule 3: Small edge tasks go to workers, never managers!
         if assigned_agent and assigned_agent["floor"] == "manager" and not payload.get("allow_manager_execution"):
             raise ValueError(
                 f"违反「小任务不请经理」规则：{assigned_agent['name']} 是 2楼经理，只负责动脑规划与审阅 diff/摘要，"
@@ -981,7 +611,7 @@ class OfficeStore:
             "acceptance": acceptance,
             "rule_footer": "不许自由发挥。不确定写「未核实」，绝不乱猜。",
             "skill_slug": skill_slug,
-            "status": "assigned",  # assigned -> accepted -> working -> delivered -> accepted_done / rejected
+            "status": "assigned",
             "worker_reported": False,
             "latest_report_summary": "",
             "final_delivery_text": "",
@@ -1027,7 +657,12 @@ class OfficeStore:
 
     def seedexampletask(self) -> dict[str, Any]:
         idx = int(self.state.get("example_cursor", 0)) % len(GENERIC_EXAMPLE_TASKS)
-        tpl = GENERIC_EXAMPLE_TASKS[idx]
+        tpl = dict(GENERIC_EXAMPLE_TASKS[idx])
+        chief = self._chief_agent()
+        tpl["manager_id"] = chief["id"]
+        ready_workers = [a for a in self.state["agents"] if a["floor"] == "worker" and a["status"] == "ready"]
+        if ready_workers:
+            tpl["assigned_to"] = ready_workers[0]["id"]
         self.state["example_cursor"] = idx + 1
         return self.createtask(tpl)
 
@@ -1038,10 +673,9 @@ class OfficeStore:
         task = self._find_task(payload.get("task_id") or payload.get("id"))
         worker_id = payload.get("worker_id") or task.get("assigned_to")
         if not worker_id:
-            # Pick first ready worker
             ready_workers = [a for a in self.state["agents"] if a["floor"] == "worker" and a["status"] == "ready"]
             if not ready_workers:
-                raise ValueError("当前没有空闲的 1楼员工可认领任务。")
+                raise ValueError("当前没有 1楼 员工可认领任务，请先点击左下角「➕ 招募新 AI Agent」或顶部「🎭 载入示例团队」。")
             worker = ready_workers[0]
         else:
             worker = self._find_agent(worker_id)
@@ -1080,8 +714,12 @@ class OfficeStore:
 
     def postmessage(self, payload: dict[str, Any]) -> dict[str, Any]:
         task = self._find_task(payload.get("task_id"))
-        sender_id = payload.get("sender_id") or task.get("assigned_to") or "muse"
-        sender = self._find_agent(sender_id) if sender_id != "gao" else {"id": "gao", "name": "你 (Gao)"}
+        chief = self._chief_agent()
+        sender_id = payload.get("sender_id") or task.get("assigned_to") or chief["id"]
+        if sender_id in ("owner", "gao"):
+            sender = {"id": "owner", "name": "你 (董事长)"}
+        else:
+            sender = self._find_agent(sender_id)
         text = (payload.get("text") or "").strip()
         is_delivery = bool(payload.get("is_delivery", True))
         if not text:
@@ -1100,7 +738,6 @@ class OfficeStore:
             task["latest_report_summary"] = text[:280] + ("..." if len(text) > 280 else "")
             if task["status"] in ("assigned", "accepted"):
                 task["status"] = "working"
-            # Rule 5: Group chat gets ONLY a 🔒 notice, NEVER the report body!
             self._append_group_msg(
                 sender_id=sender["id"],
                 sender_name=sender["name"],
@@ -1125,10 +762,11 @@ class OfficeStore:
         if new_status not in valid:
             raise ValueError(f"状态必须是 {valid} 之一。")
         task["status"] = new_status
+        chief = self._chief_agent()
         self._append_task_msg(
             task["id"],
-            sender_id="muse",
-            sender_name="Muse（总管）",
+            sender_id=chief["id"],
+            sender_name=chief["name"],
             kind="system",
             text=f"📌 任务状态更新为：{new_status}",
         )
@@ -1155,7 +793,6 @@ class OfficeStore:
             except KeyError:
                 pass
 
-        # Hard Rule 2 & §5: Reassign ONLY to a DIFFERENT vendor!
         if old_vendor and target["vendor"].strip().lower() == old_vendor.strip().lower():
             raise ValueError(
                 f"违反「免费农场不同厂商轮换」规则：当前执行者 {old_name} 与目标 {target['name']} "
@@ -1169,14 +806,15 @@ class OfficeStore:
         task["assigned_vendor"] = target["vendor"]
         task["status"] = "working"
 
+        chief = self._chief_agent()
         note = (
             f"↪ **跨厂商轮换转交**：由 **{old_name}**（{old_vendor or '原通道'}）转交给 "
             f"**@{target['name']}**（{target['vendor']} · `{target['badge']}`）。原因：{reason}"
         )
-        self._append_task_msg(task["id"], sender_id="muse", sender_name="Muse（总管）", kind="transfer", text=note)
+        self._append_task_msg(task["id"], sender_id=chief["id"], sender_name=chief["name"], kind="transfer", text=note)
         self._append_group_msg(
-            sender_id="muse",
-            sender_name="Muse（总管）",
+            sender_id=chief["id"],
+            sender_name=chief["name"],
             sender_role="chief",
             kind="transfer_notice",
             task_id=task["id"],
@@ -1196,12 +834,16 @@ class OfficeStore:
         return {"deleted": task_id}
 
     # ------------------------------------------------------------------
-    # Action 17: deliverfinalresult (Manager consolidates -> Group Card)
+    # Action 17: deliverfinalresult
     # ------------------------------------------------------------------
     def deliverfinalresult(self, payload: dict[str, Any]) -> dict[str, Any]:
         task = self._find_task(payload.get("task_id") or payload.get("id"))
-        manager_id = payload.get("manager_id") or task["manager_id"] or "muse"
-        manager = self._find_agent(manager_id)
+        chief = self._chief_agent()
+        manager_id = payload.get("manager_id") or task["manager_id"] or chief["id"]
+        try:
+            manager = self._find_agent(manager_id)
+        except KeyError:
+            manager = chief
         summary = (payload.get("final_text") or payload.get("summary") or "").strip()
         if not summary:
             report_preview = task.get("latest_report_summary") or "（员工已完成规定格式产出，质检通过）"
@@ -1219,7 +861,7 @@ class OfficeStore:
             sender_id=manager["id"],
             sender_name=manager["name"],
             kind="final_delivery",
-            text=f"🏁 经理已统筹交付总结果给 Gao：\n{summary}",
+            text=f"🏁 经理已统筹交付总结果给董事长：\n{summary}",
         )
         self._append_group_msg(
             sender_id=manager["id"],
@@ -1227,13 +869,13 @@ class OfficeStore:
             sender_role="manager",
             kind="final_delivery_card",
             task_id=task["id"],
-            text=f"🏁 **最终交付 · 总结果 · 给 Gao**\n任务：`{task['id']}` 《{task['title']}》\n@你 (Gao) 请验收：\n\n{summary}",
+            text=f"🏁 **最终交付 · 总结果 · 给 董事长 (You)**\n任务：`{task['id']}` 《{task['title']}》\n@你 (董事长) 请验收：\n\n{summary}",
         )
         self.save()
         return task
 
     # ------------------------------------------------------------------
-    # Action 18: reviewfinalresult (Gao accepts or rejects)
+    # Action 18: reviewfinalresult
     # ------------------------------------------------------------------
     def reviewfinalresult(self, payload: dict[str, Any]) -> dict[str, Any]:
         task = self._find_task(payload.get("task_id") or payload.get("id"))
@@ -1241,15 +883,15 @@ class OfficeStore:
         comment = (payload.get("comment") or "").strip()
         if decision in ("verified", "accepted", "pass", "accept"):
             task["status"] = "accepted_done"
-            text = f"✅ **你 (Gao) 已验收通过** 任务 `{task['id']}`《{task['title']}》！" + (f" 批注：{comment}" if comment else "")
+            text = f"✅ **你 (董事长) 已验收通过** 任务 `{task['id']}`《{task['title']}》！" + (f" 批注：{comment}" if comment else "")
         else:
             task["status"] = "rejected"
-            text = f"↩ **你 (Gao) 打回重做** 任务 `{task['id']}`《{task['title']}》！" + (f" 原因：{comment}" if comment else " 请按验收标准修正后重新汇报。")
+            text = f"↩ **你 (董事长) 打回重做** 任务 `{task['id']}`《{task['title']}》！" + (f" 原因：{comment}" if comment else " 请按验收标准修正后重新汇报。")
 
-        self._append_task_msg(task["id"], sender_id="gao", sender_name="你 (Gao)", kind="review", text=text)
+        self._append_task_msg(task["id"], sender_id="owner", sender_name="你 (董事长)", kind="review", text=text)
         self._append_group_msg(
-            sender_id="gao",
-            sender_name="你 (Gao)",
+            sender_id="owner",
+            sender_name="你 (董事长)",
             sender_role="chairman",
             kind="review_notice",
             task_id=task["id"],
@@ -1259,7 +901,7 @@ class OfficeStore:
         return task
 
     # ------------------------------------------------------------------
-    # Action 19–25: Skill Center (12 seed skills + Senior Model Judgment)
+    # Action 19–25: Skill Center
     # ------------------------------------------------------------------
     def listskills(self) -> dict[str, Any]:
         skills = self.state["skills"]
@@ -1345,7 +987,8 @@ class OfficeStore:
         return agent
 
     def analyzeskillassignments(self, payload: dict[str, Any]) -> dict[str, Any]:
-        judge_id = payload.get("judge_id") or "muse"
+        chief = self._chief_agent()
+        judge_id = payload.get("judge_id") or chief["id"]
         try:
             judge_name = self._find_agent(judge_id)["name"]
         except KeyError:
@@ -1354,7 +997,8 @@ class OfficeStore:
         return {"judge": judge_name, "recommendations": recs}
 
     def applyskillassignments(self, payload: dict[str, Any]) -> dict[str, Any]:
-        judge_name = payload.get("judge") or "Muse（总管）"
+        chief = self._chief_agent()
+        judge_name = payload.get("judge") or chief["name"]
         assignments = payload.get("assignments") or []
         applied = []
         for item in assignments:
@@ -1365,12 +1009,12 @@ class OfficeStore:
                 applied.append(f"{ag['name']} ➕ 装配「{item.get('skill_name', sk_slug)}」")
         if applied:
             self._append_group_msg(
-                sender_id="muse",
+                sender_id=chief["id"],
                 sender_name=judge_name,
                 sender_role="chief",
                 kind="skill_judge_notice",
                 text=(
-                    f"🧠 **技能中心 · 高级模型裁判通知（裁判：{judge_name}，经你(Gao)勾选批准）**\n"
+                    f"🧠 **技能中心 · 高级模型裁判通知（裁判：{judge_name}，经你勾选批准）**\n"
                     f"已为团队成员装配以下固定流程 Skill（减少自由思考、提高准确度、省免费额度）：\n• "
                     + "\n• ".join(applied)
                 ),
@@ -1379,14 +1023,19 @@ class OfficeStore:
         return {"applied_count": len(applied), "applied": applied}
 
     # ------------------------------------------------------------------
-    # Extra: Bridge to Real AgentAdapter (Dry-Run or Live Execution + Quota Check)
+    # Extra: Bridge to Real AgentAdapter / Sync Profiles / Export Task MD
     # ------------------------------------------------------------------
     def runadaptertask(self, payload: dict[str, Any]) -> dict[str, Any]:
-        """Execute a task via AgentAdapter (dry_run=True by default; live=True calls real API)."""
         task = self._find_task(payload.get("task_id"))
         live = bool(payload.get("live", False))
-        worker_id = payload.get("worker_id") or task.get("assigned_to") or "deepseek-v4-flash"
-        worker = self._find_agent(worker_id)
+        worker_id = payload.get("worker_id") or task.get("assigned_to")
+        if not worker_id:
+            ready_workers = [a for a in self.state["agents"] if a["floor"] == "worker" and a["status"] == "ready"]
+            if not ready_workers:
+                raise ValueError("当前没有 1楼 员工可执行，请先招募至少 1 名员工或载入示例团队。")
+            worker = ready_workers[0]
+        else:
+            worker = self._find_agent(worker_id)
 
         prompt = (
             f"你是执行员工，只做下面这件事，不要做决定。\n"
@@ -1401,7 +1050,7 @@ class OfficeStore:
                 f"【干跑演练 DRY-RUN · 0 额度消耗】\n"
                 f"• 拟调用员工：{worker['name']}（厂商：{worker['vendor']} · 模型：{worker['model']} · `{worker['badge']}`）\n"
                 f"• 通道类型：{worker['access_kind']} "
-                + (f"（读取环境变量 `${worker.get('key_env')}`）" if worker["access_kind"] == "api" else f"（登录页：{worker.get('login_url')}）")
+                + (f"（读取环境变量 `${worker.get('key_env')}`）" if worker["access_kind"] == "api" else f"（入口：{worker.get('login_url') or worker.get('executable') or '桌面工作空间'}）")
                 + f"\n• 降级链就绪：若该员工失败 → 自动换另一家免费员工重试；连续 2 名员工失败 → 才升级给经理 {task['manager_name']}。\n"
                 f"• 本次干跑未发起外部网络请求，花费 Token：0。"
             )
@@ -1414,11 +1063,28 @@ class OfficeStore:
             })
             return {"mode": "dry_run", "worker": worker["name"], "text": dry_text}
 
-        # Live execution via AgentAdapter
         slug = worker.get("adapter_slug") or ""
         if slug not in registered_slugs():
             raise RuntimeError(f"{worker['name']} 尚未绑定已注册的 Adapter slug ({slug})。")
-        adapter = get_adapter(slug)
+        if slug == "custom-api":
+            adapter = get_adapter(
+                "custom-api",
+                vendor=worker["vendor"],
+                model_id=worker["model"],
+                base_url=worker["base_url"],
+                key_env=worker["key_env"],
+                paid=worker["paid"],
+            )
+        elif slug == "cli-generic":
+            adapter = get_adapter(
+                "cli-generic",
+                vendor=worker["vendor"],
+                model_id=worker["model"],
+                executable=worker.get("executable") or "codex",
+                paid=worker["paid"],
+            )
+        else:
+            adapter = get_adapter(slug)
         reply = adapter.chat(prompt)
         usage_info = {
             "live": True,
@@ -1445,11 +1111,28 @@ class OfficeStore:
         return {"mode": "live", "worker": worker["name"], "reply": reply.text, "usage": usage_info}
 
     def checklivequota(self, payload: dict[str, Any]) -> dict[str, Any]:
-        """Attempt live quota & model/profile sync via AgentAdapter (e.g. DeepSeek /user/balance + /models)."""
         agent = self._find_agent(payload.get("agent_id") or payload.get("id"))
         slug = agent.get("adapter_slug") or ""
         if slug in registered_slugs():
-            adapter = get_adapter(slug)
+            if slug == "custom-api" and agent.get("base_url") and agent.get("key_env"):
+                adapter = get_adapter(
+                    "custom-api",
+                    vendor=agent["vendor"],
+                    model_id=agent["model"],
+                    base_url=agent["base_url"],
+                    key_env=agent["key_env"],
+                    paid=agent["paid"],
+                )
+            elif slug == "cli-generic" and agent.get("executable"):
+                adapter = get_adapter(
+                    "cli-generic",
+                    vendor=agent["vendor"],
+                    model_id=agent["model"],
+                    executable=agent["executable"],
+                    paid=agent["paid"],
+                )
+            else:
+                adapter = get_adapter(slug)
             q = adapter.check_quota()
             if q.percent_remaining is not None:
                 agent["quota_percent"] = q.percent_remaining
@@ -1487,7 +1170,6 @@ class OfficeStore:
         }
 
     def syncprofiles(self, payload: dict[str, Any] | None = None) -> dict[str, Any]:
-        """Sync account tier, expiry, local web sessions, and API balance+models across roster."""
         synced = []
         now = _now_iso()
         for agent in self.state["agents"]:
@@ -1510,7 +1192,6 @@ class OfficeStore:
         return {"synced_at": now, "count": len(synced), "details": synced}
 
     def exporttaskmd(self, payload: dict[str, Any]) -> dict[str, Any]:
-        """Export a task to ai-team/tasks/inbox/<task_id>.md for desktop agents (@file trigger)."""
         task = self._find_task(payload.get("task_id") or payload.get("id"))
         out_dir = Path(__file__).resolve().parents[1] / "ai-team" / "tasks" / "inbox"
         out_dir.mkdir(parents=True, exist_ok=True)
@@ -1546,6 +1227,12 @@ class OfficeStore:
     # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------
+    def _chief_agent(self) -> dict[str, Any]:
+        for a in self.state["agents"]:
+            if a.get("access_kind") == "chief" or a["id"] in ("chief", "muse"):
+                return a
+        return self.state["agents"][0] if self.state["agents"] else {"id": "chief", "name": "总管 (Chief)"}
+
     def _find_agent(self, agent_id: str | None) -> dict[str, Any]:
         for a in self.state["agents"]:
             if a["id"] == agent_id:
@@ -1592,7 +1279,10 @@ class OfficeStore:
     def dispatch_action(self, action_name: str, payload: dict[str, Any] | None = None) -> Any:
         payload = payload or {}
         name = action_name.strip().lower()
-        no_arg_actions = {"listagents", "listgroupmessages", "listtasks", "listskills", "seedexampletask", "reset_to_seed", "syncprofiles"}
+        no_arg_actions = {
+            "listagents", "listgroupmessages", "listtasks", "listskills",
+            "seedexampletask", "reset_to_seed", "syncprofiles", "loadsampleteam",
+        }
         if not hasattr(self, name):
             raise ValueError(f"未知的办公室动作: {action_name}")
         fn = getattr(self, name)

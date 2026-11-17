@@ -10,7 +10,7 @@ let APP_STATE = {
   skills: [],
   equippedBy: {},
   byFloor: { manager: [], worker: [], rest: [] },
-  selectedAgentId: "muse",
+  selectedAgentId: "chief",
   selectedTaskId: null,
   recruitLoggedInClicked: false,
   latestRecommendations: [],
@@ -18,209 +18,34 @@ let APP_STATE = {
 };
 
 // =========================================================================
-// 离线后备种子数据（当直接双击 index.html 未开后端时，保持100%同样功能）
+// 离线后备种子数据（纯开源空白工作台：只保留 1 个通用总管槽位，具体模型由用户自己招募）
 // =========================================================================
 const SEED_AGENTS = [
   {
-    id: "muse", name: "Muse（总管）", brand: "Meta (Muse)", vendor: "Meta",
-    model: "Muse 总管（唯一入口）", verified_version: true, access_kind: "chief", paid: false,
-    floor: "manager", role_label: "第1层 总管 / 第2层 统筹经理", badge: "总管·唯一入口", badge_color: "blue",
-    status: "ready", account_status: "✅ 已核实有号（当前总管，持全量上下文）",
-    specialty: "听任务、拆单、派单、记账、质检、整合、汇报、中文理解",
-    quota_kind: "none", quota_percent: null, quota_note: "总管唯一对接口，无独立查额度链接",
+    id: "chief", name: "总管 (Chief)", brand: "Orchestrator", vendor: "Chief",
+    model: "待绑定你的统筹模型", verified_version: false, access_kind: "chief", paid: false,
+    floor: "manager", role_label: "第1层 总管 · 唯一对接口", badge: "总管·唯一入口", badge_color: "blue",
+    status: "ready", account_status: "工作台已就绪：点左下角「➕ 招募新 AI Agent」接入你自己的模型，或点顶部「🎭 载入示例团队」体验。",
+    specialty: "听任务、拆单、派单、记账、质检、整合汇报",
+    quota_kind: "none", quota_percent: null, quota_note: "总管槽位，不绑死特定厂商",
     usage_url: "", login_url: "", key_env: "", base_url: "",
-    fallback_note: "降级后：常驻总管，经理缺席时顶上", attached_tools: [], skills: ["doc-drafting-frame"], icon_kind: "muse"
-  },
-  {
-    id: "gemini-4-argon", name: "Gemini 4 Argon", brand: "Google Gemini", vendor: "Gemini",
-    model: "gemini-4-argon", verified_version: true, access_kind: "subscription", paid: true,
-    floor: "manager", role_label: "2楼 经理层 · 前端/长代码/文档", badge: "付费·订阅", badge_color: "orange",
-    status: "ready", account_status: "✅ 已核实有号（新加坡区，2026-12-15到期/订阅页写12-14，已取消自动续费）",
-    specialty: "前端、大块长代码、Canvas文档、架构设计",
-    quota_kind: "subscription", quota_percent: 82.0,
-    quota_note: "2026-11-16 22:21实查：5小时周期已用18%（剩约82%，2:39重置）；每周已用9%（剩约91%，11月22日0:39重置）",
-    usage_url: "https://gemini.google.com/usage", login_url: "https://gemini.google.com/", key_env: "", base_url: "",
-    fallback_note: "降级后：Gemini Flash-Lite（订阅制到限额不真停，降级后只能干小活）",
-    attached_tools: [], skills: ["doc-drafting-frame", "code-review-checklist"], icon_kind: "text"
-  },
-  {
-    id: "deepseek-v4-pro", name: "DeepSeek V4 Pro", brand: "DeepSeek", vendor: "DeepSeek",
-    model: "deepseek-v4-pro", verified_version: true, access_kind: "api", paid: true,
-    floor: "manager", role_label: "2楼 经理层 · 代码实现/审查", badge: "付费·API", badge_color: "orange",
-    status: "ready", account_status: "✅ 已核实有号（API直连；与 DeepSeek V4 Flash、工具 Codex 共用同一余额）",
-    specialty: "中文代码实现、代码审查、架构落地、高性价比推理",
-    quota_kind: "api", quota_percent: null,
-    quota_note: "额度未填（2026-11-16网页登录受阻；设好 DEEPSEEK_API_KEY 后可调 GET /user/balance 实时读余额）",
-    usage_url: "https://platform.deepseek.com/usage", login_url: "", key_env: "DEEPSEEK_API_KEY", base_url: "https://api.deepseek.com/v1",
-    fallback_note: "降级后：API余额归0或402真停（先换免费员工，不硬烧）",
-    attached_tools: ["🔧 工具 Codex CLI（非模型，不占独立图标，共用本账号 DeepSeek 余额）"],
-    skills: ["code-review-checklist"], icon_kind: "text"
-  },
-  {
-    id: "gpt-plus", name: "GPT Plus", brand: "OpenAI ChatGPT", vendor: "ChatGPT",
-    model: "待核实具体版本", verified_version: false, access_kind: "subscription", paid: true,
-    floor: "manager", role_label: "2楼 经理层 · 架构/复杂推理", badge: "付费·订阅", badge_color: "orange",
-    status: "pending", account_status: "❓ 待确认（Gao 已确认没有订 Plus，目前只有 ChatGPT 免费版）",
-    specialty: "复杂推理、架构对比、代码审查",
-    quota_kind: "subscription", quota_percent: null, quota_note: "额度未填（未开通 Plus，不编造数字）",
-    usage_url: "https://chatgpt.com/#settings/Usage", login_url: "https://chatgpt.com/", key_env: "", base_url: "",
-    fallback_note: "降级后：mini（订阅制到周期限额切 mini，不真停）", attached_tools: [], skills: [], icon_kind: "text"
-  },
-  {
-    id: "grok-paid", name: "Grok 付费版", brand: "xAI Grok", vendor: "Grok",
-    model: "待核实具体版本", verified_version: false, access_kind: "subscription", paid: true,
-    floor: "manager", role_label: "2楼 经理层 · 实时情报/舆情", badge: "付费·订阅", badge_color: "orange",
-    status: "pending", account_status: "❓ 待确认（Gao 已确认使用的是 Grok 免费版，未确认付费版）",
-    specialty: "X 实时热点、舆情分析、快速情报检索",
-    quota_kind: "subscription", quota_percent: null, quota_note: "额度未填（待确认是否付费）",
-    usage_url: "https://grok.com/", login_url: "https://grok.com/", key_env: "", base_url: "",
-    fallback_note: "降级后：待核实具体降级档位", attached_tools: [], skills: [], icon_kind: "text"
-  },
-  {
-    id: "qwen-max", name: "千问 Max", brand: "阿里千问 Qwen", vendor: "Qwen",
-    model: "待核实具体版本", verified_version: false, access_kind: "api", paid: true,
-    floor: "manager", role_label: "2楼 经理层 · 中文长文/总结", badge: "付费·API", badge_color: "orange",
-    status: "pending", account_status: "❓ 待确认（只提过千问名字，尚未确认是否有 Max API Key）",
-    specialty: "中文长文统筹、深度总结、专业翻译审校",
-    quota_kind: "api", quota_percent: null, quota_note: "额度未填（去阿里百炼控制台查看）",
-    usage_url: "https://bailian.console.aliyun.com/", login_url: "", key_env: "QWEN_API_KEY", base_url: "https://dashscope.aliyuncs.com/compatible-mode/v1",
-    fallback_note: "降级后：API余额归0真停", attached_tools: [], skills: [], icon_kind: "text"
-  },
-  {
-    id: "k-exaone-2-5", name: "K-EXAONE 2.5", brand: "LG EXAONE", vendor: "K-EXAONE",
-    model: "k-exaone_v2.5", verified_version: true, access_kind: "api", paid: false,
-    floor: "worker", role_label: "1楼 员工层 · 批量初稿/英韩处理", badge: "免费·API", badge_color: "green",
-    status: "ready", account_status: "⚠️ 已核实有号（免费至2026-12-10；仅非商业、仅韩/英；2026-11-17早3次真调401/403 Access denied，需在EXAONE控制台核对模型权限）",
-    specialty: "512k长上下文、英文/韩语批量初稿、批量分类打标、批量翻译",
-    quota_kind: "api", quota_percent: null,
-    quota_note: "额度未填（无总额度API，仅靠每次响应头 x-day-rate-limit-remaining 读取）",
-    usage_url: "https://docs.exaone.ai/en/my-profile/api-key", login_url: "", key_env: "KEXAONE_API_KEY", base_url: "https://api.exaone.ai/v1",
-    fallback_note: "降级后：API报429/403真停（立即换 DeepSeek Flash 或其他免费员工）",
-    attached_tools: [], skills: ["batch-translate", "batch-classify", "english-writing"], icon_kind: "text"
-  },
-  {
-    id: "deepseek-v4-flash", name: "DeepSeek V4 Flash", brand: "DeepSeek", vendor: "DeepSeek",
-    model: "deepseek-v4-flash（含V3.2）", verified_version: true, access_kind: "api", paid: false,
-    floor: "worker", role_label: "1楼 员工层 · 写测试/便宜代码", badge: "免费·API", badge_color: "green",
-    status: "ready", account_status: "✅ 已核实有号（替代2026-07-24停用的 deepseek-chat；与 DeepSeek V4 Pro 共用同一余额）",
-    specialty: "写单元测试、便宜代码小活、批量翻译、格式化",
-    quota_kind: "api", quota_percent: null, quota_note: "额度未填（与 DeepSeek V4 Pro 共用同一 API 余额）",
-    usage_url: "https://platform.deepseek.com/usage", login_url: "", key_env: "DEEPSEEK_API_KEY", base_url: "https://api.deepseek.com/v1",
-    fallback_note: "降级后：API余额归0真停（换 ChatGPT 免费或千问免费网页）",
-    attached_tools: [], skills: ["test-cases", "cheap-code-jobs", "batch-translate"], icon_kind: "text"
-  },
-  {
-    id: "qwen-free-web", name: "千问 免费网页", brand: "阿里通义千问", vendor: "Qwen",
-    model: "待核实具体版本", verified_version: false, access_kind: "web", paid: false,
-    floor: "worker", role_label: "1楼 员工层 · 中文整理/翻译", badge: "免费·网页", badge_color: "green",
-    status: "pending", account_status: "❓ 待确认（待点「登录一次」确认是否有通义千问免费网页号）",
-    specialty: "中文批量翻译、名单整理成表格、中文润色、批量分类",
-    quota_kind: "unknown", quota_percent: null, quota_note: "额度未填（去通义千问网页端查看）",
-    usage_url: "https://tongyi.aliyun.com/", login_url: "https://tongyi.aliyun.com/", key_env: "", base_url: "",
-    fallback_note: "降级后：今日限流则休息到明天，轮换给豆包/Kimi",
-    attached_tools: [], skills: ["table-cleanup", "chinese-polish", "batch-translate"], icon_kind: "text"
-  },
-  {
-    id: "qwen-paid-api", name: "千问 付费 API", brand: "阿里百炼 Qwen", vendor: "Qwen",
-    model: "待核实具体版本", verified_version: false, access_kind: "api", paid: true,
-    floor: "worker", role_label: "1楼 员工层 · API批量格式化/摘要", badge: "付费·API", badge_color: "orange",
-    status: "pending", account_status: "❓ 待确认（与千问免费网页拆成两个独立图标；待确认百炼 API Key）",
-    specialty: "API并行批量摘要、分类打标、表格格式化",
-    quota_kind: "api", quota_percent: null, quota_note: "额度未填（去阿里百炼控制台查看）",
-    usage_url: "https://bailian.console.aliyun.com/", login_url: "", key_env: "QWEN_API_KEY", base_url: "https://dashscope.aliyuncs.com/compatible-mode/v1",
-    fallback_note: "降级后：API余额归0真停", attached_tools: [], skills: ["table-cleanup", "batch-classify"], icon_kind: "text"
-  },
-  {
-    id: "gemini-flash-lite", name: "Gemini Flash-Lite", brand: "Google Gemini", vendor: "Gemini",
-    model: "待核实具体版本", verified_version: false, access_kind: "web", paid: false,
-    floor: "worker", role_label: "1楼 员工层 · 长上下文小活/Pro降级形态", badge: "免费·网页", badge_color: "green",
-    status: "ready", account_status: "✅ 已核实有号（Gemini 免费档 / Pro 额度用尽后的自动降级形态）",
-    specialty: "长上下文速读、轻量问答、小批量摘要",
-    quota_kind: "subscription", quota_percent: null, quota_note: "额度未填（见 gemini.google.com/usage 实时页面）",
-    usage_url: "https://gemini.google.com/usage", login_url: "https://gemini.google.com/", key_env: "", base_url: "",
-    fallback_note: "降级后：本身即为降级轻量模型，只接边角小任务",
-    attached_tools: [], skills: ["long-text-speed-read"], icon_kind: "text"
-  },
-  {
-    id: "chatgpt-free", name: "ChatGPT 免费", brand: "OpenAI ChatGPT", vendor: "ChatGPT",
-    model: "待核实具体版本", verified_version: false, access_kind: "web", paid: false,
-    floor: "worker", role_label: "1楼 员工层 · 英文写作/小代码", badge: "免费·网页", badge_color: "green",
-    status: "ready", account_status: "✅ 已核实有号（Gao 本人确认有免费版账号，与 GPT Plus 拆开独立计算）",
-    specialty: "英文写作小活、简单代码、单元测试草稿",
-    quota_kind: "subscription", quota_percent: null, quota_note: "额度未填（去 ChatGPT Settings -> Usage 查看）",
-    usage_url: "https://chatgpt.com/#settings/Usage", login_url: "https://chatgpt.com/", key_env: "", base_url: "",
-    fallback_note: "降级后：mini（免费档达到周期限额后自动降级为 mini，不真停）",
-    attached_tools: [], skills: ["english-writing", "cheap-code-jobs"], icon_kind: "text"
-  },
-  {
-    id: "grok-free", name: "Grok 免费", brand: "xAI Grok", vendor: "Grok",
-    model: "待核实具体版本", verified_version: false, access_kind: "web", paid: false,
-    floor: "worker", role_label: "1楼 员工层 · 网页问答/宣传口号", badge: "免费·网页", badge_color: "green",
-    status: "ready", account_status: "✅ 已核实有号（Gao 确认免费版，网页 grok.com 可用，手机 GBox App 暂打不开）",
-    specialty: "宣传口号、英文/中文短平快问答、热点摘要",
-    quota_kind: "subscription", quota_percent: null, quota_note: "额度未填（去 Grok Settings -> Usage 查看）",
-    usage_url: "https://grok.com/", login_url: "https://grok.com/", key_env: "", base_url: "",
-    fallback_note: "降级后：触发冷却休息到明天，轮换给其他免费员工",
-    attached_tools: [], skills: ["promo-slogans"], icon_kind: "text"
-  },
-  {
-    id: "kimi-free", name: "Kimi 免费", brand: "Moonshot Kimi", vendor: "Kimi",
-    model: "待核实具体版本", verified_version: false, access_kind: "web", paid: false,
-    floor: "worker", role_label: "1楼 员工层 · 长文三档摘要/速读", badge: "免费·网页", badge_color: "green",
-    status: "pending", account_status: "❓ 待确认（待点「登录一次」看看是否有号，无号可当场免费注册）",
-    specialty: "长文三档摘要、长文速读、资料归纳",
-    quota_kind: "subscription", quota_percent: null, quota_note: "额度未填（去 kimi.com 设置 -> 订阅 查看）",
-    usage_url: "https://kimi.com/", login_url: "https://kimi.com/", key_env: "", base_url: "",
-    fallback_note: "降级后：今日累了休息，轮换给豆包/Gemini Flash-Lite",
-    attached_tools: [], skills: ["three-tier-summary", "long-text-speed-read"], icon_kind: "text"
-  },
-  {
-    id: "doubao-free", name: "豆包 免费", brand: "字节豆包 Doubao", vendor: "Doubao",
-    model: "待核实具体版本", verified_version: false, access_kind: "web", paid: false,
-    floor: "worker", role_label: "1楼 员工层 · 中文日常问答/润色", badge: "免费·网页", badge_color: "green",
-    status: "pending", account_status: "❓ 待确认（待点「登录一次」确认是否有号；简单问答不限，重活有限额）",
-    specialty: "中文润色、三档摘要、名单整理成表格、宣传口号",
-    quota_kind: "unknown", quota_percent: null, quota_note: "额度未填（官方不给固定数字，无独立查额度页）",
-    usage_url: "", login_url: "https://www.doubao.com/", key_env: "", base_url: "",
-    fallback_note: "降级后：重活排队时轮换给千问/Kimi",
-    attached_tools: [], skills: ["three-tier-summary", "chinese-polish", "table-cleanup"], icon_kind: "text"
-  },
-  {
-    id: "glm-5-3-flash", name: "GLM-5.3-Flash", brand: "智谱 / 国家超算 scnet", vendor: "GLM",
-    model: "glm-5.3-flash", verified_version: true, access_kind: "api", paid: false,
-    floor: "rest", role_label: "院子休息 · 额度已耗尽 (0%)", badge: "已耗尽·API", badge_color: "red",
-    status: "exhausted", account_status: "⛔ 已核实有号（10M免费额度4天已用完，2026-11-15实查剩0%，休息等新额度）",
-    specialty: "批量小任务（当前已停用休息）",
-    quota_kind: "api", quota_percent: 0.0,
-    quota_note: "剩 0%（实查已耗尽，≤10%红条闪烁告警，API归0真停，在院子休息）",
-    usage_url: "https://www.scnet.cn/", login_url: "", key_env: "GLM_API_KEY", base_url: "https://open.bigmodel.cn/api/paas/v4",
-    fallback_note: "降级后：API余额 0% 真停（等新活动额度再拖回1楼）", attached_tools: [], skills: [], icon_kind: "text"
-  },
-  {
-    id: "workbuddy", name: "Workbuddy", brand: "Workbuddy（待确认）", vendor: "Workbuddy",
-    model: "待核实具体版本", verified_version: false, access_kind: "web", paid: false,
-    floor: "rest", role_label: "院子休息 · 身份与通道待确认", badge: "待核实·未知", badge_color: "grey",
-    status: "pending", account_status: "❓ 待确认（是App、网页还是机器人尚未确认，排在最后核查）",
-    specialty: "待 Gao 确认具体形态与用途后再排班",
-    quota_kind: "unknown", quota_percent: null, quota_note: "额度未填（无链接，不编造）",
-    usage_url: "", login_url: "", key_env: "", base_url: "",
-    fallback_note: "降级后：待确认", attached_tools: [], skills: [], icon_kind: "text"
+    fallback_note: "由当前最高层级助手或你指定的统筹模型担任", attached_tools: [], skills: ["doc-drafting-frame"], icon_kind: "chief"
   }
 ];
 
 const SEED_SKILLS = [
-  { slug: "batch-translate", name: "批量翻译", category: "语言与翻译", steps: "1. 逐条翻译，不增不减 2. 术语统一 3. 输出双语对照表，不许自由发挥", best_for: "K-EXAONE / Qwen / ChatGPT Free", savings_note: "10条合成1次员工调用，经理只审表格不重读原文，省80%经理Token" },
-  { slug: "table-cleanup", name: "名单整理成表格", category: "数据格式化", steps: "1. 去重 2. 按列对齐为Markdown表格 3. 空值统一标[缺失]，不编造数据", best_for: "Qwen / Doubao", savings_note: "纯格式体力活交免费中文员工，零经理算力消耗" },
-  { slug: "three-tier-summary", name: "三档摘要", category: "阅读与摘要", steps: "1. 一句话结论(≤50字) 2. 300字核心摘要 3. 要点清单；数字、人名、日期严格照原文", best_for: "Kimi / Doubao", savings_note: "让免费长文模型先压成300字，经理只读摘要不读万字原文" },
-  { slug: "long-text-speed-read", name: "长文速读", category: "阅读与摘要", steps: "1. 提取章节骨架 2. 列出所有数字/日期/专有名词原句定位 3. 标注存疑处", best_for: "Kimi / Gemini Flash-Lite", savings_note: "用512k/长窗口免费档做预筛，避免付费主模型一次性吞入数万Token" },
-  { slug: "code-review-checklist", name: "代码审查清单", category: "代码与研发", steps: "1. 逐项核对安全/边界/类型/密钥泄露 2. 只报问题+文件行号+简短原因，不重写全文件", best_for: "DeepSeek Pro / GPT", savings_note: "只看git diff不看全仓，输出限定行号清单，大幅压缩输出Token" },
-  { slug: "test-cases", name: "测试用例生成", category: "代码与研发", steps: "1. 覆盖正常/边界/异常三类输入 2. 只写测试文件代码，绝不修改业务源码", best_for: "DeepSeek Flash / ChatGPT Free", savings_note: "测试样板代码由便宜/免费代码员工生成，本地跑通后再交经理核验" },
-  { slug: "cheap-code-jobs", name: "便宜代码小活", category: "代码与研发", steps: "1. 单文件小函数/类型补齐/注释规范化 2. 仅输出改动片段或完整单文件，不讲原理", best_for: "DeepSeek Flash / ChatGPT Free", savings_note: "边角代码不唤醒Gemini Argon或DeepSeek Pro，直接省下主力额度" },
-  { slug: "chinese-polish", name: "中文润色", category: "语言与翻译", steps: "1. 修正语病与生硬翻译腔 2. 保持原意与全部事实数字不变 3. 给修改前后对比", best_for: "Qwen / Doubao", savings_note: "用免费国产网页模型润色中文段落，不耗付费订阅周期" },
-  { slug: "promo-slogans", name: "宣传口号", category: "创意与文案", steps: "1. 按目标受众生成5条不同风格备选 2. 每条≤20字 3. 附一句适用场景说明", best_for: "Doubao / Qwen / Grok Free", savings_note: "发散型短文案由免费员工批量出备选，Gao直接挑" },
-  { slug: "english-writing", name: "英文写作小活", category: "语言与翻译", steps: "1. 语法与地道表达检查 2. 按指定语气输出 3. 不增删核心信息", best_for: "ChatGPT Free / K-EXAONE", savings_note: "英文短文交给免费GPT网页或K-EXAONE，无需动用付费经理" },
-  { slug: "batch-classify", name: "批量分类打标", category: "数据格式化", steps: "1. 严格按给定标签集合分类 2. 每条输出[编号 -> 标签] 3. 不确定的标unknown，绝不乱猜", best_for: "K-EXAONE / Qwen", savings_note: "分类输出仅几个词，极省completion tokens，适合免费API批量跑" },
-  { slug: "doc-drafting-frame", name: "文档起草框架", category: "规划与架构", steps: "1. 先列二级目录大纲与验收点 2. 标记哪些小节由哪个员工填内容 3. 经理审完大纲再填正文", best_for: "Muse / Gemini Argon / Qwen Max", savings_note: "经理只写200字骨架，几千字正文拆给免费员工填，彻底告别Canvas长输出卡死" },
+  { slug: "batch-translate", name: "批量翻译", category: "语言与翻译", steps: "1. 逐条翻译，不增不减 2. 术语统一 3. 输出双语对照表，不许自由发挥", best_for: "API / 网页免费员工", savings_note: "10条合成1次员工调用，经理只审表格不重读原文，省80%经理Token" },
+  { slug: "table-cleanup", name: "名单整理成表格", category: "数据格式化", steps: "1. 去重 2. 按列对齐为Markdown表格 3. 空值统一标[缺失]，不编造数据", best_for: "中文免费员工", savings_note: "纯格式体力活交免费员工，零经理算力消耗" },
+  { slug: "three-tier-summary", name: "三档摘要", category: "阅读与摘要", steps: "1. 一句话结论(≤50字) 2. 300字核心摘要 3. 要点清单；数字、人名、日期严格照原文", best_for: "长文网页员工", savings_note: "让免费长文模型先压成300字，经理只读摘要不读万字原文" },
+  { slug: "long-text-speed-read", name: "长文速读", category: "阅读与摘要", steps: "1. 提取章节骨架 2. 列出所有数字/日期/专有名词原句定位 3. 标注存疑处", best_for: "长上下文免费员工", savings_note: "用长窗口免费档做预筛，避免付费主模型一次性吞入数万Token" },
+  { slug: "code-review-checklist", name: "代码审查清单", category: "代码与研发", steps: "1. 逐项核对安全/边界/类型/密钥泄露 2. 只报问题+文件行号+简短原因，不重写全文件", best_for: "2楼代码经理", savings_note: "只看git diff不看全仓，输出限定行号清单，大幅压缩输出Token" },
+  { slug: "test-cases", name: "测试用例生成", category: "代码与研发", steps: "1. 覆盖正常/边界/异常三类输入 2. 只写测试文件代码，绝不修改业务源码", best_for: "便宜/免费代码员工", savings_note: "测试样板代码由便宜/免费代码员工生成，本地跑通后再交经理核验" },
+  { slug: "cheap-code-jobs", name: "便宜代码小活", category: "代码与研发", steps: "1. 单文件小函数/类型补齐/注释规范化 2. 仅输出改动片段或完整单文件，不讲原理", best_for: "便宜/免费代码员工", savings_note: "边角代码不唤醒付费主模型，直接省下主力额度" },
+  { slug: "chinese-polish", name: "中文润色", category: "语言与翻译", steps: "1. 修正语病与生硬翻译腔 2. 保持原意与全部事实数字不变 3. 给修改前后对比", best_for: "中文网页免费员工", savings_note: "用免费网页模型润色段落，不耗付费订阅周期" },
+  { slug: "promo-slogans", name: "宣传口号", category: "创意与文案", steps: "1. 按目标受众生成5条不同风格备选 2. 每条≤20字 3. 附一句适用场景说明", best_for: "网页免费员工", savings_note: "发散型短文案由免费员工批量出备选，董事长直接挑" },
+  { slug: "english-writing", name: "英文写作小活", category: "语言与翻译", steps: "1. 语法与地道表达检查 2. 按指定语气输出 3. 不增删核心信息", best_for: "英文免费员工", savings_note: "英文短文交给免费网页或免费API，无需动用付费经理" },
+  { slug: "batch-classify", name: "批量分类打标", category: "数据格式化", steps: "1. 严格按给定标签集合分类 2. 每条输出[编号 -> 标签] 3. 不确定的标unknown，绝不乱猜", best_for: "免费API批量员工", savings_note: "分类输出仅几个词，极省completion tokens，适合免费API批量跑" },
+  { slug: "doc-drafting-frame", name: "文档起草框架", category: "规划与架构", steps: "1. 先列二级目录大纲与验收点 2. 标记哪些小节由哪个员工填内容 3. 经理审完大纲再填正文", best_for: "总管 / 2楼经理", savings_note: "经理只写200字骨架，几千字正文拆给免费员工填，省大量输出额度" },
 ];
 
 // =========================================================================
@@ -232,7 +57,7 @@ async function initOffice() {
     if (resp.ok) {
       const data = await resp.json();
       APP_STATE.backendOnline = true;
-      document.getElementById("connModeBadge").textContent = "🟢 Python 后端已连接 (26 Actions + AgentAdapter)";
+      document.getElementById("connModeBadge").textContent = "🟢 Python 后端已连接 (4通道接口 + AgentAdapter)";
       applySnapshot(data);
       return;
     }
@@ -246,10 +71,10 @@ async function initOffice() {
   APP_STATE.groupMessages = [
     {
       id: "msg-welcome-1",
-      sender_id: "muse",
-      sender_name: "Muse（总管）",
+      sender_id: "chief",
+      sender_name: "总管 (Chief)",
       kind: "system_welcome",
-      text: "👋 欢迎来到 **AI 农场办公室**！我是总管 **Muse**。\n• 左侧 **17 个模型图标**严格按「一个图标 = 一个模型」拆分；Codex 是工具（挂在 DeepSeek V4 Pro 下共用同一余额，不单占模型图标）。\n• 真实法力值：**Gemini 4 Argon**（5小时剩 82% / 每周剩 91%）、**GLM-5.3-Flash**（0% 红条闪烁告警）；未核实的一律标「**额度未填**」。",
+      text: "👋 欢迎来到 **AI Farm 开源工作台**！本框架只提供标准接口与协作场地，具体接什么网页 AI、API 或桌面 Agent，全部由你自己按需招募。",
       created_at: new Date().toLocaleTimeString(),
     }
   ];
@@ -378,14 +203,49 @@ function renderRoster() {
   document.getElementById("countManager").textContent = floors.manager.length;
   document.getElementById("countWorker").textContent = floors.worker.length;
   document.getElementById("countRest").textContent = floors.rest.length;
-  document.getElementById("rosterTotalBadge").textContent = `${APP_STATE.agents.length} 模型图标 + Codex工具`;
+  document.getElementById("rosterTotalBadge").textContent = `${APP_STATE.agents.length} 模型/通道`;
+
+  const emptyHint = {
+    manager: `<div style="font-size:11px;color:#64748b;padding:6px;">暂无经理，可招募强推理模型或拖入此层</div>`,
+    worker: `<div style="font-size:11px;color:#64748b;padding:8px;border:1px dashed #334155;border-radius:6px;">暂无 1楼员工。点左下角「➕ 招募」接入你的免费模型，或点顶部「🎭 载入示例团队」</div>`,
+    rest: `<div style="font-size:11px;color:#64748b;padding:6px;">暂无休息成员</div>`,
+  };
 
   ["manager", "worker", "rest"].forEach(fl => {
     const container = document.getElementById(
       fl === "manager" ? "listManager" : fl === "worker" ? "listWorker" : "listRest"
     );
-    container.innerHTML = floors[fl].map(agent => renderAgentCardHTML(agent)).join("");
+    container.innerHTML = floors[fl].length
+      ? floors[fl].map(agent => renderAgentCardHTML(agent)).join("")
+      : emptyHint[fl];
   });
+
+  // 动态同步发言下拉框、@人按钮、技能中心裁判选择
+  const senderSel = document.getElementById("groupSenderSelect");
+  if (senderSel) {
+    const prev = senderSel.value;
+    const managers = APP_STATE.agents.filter(a => a.floor === "manager");
+    senderSel.innerHTML = `<option value="owner">👑 你 (董事长)</option>` +
+      managers.map(m => `<option value="${m.id}">🏢 ${escapeHTML(m.name)}</option>`).join("");
+    if ([...senderSel.options].some(o => o.value === prev)) senderSel.value = prev;
+  }
+
+  const mentionBar = document.getElementById("quickMentionBar");
+  if (mentionBar) {
+    const workers = APP_STATE.agents.filter(a => a.floor === "worker");
+    mentionBar.innerHTML = workers.length
+      ? `<span class="mention-tip">点此 @人派活：</span>` +
+        workers.slice(0, 6).map(w => `<button type="button" class="chip-btn" onclick="insertMention('@${escapeHTML(w.name)}')">@${escapeHTML(w.name)}</button>`).join("")
+      : `<span class="mention-tip">招募 1楼员工后可在此快捷 @人派活</span>`;
+  }
+
+  const judgeSel = document.getElementById("skillJudgeSelect");
+  if (judgeSel) {
+    const prevJ = judgeSel.value;
+    const managers = APP_STATE.agents.filter(a => a.floor === "manager");
+    judgeSel.innerHTML = managers.map(m => `<option value="${m.id}">🧠 ${escapeHTML(m.name)}</option>`).join("") || `<option value="chief">🔵 总管 (默认裁判)</option>`;
+    if ([...judgeSel.options].some(o => o.value === prevJ)) judgeSel.value = prevJ;
+  }
 }
 
 function renderAgentCardHTML(agent) {
@@ -520,7 +380,7 @@ function renderGroupChat() {
 
   const stream = document.getElementById("groupChatStream");
   stream.innerHTML = APP_STATE.groupMessages.map(msg => {
-    const isGao = msg.sender_id === "gao";
+    const isGao = msg.sender_id === "owner" || msg.sender_id === "gao";
     const task = msg.task_id ? APP_STATE.tasks.find(t => t.id === msg.task_id) : null;
     let actionBarHTML = "";
 
@@ -774,7 +634,7 @@ function renderSelectedTaskThread() {
         ${renderTaskStepFlow(task.status)}
         <div style="font-size:11px;color:#94a3b8;margin-top:6px;">
           • <strong>当前执行员工</strong>：${escapeHTML(task.assigned_name)}（厂商：${escapeHTML(task.assigned_vendor || '待认领')}）<br/>
-          • <strong>省 Token 规则</strong>：员工汇报正文只留在本私聊窗，大群里仅发一条 🔒 提示；经理核验后再点「统筹交付」发回大群给 Gao。
+          • <strong>省 Token 规则</strong>：员工汇报正文只留在本私聊窗，大群里仅发一条 🔒 提示；经理核验后再点「统筹交付」发回大群给董事长。
         </div>
       </div>
 
@@ -792,7 +652,7 @@ function renderSelectedTaskThread() {
             📂 导出 .md + 复制 @触发句
           </button>
           <button class="btn btn-primary" onclick="handleDeliverFinalResult('${task.id}')">
-            📦 经理统筹交付总结果给 Gao
+            📦 经理统筹交付总结果给董事长
           </button>
         </div>
 
@@ -838,14 +698,15 @@ function renderTeamOverview() {
   const managers = APP_STATE.agents.filter(a => a.floor === "manager").length;
   const workers = APP_STATE.agents.filter(a => a.floor === "worker").length;
   const rest = APP_STATE.agents.filter(a => a.floor === "rest").length;
+  const verifiedReady = APP_STATE.agents.filter(a => a.floor !== "rest" && a.status === "ready").length;
   const el = document.getElementById("teamOverviewBox");
   el.innerHTML = `
     <div style="display:flex;justify-content:space-between;margin-bottom:3px;">
-      <strong>📊 农场真实账本总览</strong>
-      <span style="color:#38bdf8;">已真接模型：0（待选试点+配Key）</span>
+      <strong>📊 当前农场账本总览</strong>
+      <span style="color:#38bdf8;">在岗就绪：${verifiedReady} / 总计 ${APP_STATE.agents.length}</span>
     </div>
-    <div>2楼经理 <strong>${managers}</strong> · 1楼免费员工 <strong>${workers}</strong> · 院子休息 <strong>${rest}</strong> · 工具 <strong>Codex</strong>(挂DeepSeek Pro)</div>
-    <div style="color:#94a3b8;margin-top:2px;">已核实有号 7 家：Muse / Gemini Argon(82%) / DeepSeek Pro / K-EXAONE / GLM(0%) / ChatGPT免费 / Grok免费</div>
+    <div>2楼经理 <strong>${managers}</strong> · 1楼员工 <strong>${workers}</strong> · 院子休息 <strong>${rest}</strong></div>
+    <div style="color:#94a3b8;margin-top:2px;">一图标一模型/通道 · 密钥仅读环境变量 · 具体模型全部由你按需招募</div>
   `;
 }
 
@@ -916,7 +777,7 @@ async function handleRunSkillJudge() {
 
   box.innerHTML = `
     <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;flex-wrap:wrap;gap:8px;">
-      <strong>🧠 高级模型裁判「${escapeHTML(res.judge)}」打分推荐清单（请 Gao 打勾批准后应用）：</strong>
+      <strong>🧠 高级模型裁判「${escapeHTML(res.judge)}」打分推荐清单（请勾选批准后应用）：</strong>
       <button class="btn btn-success" onclick="handleApplyApprovedSkills('${escapeHTML(res.judge)}')">
         ✅ 批准并应用勾选项（同步发群通知）
       </button>
@@ -1040,12 +901,12 @@ async function handleReassignTask(taskId) {
 
 async function handleDeliverFinalResult(taskId) {
   await callOfficeAction("deliverfinalresult", { task_id: taskId });
-  showToast("🏁 经理已将统筹最终结果发回大群，请 Gao 验收！");
+  showToast("🏁 经理已将统筹最终结果发回大群，请董事长验收！");
 }
 
 async function handleReviewFinalResult(taskId, decision) {
   await callOfficeAction("reviewfinalresult", { task_id: taskId, decision });
-  showToast(decision === "verified" ? "✅ Gao 已验收通过！" : "↩ 已打回重做！");
+  showToast(decision === "verified" ? "✅ 已验收通过！" : "↩ 已打回重做！");
 }
 
 async function handleSendGroupMessage(event) {
@@ -1087,8 +948,12 @@ function switchRecruitPath(path) {
   document.getElementById("recPathInput").value = path;
   document.getElementById("pathBtnApi").classList.toggle("active", path === "api");
   document.getElementById("pathBtnWeb").classList.toggle("active", path === "web");
+  document.getElementById("pathBtnCli").classList.toggle("active", path === "cli");
+  document.getElementById("pathBtnDesktop").classList.toggle("active", path === "desktop");
   document.getElementById("recApiFields").classList.toggle("hidden", path !== "api");
   document.getElementById("recWebFields").classList.toggle("hidden", path !== "web");
+  document.getElementById("recCliFields").classList.toggle("hidden", path !== "cli");
+  document.getElementById("recDesktopFields").classList.toggle("hidden", path !== "desktop");
 }
 
 function handleLoginOnceClick() {
@@ -1131,6 +996,29 @@ async function handleRecruitSubmit(event) {
       base_url: baseUrl,
       usage_url: usageUrl,
     });
+  } else if (path === "cli") {
+    const paid = document.getElementById("recCliPaid").value === "true";
+    const executable = document.getElementById("recCliExec").value.trim();
+    if (!executable) {
+      showToast("CLI 工具招募必须填写可执行命令名（如 codex）", true);
+      return;
+    }
+    await callOfficeAction("createagent", {
+      name, vendor, model, floor, specialty,
+      access_kind: "cli",
+      paid,
+      executable,
+    });
+  } else if (path === "desktop") {
+    const paid = document.getElementById("recDesktopPaid").value === "true";
+    const rawSubs = document.getElementById("recDesktopSubModels").value.trim();
+    const sub_models = rawSubs ? rawSubs.split(/[,，]/).map(s => s.trim()).filter(Boolean) : [];
+    await callOfficeAction("createagent", {
+      name, vendor, model, floor, specialty,
+      access_kind: "desktop",
+      paid,
+      sub_models,
+    });
   } else {
     const webKind = document.getElementById("recWebKind").value;
     const loginUrl = document.getElementById("recLoginUrl").value.trim();
@@ -1152,6 +1040,13 @@ async function handleRecruitSubmit(event) {
   }
   closeRecruitModal();
   showToast(`🎉 已招募新成员：${name}`);
+}
+
+async function handleLoadSampleTeam() {
+  const res = await callOfficeAction("loadsampleteam");
+  if (res) {
+    showToast(`🎭 已载入 ${res.added_count} 名通用示例团队成员（全部为匿名占位示例，随时可删改）`);
+  }
 }
 
 // =========================================================================

@@ -28,7 +28,7 @@
       <div class="stat-chip">已汇报 <strong id="statReported">0/0</strong></div>
       <div class="stat-chip">已交付 <strong id="statDelivered">0</strong></div>
       <div class="stat-chip stat-ok">已验收 <strong id="statAccepted">0</strong></div>
-      <div class="stat-chip stat-alert" id="statLowQuota" title="点击查看低额度模型">⚠️ 低额度 ≤10%: GLM (0%)</div>
+      <div class="stat-chip stat-alert hidden" id="statLowQuota" title="点击查看低额度模型"></div>
     </div>
 
     <div class="topbar-actions">
@@ -36,16 +36,17 @@
         <button class="view-tab active" id="tabBtnWorkspace" onclick="switchMainView('workspace')">💬 群聊工作台</button>
         <button class="view-tab" id="tabBtnSkills" onclick="switchMainView('skills')">🧠 技能中心 (12)</button>
       </div>
+      <button class="btn btn-ghost" onclick="handleLoadSampleTeam()" title="在空白工作台导入匿名占位示例团队体验分工流程">🎭 载入示例团队</button>
       <button class="btn btn-example" onclick="handleSeedExampleTask()">🧪 一键塞入通用示例任务</button>
       <button class="btn btn-ghost" onclick="handleSyncProfiles()" title="同步全队账户资料：API查余额+模型列表，网页/订阅核对会员等级与到期时间">🔄 同步资料/额度</button>
       <button class="btn btn-primary" onclick="openNewTaskModal()">＋ 派新任务</button>
-      <button class="btn btn-ghost" onclick="handleResetDemo()" title="重置回初始核实花名册与状态">↺ 重置</button>
+      <button class="btn btn-ghost" onclick="handleResetDemo()" title="重置回空白开源工作台">↺ 重置为空白</button>
     </div>
   </header>
 
   <!-- 手机端栏目切换条 (仅窄屏显示) -->
   <div class="mobile-nav">
-    <button class="m-tab active" id="mTabRoster" onclick="switchMobilePane('roster')">👥 团队(17)</button>
+    <button class="m-tab active" id="mTabRoster" onclick="switchMobilePane('roster')">👥 团队</button>
     <button class="m-tab" id="mTabChat" onclick="switchMobilePane('chat')">💬 全员群聊</button>
     <button class="m-tab" id="mTabDetail" onclick="switchMobilePane('detail')">📋 档案/私聊</button>
   </div>
@@ -57,7 +58,7 @@
       <div class="rail-header">
         <div class="rail-title-row">
           <span>👥 团队花名册（1图标=1模型）</span>
-          <span class="rail-count" id="rosterTotalBadge">17 模型 + 1 工具</span>
+          <span class="rail-count" id="rosterTotalBadge">0 成员</span>
         </div>
         <input type="search" id="agentSearchInput" class="search-input" placeholder="🔍 搜索模型 / 厂商 / 特长 / 角标..." oninput="renderRoster()" />
         <div class="drag-hint">💡 拖动任意头像到其他楼层即可换岗（2楼经理 / 1楼员工 / 院子休息）</div>
@@ -68,7 +69,7 @@
         <section class="floor-group" data-floor="manager" ondragover="onFloorDragOver(event)" ondragleave="onFloorDragLeave(event)" ondrop="onFloorDrop(event, 'manager')">
           <div class="floor-header">
             <span>🏢 2楼 经理层（动脑·只看diff/摘要）</span>
-            <span class="floor-badge" id="countManager">6</span>
+            <span class="floor-badge" id="countManager">0</span>
           </div>
           <div class="agent-list" id="listManager"></div>
         </section>
@@ -77,7 +78,7 @@
         <section class="floor-group" data-floor="worker" ondragover="onFloorDragOver(event)" ondragleave="onFloorDragLeave(event)" ondrop="onFloorDrop(event, 'worker')">
           <div class="floor-header">
             <span>🛠️ 1楼 员工层（免费农场轮换·动手）</span>
-            <span class="floor-badge" id="countWorker">9</span>
+            <span class="floor-badge" id="countWorker">0</span>
           </div>
           <div class="agent-list" id="listWorker"></div>
         </section>
@@ -86,7 +87,7 @@
         <section class="floor-group" data-floor="rest" ondragover="onFloorDragOver(event)" ondragleave="onFloorDragLeave(event)" ondrop="onFloorDrop(event, 'rest')">
           <div class="floor-header">
             <span>🌿 院子休息（今日累了/已耗尽/待确认）</span>
-            <span class="floor-badge" id="countRest">2</span>
+            <span class="floor-badge" id="countRest">0</span>
           </div>
           <div class="agent-list" id="listRest"></div>
         </section>
@@ -94,7 +95,7 @@
 
       <div class="rail-footer">
         <button class="btn btn-recruit-full" onclick="openRecruitModal()">
-          ➕ 招募新 AI Agent（API 环境变量 / 网页登录一次）
+          ➕ 招募新 AI Agent（API / 网页 / CLI / 桌面端）
         </button>
       </div>
     </aside>
@@ -119,23 +120,14 @@
         <div class="composer-top">
           <label>发言身份：</label>
           <select id="groupSenderSelect" class="select-sm">
-            <option value="gao">👑 你 (Gao · 董事长)</option>
-            <option value="muse">🔵 Muse（总管）</option>
-            <option value="gemini-4-argon">🟠 Gemini 4 Argon（经理）</option>
-            <option value="deepseek-v4-pro">🟠 DeepSeek V4 Pro（经理）</option>
+            <option value="owner">👑 你 (董事长)</option>
           </select>
           <div class="mention-bar" id="quickMentionBar">
-            <span class="mention-tip">点此 @人派活：</span>
-            <button type="button" class="chip-btn" onclick="insertMention('@DeepSeek V4 Flash')">@DeepSeek Flash</button>
-            <button type="button" class="chip-btn" onclick="insertMention('@K-EXAONE 2.5')">@K-EXAONE</button>
-            <button type="button" class="chip-btn" onclick="insertMention('@千问 免费网页')">@千问免费</button>
-            <button type="button" class="chip-btn" onclick="insertMention('@Kimi 免费')">@Kimi</button>
-            <button type="button" class="chip-btn" onclick="insertMention('@豆包 免费')">@豆包</button>
-            <button type="button" class="chip-btn" onclick="insertMention('@ChatGPT 免费')">@ChatGPT免费</button>
+            <span class="mention-tip">招募 1楼员工后可点击 @人派活</span>
           </div>
         </div>
         <div class="composer-row">
-          <input type="text" id="groupChatInput" class="chat-input" placeholder="作为「你 (Gao)」在群里说话、拍板或 @员工 派活..." />
+          <input type="text" id="groupChatInput" class="chat-input" placeholder="作为「你 (董事长)」在群里说话、拍板或 @员工 派活..." />
           <button type="submit" class="btn btn-primary">发送群消息</button>
         </div>
       </form>
@@ -176,9 +168,7 @@
         <div class="judge-box">
           <label>选择高级模型裁判：</label>
           <select id="skillJudgeSelect" class="select-md">
-            <option value="muse">🔵 Muse（总管 · 默认裁判）</option>
-            <option value="gemini-4-argon">🟠 Gemini 4 Argon（前端/文档经理）</option>
-            <option value="deepseek-v4-pro">🟠 DeepSeek V4 Pro（代码/架构经理）</option>
+            <option value="chief">🔵 总管 (默认裁判)</option>
           </select>
           <button class="btn btn-primary" onclick="handleRunSkillJudge()">🧠 让它判断一次</button>
           <button class="btn btn-ghost" onclick="openNewSkillModal()">＋ 新增自定义技能</button>
@@ -204,14 +194,22 @@
         <button class="close-btn" onclick="closeRecruitModal()">✕</button>
       </div>
       <div class="modal-body">
-        <div class="path-switcher">
+        <div class="path-switcher" style="grid-template-columns: repeat(2, 1fr);">
           <button type="button" class="path-btn active" id="pathBtnApi" onclick="switchRecruitPath('api')">
-            🔌 通道 A：API 接入（付费 / 免费 API）
-            <small>只填环境变量名，页面绝不收 Key 明文</small>
+            🔌 通道 A：API 接入
+            <small>只填环境变量名，绝不收 Key 明文</small>
           </button>
           <button type="button" class="path-btn" id="pathBtnWeb" onclick="switchRecruitPath('web')">
             🌐 通道 B：网页 / 订阅制
-            <small>点「登录一次」在厂商自己页面登录</small>
+            <small>点「登录一次」在厂商页面登录</small>
+          </button>
+          <button type="button" class="path-btn" id="pathBtnCli" onclick="switchRecruitPath('cli')">
+            ⌨️ 通道 C：CLI 命令行 Agent
+            <small>本地直接读写工作区并收 git diff</small>
+          </button>
+          <button type="button" class="path-btn" id="pathBtnDesktop" onclick="switchRecruitPath('desktop')">
+            🖥️ 通道 D：桌面应用端 Agent
+            <small>工作空间 @工单.md 半自动交接</small>
           </button>
         </div>
 
@@ -300,6 +298,46 @@
                 🔑 登录一次（在浏览器打开厂商官网登录页）
               </button>
               <span id="loginOnceStatusBadge" class="login-status-pill">未点登录</span>
+            </div>
+          </div>
+
+          <!-- CLI 命令行专属表单项 -->
+          <div id="recCliFields" class="channel-box hidden">
+            <div class="security-banner web-banner">
+              ⌨️ <strong>CLI 工具规范：</strong>适合在本地终端里跑的 Agent（如 Codex CLI 等）。农场通过 <code>subprocess</code> 在工程目录执行并返回 <code>git diff</code> 给经理审查。
+            </div>
+            <div class="form-grid">
+              <div class="form-group">
+                <label>费用档位 *</label>
+                <select id="recCliPaid">
+                  <option value="false">🟢 免费·CLI</option>
+                  <option value="true">🟠 付费·CLI</option>
+                </select>
+              </div>
+              <div class="form-group">
+                <label>可执行命令名 (Executable) *</label>
+                <input type="text" id="recCliExec" placeholder="例：codex / codebuddy" />
+              </div>
+            </div>
+          </div>
+
+          <!-- 桌面 GUI 应用端专属表单项 -->
+          <div id="recDesktopFields" class="channel-box hidden">
+            <div class="security-banner web-banner">
+              🖥️ <strong>桌面应用准则：</strong>适合带独立免费积分、能直接操作本地文件夹的桌面客户端。在工作台点「导出 .md + 复制 @触发句」即可一键投喂，零封号风险。
+            </div>
+            <div class="form-grid">
+              <div class="form-group">
+                <label>费用档位 *</label>
+                <select id="recDesktopPaid">
+                  <option value="false">🟢 免费·桌面端</option>
+                  <option value="true">🟠 付费·桌面端</option>
+                </select>
+              </div>
+              <div class="form-group">
+                <label>内置子模型/倍率备注（逗号分隔，选填）</label>
+                <input type="text" id="recDesktopSubModels" placeholder="例：限时免费模型 (0.00x), 高级模型 (0.69x)" />
+              </div>
             </div>
           </div>
 
