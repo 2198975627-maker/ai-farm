@@ -1,0 +1,415 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>AI 农场办公室 · 多级 AI 协同工作台 (Open Source)</title>
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+  <!-- 顶部总控栏 -->
+  <header class="topbar">
+    <div class="topbar-brand">
+      <div class="brand-logo" title="AI 农场办公室">🌾</div>
+      <div>
+        <div class="brand-title-row">
+          <h1>AI 农场办公室</h1>
+          <span class="tag-pill tag-goal">目标：边角活交免费员工，省付费经理 Token 与额度</span>
+          <span id="connModeBadge" class="tag-pill tag-conn">检测后端中...</span>
+        </div>
+        <div class="vendor-strip" id="vendorStrip">
+          <!-- 动态渲染各独立厂商条 -->
+        </div>
+      </div>
+    </div>
+
+    <div class="topbar-stats" id="topProgressStats">
+      <div class="stat-chip">已认领 <strong id="statClaimed">0/0</strong></div>
+      <div class="stat-chip">已汇报 <strong id="statReported">0/0</strong></div>
+      <div class="stat-chip">已交付 <strong id="statDelivered">0</strong></div>
+      <div class="stat-chip stat-ok">已验收 <strong id="statAccepted">0</strong></div>
+      <div class="stat-chip stat-alert" id="statLowQuota" title="点击查看低额度模型">⚠️ 低额度 ≤10%: GLM (0%)</div>
+    </div>
+
+    <div class="topbar-actions">
+      <div class="view-tabs">
+        <button class="view-tab active" id="tabBtnWorkspace" onclick="switchMainView('workspace')">💬 群聊工作台</button>
+        <button class="view-tab" id="tabBtnSkills" onclick="switchMainView('skills')">🧠 技能中心 (12)</button>
+      </div>
+      <button class="btn btn-example" onclick="handleSeedExampleTask()">🧪 一键塞入通用示例任务</button>
+      <button class="btn btn-ghost" onclick="handleSyncProfiles()" title="同步全队账户资料：API查余额+模型列表，网页/订阅核对会员等级与到期时间">🔄 同步资料/额度</button>
+      <button class="btn btn-primary" onclick="openNewTaskModal()">＋ 派新任务</button>
+      <button class="btn btn-ghost" onclick="handleResetDemo()" title="重置回初始核实花名册与状态">↺ 重置</button>
+    </div>
+  </header>
+
+  <!-- 手机端栏目切换条 (仅窄屏显示) -->
+  <div class="mobile-nav">
+    <button class="m-tab active" id="mTabRoster" onclick="switchMobilePane('roster')">👥 团队(17)</button>
+    <button class="m-tab" id="mTabChat" onclick="switchMobilePane('chat')">💬 全员群聊</button>
+    <button class="m-tab" id="mTabDetail" onclick="switchMobilePane('detail')">📋 档案/私聊</button>
+  </div>
+
+  <!-- 主体：桌面三栏工作台 -->
+  <main class="main-layout" id="workspaceView">
+    <!-- 左栏：团队名单 + 楼层拖放 + 蓝条法力值 + 底部招募 -->
+    <aside class="left-rail mobile-pane active" id="paneRoster">
+      <div class="rail-header">
+        <div class="rail-title-row">
+          <span>👥 团队花名册（1图标=1模型）</span>
+          <span class="rail-count" id="rosterTotalBadge">17 模型 + 1 工具</span>
+        </div>
+        <input type="search" id="agentSearchInput" class="search-input" placeholder="🔍 搜索模型 / 厂商 / 特长 / 角标..." oninput="renderRoster()" />
+        <div class="drag-hint">💡 拖动任意头像到其他楼层即可换岗（2楼经理 / 1楼员工 / 院子休息）</div>
+      </div>
+
+      <div class="floors-container">
+        <!-- 2楼 经理层 -->
+        <section class="floor-group" data-floor="manager" ondragover="onFloorDragOver(event)" ondragleave="onFloorDragLeave(event)" ondrop="onFloorDrop(event, 'manager')">
+          <div class="floor-header">
+            <span>🏢 2楼 经理层（动脑·只看diff/摘要）</span>
+            <span class="floor-badge" id="countManager">6</span>
+          </div>
+          <div class="agent-list" id="listManager"></div>
+        </section>
+
+        <!-- 1楼 员工层 -->
+        <section class="floor-group" data-floor="worker" ondragover="onFloorDragOver(event)" ondragleave="onFloorDragLeave(event)" ondrop="onFloorDrop(event, 'worker')">
+          <div class="floor-header">
+            <span>🛠️ 1楼 员工层（免费农场轮换·动手）</span>
+            <span class="floor-badge" id="countWorker">9</span>
+          </div>
+          <div class="agent-list" id="listWorker"></div>
+        </section>
+
+        <!-- 院子休息 -->
+        <section class="floor-group" data-floor="rest" ondragover="onFloorDragOver(event)" ondragleave="onFloorDragLeave(event)" ondrop="onFloorDrop(event, 'rest')">
+          <div class="floor-header">
+            <span>🌿 院子休息（今日累了/已耗尽/待确认）</span>
+            <span class="floor-badge" id="countRest">2</span>
+          </div>
+          <div class="agent-list" id="listRest"></div>
+        </section>
+      </div>
+
+      <div class="rail-footer">
+        <button class="btn btn-recruit-full" onclick="openRecruitModal()">
+          ➕ 招募新 AI Agent（API 环境变量 / 网页登录一次）
+        </button>
+      </div>
+    </aside>
+
+    <!-- 中栏：全员大群聊 + 任务进度流转条 -->
+    <section class="center-stage mobile-pane" id="paneChat">
+      <div class="stage-header">
+        <div>
+          <h2>🌾 全员大群聊（经理发单 · 员工领活 · 🔒私聊汇报不刷群 · 经理统筹交付）</h2>
+          <p class="stage-sub">流转阶段：<strong>派单 → 接单 → 进行中 → 交付 → 验收</strong> ｜ 小任务绝不请经理，员工两次失败才升级给经理</p>
+        </div>
+        <div class="task-strip" id="activeTaskStrip">
+          <!-- 快速切换当前任务卡 -->
+        </div>
+      </div>
+
+      <div class="group-chat-stream" id="groupChatStream">
+        <!-- 群消息与任务卡动态渲染 -->
+      </div>
+
+      <form class="chat-composer" onsubmit="handleSendGroupMessage(event)">
+        <div class="composer-top">
+          <label>发言身份：</label>
+          <select id="groupSenderSelect" class="select-sm">
+            <option value="gao">👑 你 (Gao · 董事长)</option>
+            <option value="muse">🔵 Muse（总管）</option>
+            <option value="gemini-4-argon">🟠 Gemini 4 Argon（经理）</option>
+            <option value="deepseek-v4-pro">🟠 DeepSeek V4 Pro（经理）</option>
+          </select>
+          <div class="mention-bar" id="quickMentionBar">
+            <span class="mention-tip">点此 @人派活：</span>
+            <button type="button" class="chip-btn" onclick="insertMention('@DeepSeek V4 Flash')">@DeepSeek Flash</button>
+            <button type="button" class="chip-btn" onclick="insertMention('@K-EXAONE 2.5')">@K-EXAONE</button>
+            <button type="button" class="chip-btn" onclick="insertMention('@千问 免费网页')">@千问免费</button>
+            <button type="button" class="chip-btn" onclick="insertMention('@Kimi 免费')">@Kimi</button>
+            <button type="button" class="chip-btn" onclick="insertMention('@豆包 免费')">@豆包</button>
+            <button type="button" class="chip-btn" onclick="insertMention('@ChatGPT 免费')">@ChatGPT免费</button>
+          </div>
+        </div>
+        <div class="composer-row">
+          <input type="text" id="groupChatInput" class="chat-input" placeholder="作为「你 (Gao)」在群里说话、拍板或 @员工 派活..." />
+          <button type="submit" class="btn btn-primary">发送群消息</button>
+        </div>
+      </form>
+    </section>
+
+    <!-- 右栏：独立身份档案 + 私聊汇报窗 + 团队总览 -->
+    <aside class="right-rail mobile-pane" id="paneDetail">
+      <div class="right-tabs">
+        <button class="r-tab active" id="rTabProfile" onclick="switchRightTab('profile')">🪪 独立身份档案</button>
+        <button class="r-tab" id="rTabThread" onclick="switchRightTab('thread')">🔒 任务私聊汇报窗 <span id="threadTaskBadge" class="badge-dot"></span></button>
+      </div>
+
+      <!-- 面板 1：成员独立身份档案 -->
+      <div class="right-panel active" id="panelProfile">
+        <div id="agentProfileContent"></div>
+      </div>
+
+      <!-- 面板 2：任务私聊汇报窗（员工单独向经理汇报 + 跨厂商转交） -->
+      <div class="right-panel" id="panelThread">
+        <div id="taskThreadContent"></div>
+      </div>
+
+      <!-- 底部固定：团队真实账本总览 -->
+      <div class="team-overview-card" id="teamOverviewBox">
+        <!-- 动态汇总 -->
+      </div>
+    </aside>
+  </main>
+
+  <!-- 独立视图：技能中心 (Skill Center) -->
+  <section class="skills-view hidden" id="skillsView">
+    <div class="skills-container">
+      <div class="skills-top-card">
+        <div>
+          <h2>🧠 技能中心（固定流程减少员工思考 · 提高准确度 · 省免费额度）</h2>
+          <p>每个 Skill 是给 1楼员工准备的标准化操作清单（SOP）。派什么 Skill 给哪个模型，属于需要分析的事，交由<strong>高级模型裁判</strong>打分推荐，由你（Gao）打勾批准后一键应用。</p>
+        </div>
+        <div class="judge-box">
+          <label>选择高级模型裁判：</label>
+          <select id="skillJudgeSelect" class="select-md">
+            <option value="muse">🔵 Muse（总管 · 默认裁判）</option>
+            <option value="gemini-4-argon">🟠 Gemini 4 Argon（前端/文档经理）</option>
+            <option value="deepseek-v4-pro">🟠 DeepSeek V4 Pro（代码/架构经理）</option>
+          </select>
+          <button class="btn btn-primary" onclick="handleRunSkillJudge()">🧠 让它判断一次</button>
+          <button class="btn btn-ghost" onclick="openNewSkillModal()">＋ 新增自定义技能</button>
+        </div>
+      </div>
+
+      <!-- 裁判推荐结果区 -->
+      <div id="judgeResultSection" class="judge-result-card hidden"></div>
+
+      <!-- 按楼层技能装备总览 -->
+      <div class="floor-skill-overview" id="floorSkillOverview"></div>
+
+      <!-- 12个种子技能卡片网格 -->
+      <div class="skills-grid" id="skillsGrid"></div>
+    </div>
+  </section>
+
+  <!-- 弹窗 1：两路招募弹窗（API 环境变量 vs 网页/订阅登录一次） -->
+  <div class="modal-backdrop hidden" id="recruitModal">
+    <div class="modal-card">
+      <div class="modal-header">
+        <h3>➕ 招募新 AI Agent（一个图标 = 一个模型）</h3>
+        <button class="close-btn" onclick="closeRecruitModal()">✕</button>
+      </div>
+      <div class="modal-body">
+        <div class="path-switcher">
+          <button type="button" class="path-btn active" id="pathBtnApi" onclick="switchRecruitPath('api')">
+            🔌 通道 A：API 接入（付费 / 免费 API）
+            <small>只填环境变量名，页面绝不收 Key 明文</small>
+          </button>
+          <button type="button" class="path-btn" id="pathBtnWeb" onclick="switchRecruitPath('web')">
+            🌐 通道 B：网页 / 订阅制
+            <small>点「登录一次」在厂商自己页面登录</small>
+          </button>
+        </div>
+
+        <form id="recruitForm" onsubmit="handleRecruitSubmit(event)">
+          <input type="hidden" id="recPathInput" value="api" />
+          <div class="form-grid">
+            <div class="form-group">
+              <label>显示名字 *</label>
+              <input type="text" id="recName" required placeholder="例：硅基流动 Qwen2.5-7B 免费API" />
+            </div>
+            <div class="form-group">
+              <label>所属厂商 *</label>
+              <input type="text" id="recVendor" required placeholder="例：SiliconFlow / Mistral / Groq" />
+            </div>
+            <div class="form-group">
+              <label>模型 ID（不确定填「待核实具体版本」）*</label>
+              <input type="text" id="recModel" required value="待核实具体版本" />
+            </div>
+            <div class="form-group">
+              <label>分配楼层 *</label>
+              <select id="recFloor">
+                <option value="worker">🛠️ 1楼 员工层（免费/便宜，动手干活）</option>
+                <option value="manager">🏢 2楼 经理层（付费/强推理，动脑统筹）</option>
+                <option value="rest">🌿 院子休息（备用待命）</option>
+              </select>
+            </div>
+          </div>
+
+          <!-- API 专属表单项（绝无 Key 输入框！） -->
+          <div id="recApiFields" class="channel-box">
+            <div class="security-banner">
+              🔒 <strong>安全铁律：页面上没有 Key 输入框！</strong> API Key 只放你电脑自己的环境变量里，这里<strong>只填环境变量的名字</strong>（如 <code>DEEPSEEK_API_KEY</code>），永不进网页或代码仓库。
+            </div>
+            <div class="form-grid">
+              <div class="form-group">
+                <label>费用档位 *</label>
+                <select id="recApiPaid">
+                  <option value="false">🟢 免费·API（角标：免费·API）</option>
+                  <option value="true">🟠 付费·API（角标：付费·API）</option>
+                </select>
+              </div>
+              <div class="form-group">
+                <label>环境变量名 (ENV VAR NAME) *</label>
+                <input type="text" id="recKeyEnv" placeholder="例：SILICONFLOW_API_KEY（只填名字！）" pattern="[A-Z][A-Z0-9_]*" title="只能填大写字母和下划线组成的环境变量名，禁止填真实Key" />
+              </div>
+              <div class="form-group">
+                <label>Base URL *</label>
+                <input type="url" id="recBaseUrl" placeholder="例：https://api.siliconflow.cn/v1" />
+              </div>
+              <div class="form-group">
+                <label>官方查额度页面 URL（选填，不编造）</label>
+                <input type="url" id="recApiUsageUrl" placeholder="例：https://cloud.siliconflow.cn/account/ak" />
+              </div>
+            </div>
+          </div>
+
+          <!-- 网页 / 订阅专属表单项 -->
+          <div id="recWebFields" class="channel-box hidden">
+            <div class="security-banner web-banner">
+              🌐 <strong>网页/订阅准则：</strong>点击下方大按钮「<strong>登录一次</strong>」会直接打开厂商自己的官方登录页。你在厂商页面登自己的号，本项目绝不索取或存储你的密码。
+            </div>
+            <div class="form-grid">
+              <div class="form-group">
+                <label>接入类型 *</label>
+                <select id="recWebKind">
+                  <option value="web">🟢 免费·网页（角标：免费·网页）</option>
+                  <option value="subscription">🟠 付费·订阅（角标：付费·订阅）</option>
+                </select>
+              </div>
+              <div class="form-group">
+                <label>厂商登录页 URL *</label>
+                <input type="url" id="recLoginUrl" placeholder="例：https://chat.mistral.ai/" />
+              </div>
+              <div class="form-group">
+                <label>实时查额度页面 URL（无则留空，不编造）</label>
+                <input type="url" id="recWebUsageUrl" placeholder="例：https://console.mistral.ai/billing" />
+              </div>
+              <div class="form-group">
+                <label>到限额降级规则（降级后：XXX）</label>
+                <input type="text" id="recFallbackNote" placeholder="例：降级后：mini（到周期限额不真停）" />
+              </div>
+            </div>
+
+            <div class="login-once-box">
+              <button type="button" class="btn btn-login-once" onclick="handleLoginOnceClick()">
+                🔑 登录一次（在浏览器打开厂商官网登录页）
+              </button>
+              <span id="loginOnceStatusBadge" class="login-status-pill">未点登录</span>
+            </div>
+          </div>
+
+          <div class="form-group">
+            <label>擅长活计 / 备注</label>
+            <input type="text" id="recSpecialty" placeholder="例：批量中英翻译、格式化表格、写单元测试" />
+          </div>
+
+          <div class="modal-footer">
+            <button type="button" class="btn btn-ghost" onclick="closeRecruitModal()">取消</button>
+            <button type="submit" class="btn btn-primary">✅ 保存并加入花名册</button>
+          </div>
+        </form>
+      </div>
+    </div>
+  </div>
+
+  <!-- 弹窗 2：经理发布模板化新任务 -->
+  <div class="modal-backdrop hidden" id="newTaskModal">
+    <div class="modal-card">
+      <div class="modal-header">
+        <h3>📌 经理发布模板化任务（省 Token 指令规范）</h3>
+        <button class="close-btn" onclick="closeNewTaskModal()">✕</button>
+      </div>
+      <div class="modal-body">
+        <form id="newTaskForm" onsubmit="handleCreateTaskSubmit(event)">
+          <div class="form-grid">
+            <div class="form-group">
+              <label>任务标题 *</label>
+              <input type="text" id="taskTitle" required placeholder="例：批量翻译10条商品介绍（通用示例）" />
+            </div>
+            <div class="form-group">
+              <label>统筹经理（只审 diff/摘要）*</label>
+              <select id="taskManagerSelect"></select>
+            </div>
+            <div class="form-group">
+              <label>指派 1楼员工（小任务绝不请经理）</label>
+              <select id="taskWorkerSelect"></select>
+            </div>
+            <div class="form-group">
+              <label>绑定固定技能 (Skill)</label>
+              <select id="taskSkillSelect"></select>
+            </div>
+          </div>
+          <div class="form-group">
+            <label>1. 目标（一句话说清）*</label>
+            <input type="text" id="taskGoal" required placeholder="例：将输入中的10条英文翻成中文，10条合1次调用" />
+          </div>
+          <div class="form-group">
+            <label>2. 输入内容 *</label>
+            <textarea id="taskInput" rows="3" required placeholder="粘贴给员工处理的文本或文件名..."></textarea>
+          </div>
+          <div class="form-group">
+            <label>3. 强制输出格式（禁止散文式长篇大论）*</label>
+            <input type="text" id="taskFormat" required value="Markdown 对照表格，不输出多余寒暄和原理解释" />
+          </div>
+          <div class="form-group">
+            <label>4. 验收标准（外加固定红线：不许自由发挥）*</label>
+            <input type="text" id="taskAcceptance" required value="条数完整、无漏译、无编造数字，不许自由发挥" />
+          </div>
+          <div class="modal-footer">
+            <button type="button" class="btn btn-ghost" onclick="closeNewTaskModal()">取消</button>
+            <button type="submit" class="btn btn-primary">📣 发到全员大群聊</button>
+          </div>
+        </form>
+      </div>
+    </div>
+  </div>
+
+  <!-- 弹窗 3：新增自定义技能 -->
+  <div class="modal-backdrop hidden" id="newSkillModal">
+    <div class="modal-card">
+      <div class="modal-header">
+        <h3>＋ 新增固定流程技能 (Skill)</h3>
+        <button class="close-btn" onclick="closeNewSkillModal()">✕</button>
+      </div>
+      <div class="modal-body">
+        <form onsubmit="handleCreateSkillSubmit(event)">
+          <div class="form-grid">
+            <div class="form-group">
+              <label>技能名称 *</label>
+              <input type="text" id="skName" required placeholder="例：JSON 结构化提取" />
+            </div>
+            <div class="form-group">
+              <label>分类 *</label>
+              <input type="text" id="skCat" required value="数据格式化" />
+            </div>
+          </div>
+          <div class="form-group">
+            <label>固定执行步骤（SOP）*</label>
+            <input type="text" id="skSteps" required placeholder="1. 提取字段 2. 校验JSON合法性 3. 缺省值填null，不许猜" />
+          </div>
+          <div class="form-group">
+            <label>适合哪些免费员工 *</label>
+            <input type="text" id="skBestFor" required placeholder="例：DeepSeek Flash / Qwen" />
+          </div>
+          <div class="form-group">
+            <label>省额度说明</label>
+            <input type="text" id="skSavings" value="固定输出JSON，零废话Token消耗" />
+          </div>
+          <div class="modal-footer">
+            <button type="button" class="btn btn-ghost" onclick="closeNewSkillModal()">取消</button>
+            <button type="submit" class="btn btn-primary">保存技能</button>
+          </div>
+        </form>
+      </div>
+    </div>
+  </div>
+
+  <div id="toastContainer" class="toast-container"></div>
+  <script src="app.js"></script>
+</body>
+</html>

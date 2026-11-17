@@ -1,0 +1,25 @@
+# Your real roster and secrets — never commit these
+agents.yaml
+agents.yml
+.env
+.env.*
+*.env
+!.env.example
+
+# Local web-login sessions (browser cookies / tokens) & office state
+.ai-farm/
+sessions/
+office_state.json
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+*.egg-info/
+build/
+dist/
+
+# OS
+.DS_Store
+Thumbs.db

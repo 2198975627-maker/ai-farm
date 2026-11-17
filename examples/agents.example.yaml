@@ -1,0 +1,92 @@
+# Copy to agents.yaml and edit. agents.yaml is gitignored — never commit it.
+# One icon = one model. Same vendor paid + free = TWO entries.
+# API: key_env is the ENV VAR NAME only, never the key itself.
+# Web/subscription: login once in your own browser; session stays local.
+agents:
+  - name: "DeepSeek V4 Flash"
+    slug: "deepseek-flash"
+    role: "worker"
+    vendor: "DeepSeek"
+    model_id: "deepseek-v4-flash"
+    access_kind: "api"
+    paid: false
+    key_env: "DEEPSEEK_API_KEY"
+    base_url: "https://api.deepseek.com/v1"
+    usage_url: "https://platform.deepseek.com/usage"
+
+  - name: "DeepSeek V4 Pro"
+    slug: "deepseek-pro"
+    role: "manager"
+    vendor: "DeepSeek"
+    model_id: "deepseek-v4-pro"
+    access_kind: "api"
+    paid: true
+    key_env: "DEEPSEEK_API_KEY"
+    base_url: "https://api.deepseek.com/v1"
+    usage_url: "https://platform.deepseek.com/usage"
+
+  - name: "K-EXAONE 2.5"
+    slug: "kexaone"
+    role: "worker"
+    vendor: "K-EXAONE"
+    model_id: "k-exaone_v2.5"
+    access_kind: "api"
+    paid: false
+    key_env: "KEXAONE_API_KEY"
+    base_url: "https://api.exaone.ai/v1"
+    usage_url: "https://docs.exaone.ai/en/my-profile/api-key"
+
+  - name: "Gemini 4 Argon"
+    slug: "gemini-web"
+    role: "manager"
+    vendor: "Gemini"
+    model_id: "gemini-4-argon"
+    access_kind: "subscription"
+    paid: true
+    login_url: "https://gemini.google.com/"
+    usage_url: "https://gemini.google.com/usage"
+    fallback_model: "Gemini Flash-Lite"
+
+  - name: "ChatGPT Free"
+    slug: "chatgpt-web"
+    role: "worker"
+    vendor: "ChatGPT"
+    model_id: "待核实具体版本"
+    access_kind: "web"
+    paid: false
+    login_url: "https://chatgpt.com/"
+    usage_url: "https://chatgpt.com/#settings/Usage"
+    fallback_model: "mini"
+
+  - name: "Doubao Free"
+    slug: "doubao-web"
+    role: "worker"
+    vendor: "Doubao"
+    model_id: "待核实具体版本"
+    access_kind: "web"
+    paid: false
+    login_url: "https://www.doubao.com/"
+    usage_url: ""
+    fallback_model: "重活排队 / 换其他免费员工"
+
+  - name: "Dola Free"
+    slug: "dola-web"
+    role: "worker"
+    vendor: "Dola"
+    model_id: "待核实具体版本"
+    access_kind: "web"
+    paid: false
+    login_url: "https://www.dola.com/chat/"
+    usage_url: ""
+    fallback_model: "限流等待 / 换其他免费员工"
+
+  - name: "Qwen Chat (International)"
+    slug: "qwen-intl-web"
+    role: "worker"
+    vendor: "Qwen Chat (国际版)"
+    model_id: "待核实具体版本"
+    access_kind: "web"
+    paid: false
+    login_url: "https://chat.qwen.ai/"
+    usage_url: "https://chat.qwen.ai/"
+    fallback_model: "限流等待 / 换其他免费员工"
