@@ -39,6 +39,14 @@ export DEEPSEEK_API_KEY="<你的 Key>"   # Windows PowerShell: $env:DEEPSEEK_API
 python -m ai_farm run examples/tasks/example-task.md --live
 ```
 
+## 无 CLI 桌面应用端（WorkBuddy / 豆包电脑版）半自动调用法
+
+对于**没有开放 HTTP API 或 CLI 命令行**、但能直接读写本地电脑目录的桌面应用（例如 WorkBuddy、豆包 PC 端），农场采用零封号风险的**「工作空间文件信箱 + `@工单.md` 触发」半自动协同**：
+
+1. **绑定同一工作空间**：在 WorkBuddy / 豆包电脑版左下角点击「选择工作空间」，选定本项目的工程目录。
+2. **导出工单并复制触发句**：在办公室网页（`http://127.0.0.1:8765`）打开任意任务的私聊汇报窗，点击 **`📂 导出 .md + 复制 @触发句`**。系统会自动在 `ai-team/tasks/inbox/` 生成标准工单 `.md`（自动注明优先切换 `0.00x` 限时免费子模型），并复制触发句。
+3. **一键投喂与交差**：切到桌面端输入框直接 `Ctrl+V` 粘贴并回车（如 `@ai-team/tasks/inbox/TASK-xxx.md 严格按此工单要求执行...`）。桌面端读完文件并修改本地代码/文档后，回到农场直接审阅 `git diff` 并验收即可。
+
 ## 项目结构
 
 ```text

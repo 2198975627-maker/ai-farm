@@ -37,6 +37,13 @@ AgentAdapter (ai_farm/adapters/base.py)
 | 本地读写 | 无（纯文本） | 无（纯文本） | 直接读写工程目录 | 直接读写选择的工作空间 |
 | 到限额 | API：真停 | 订阅：降级到 lite 模型 | 随底层 API/账号 | 切 0.00x 限时免费模型或休息 |
 
+### 无 CLI 桌面应用端半自动协同 SOP（3 步法）
+1. **代码实现位置**：`ai_farm/office_store.py` 中的 `exporttaskmd` 动作 + `web/app.js` 中的 `handleExportTaskMd()` 按钮。
+2. **标准执行流**：
+   - 桌面端选定同一工程目录作为工作空间；
+   - 办公室导出 `ai-team/tasks/inbox/<TASK_ID>.md`（内含目标、输入、格式、验收标准与建议切换的 `0.00x` 低倍率子模型），自动复制 `@ai-team/tasks/inbox/<TASK_ID>.md ...`；
+   - 粘贴进桌面端触发执行，完成后经理只审本地 `git diff` 摘要进行统筹交付。
+
 ## 共享记忆
 
 模型之间不直接对话。共享记忆 = 工单文件（`examples/tasks/`）
