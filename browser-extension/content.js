@@ -121,7 +121,7 @@
     return false;
   }
 
-  function triggerSend(inputEl) {
+  function triggerSend(inputEl, retries = 5) {
     const btnSelectors = [
       'button[data-testid="send-button"]',
       'button[aria-label*="发送"]',
@@ -131,9 +131,15 @@
     ];
     for (const sel of btnSelectors) {
       const btn = document.querySelector(sel);
-      if (btn && !btn.disabled && !btn.closest("#ai-farm-floating-bridge")) {
-        btn.click();
-        return true;
+      if (btn && !btn.closest("#ai-farm-floating-bridge")) {
+        if (!btn.disabled && btn.getAttribute("aria-disabled") !== "true") {
+          btn.click();
+          return true;
+        }
+        if (retries > 0) {
+          setTimeout(() => triggerSend(inputEl, retries - 1), 120);
+          return true;
+        }
       }
     }
     if (inputEl) {
@@ -157,22 +163,35 @@
     if (selected.length >= 10) {
       return selected;
     }
-    const replySelectors = [
+    // Prefer explicit assistant-only selectors first so we never accidentally grab the user's own prompt
+    const strictAssistantSelectors = [
       '[data-message-author-role="assistant"]',
       "model-response",
-      ".segment-content-box",
-      ".markdown-body",
       '[class*="assistant-message"]',
       '[class*="answer-content"]',
+    ];
+    const fallbackSelectors = [
+      ".segment-content-box",
+      ".markdown-body",
       '[class*="markdown"]',
     ];
-    for (const sel of replySelectors) {
-      const nodes = Array.from(document.querySelectorAll(sel)).filter(
-        (n) => !n.closest("#ai-farm-floating-bridge") && (n.innerText || "").trim().length >= 15
+    const isValidReply = (node, txt) => {
+      if (!txt || txt.length < 15) return false;
+      if (node.closest("#ai-farm-floating-bridge")) return false;
+      if (node.closest('[data-message-author-role="user"], [class*="user-message"], [class*="question"]')) return false;
+      // Guard against capturing our own templated task prompt when the AI hasn't replied yet
+      if (txt.includes("你是执行员工，只做下面这件事，不要做决定。") && txt.includes("红线：不确定的写“未核实”")) {
+        return false;
+      }
+      return true;
+    };
+
+    for (const sel of [...strictAssistantSelectors, ...fallbackSelectors]) {
+      const nodes = Array.from(document.querySelectorAll(sel)).filter((n) =>
+        isValidReply(n, (n.innerText || "").trim())
       );
       if (nodes.length > 0) {
-        const last = nodes[nodes.length - 1];
-        return last.innerText.trim();
+        return nodes[nodes.length - 1].innerText.trim();
       }
     }
     return "";

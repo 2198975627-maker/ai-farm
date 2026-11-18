@@ -17,6 +17,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import subprocess
 import time
 from pathlib import Path
 from typing import Any
@@ -1063,61 +1064,104 @@ class OfficeStore:
             })
             return {"mode": "dry_run", "worker": worker["name"], "text": dry_text}
 
-        slug = worker.get("adapter_slug") or ""
         if worker.get("access_kind") in ("web", "subscription", "desktop"):
             raise RuntimeError(
                 f"{worker['name']} 属于「{worker['badge']}」通道：网页端请点「🌐 打开网页 + 复制指令」，"
                 "桌面应用端请点「📂 导出 .md + 复制 @触发句」。「🚀 真调执行」仅用于 API 直连与 CLI 命令行通道。"
             )
-        if slug not in registered_slugs():
-            raise RuntimeError(f"{worker['name']} 尚未绑定已注册的 Adapter slug ({slug})。")
-        workspace_dir = (payload.get("workspace_dir") or worker.get("workspace") or ".").strip() or "."
-        if slug == "custom-api":
-            adapter = get_adapter(
-                "custom-api",
-                vendor=worker["vendor"],
-                model_id=worker["model"],
-                base_url=worker["base_url"],
-                key_env=worker["key_env"],
-                paid=worker["paid"],
-            )
-        elif slug == "cli-generic":
-            adapter = get_adapter(
-                "cli-generic",
-                vendor=worker["vendor"],
-                model_id=worker["model"],
-                executable=worker.get("executable") or "codex",
-                workspace=workspace_dir,
-                paid=worker["paid"],
-            )
-        elif slug == "codex-cli":
-            adapter = get_adapter("codex-cli", workspace=workspace_dir)
-        else:
-            adapter = get_adapter(slug)
-        reply = adapter.chat(prompt)
+        workspace_dir = self._validate_safe_workspace(payload.get("workspace_dir") or worker.get("workspace") or ".")
+
+        # Build fallback chain: current worker -> other ready API/CLI workers -> ready API/CLI managers
+        worker_candidates: list[dict[str, Any]] = [worker]
+        seen_vendors = {(worker.get("vendor") or "").lower()}
+        for a in self.state["agents"]:
+            if a["id"] == worker["id"] or a.get("floor") != "worker" or a.get("status") != "ready":
+                continue
+            if a.get("access_kind") not in ("api", "cli"):
+                continue
+            v_low = (a.get("vendor") or "").lower()
+            if v_low and v_low in seen_vendors:
+                continue
+            seen_vendors.add(v_low)
+            worker_candidates.append(a)
+
+        manager_candidates = [
+            a for a in self.state["agents"]
+            if a.get("floor") == "manager"
+            and a.get("status") == "ready"
+            and a.get("access_kind") in ("api", "cli")
+        ]
+
+        attempts_log: list[str] = []
+        failures = 0
+        last_err: Exception | None = None
+        chosen_agent: dict[str, Any] | None = None
+        reply = None
+
+        for cand in worker_candidates:
+            try:
+                adapter = self._build_adapter(cand, workspace_dir=workspace_dir)
+                reply = adapter.chat(prompt)
+                chosen_agent = cand
+                break
+            except Exception as e:  # noqa: BLE001 - fall back to next worker
+                failures += 1
+                last_err = e
+                attempts_log.append(f"❌ {cand['name']} 失败: {e}")
+                if failures >= 2:
+                    break
+
+        if reply is None and failures >= 2:
+            for mgr in manager_candidates:
+                try:
+                    adapter = self._build_adapter(mgr, workspace_dir=workspace_dir)
+                    mgr_prompt = (
+                        f"已有 {failures} 名免费员工连续失败（最近错误：{last_err}），按规矩升级由经理接手。\n"
+                        + prompt
+                    )
+                    reply = adapter.chat(mgr_prompt)
+                    chosen_agent = mgr
+                    attempts_log.append(f"🆙 连续 {failures} 名员工失败，已升级经理 {mgr['name']} 接盘成功")
+                    break
+                except Exception as e:  # noqa: BLE001
+                    last_err = e
+                    attempts_log.append(f"❌ 经理 {mgr['name']} 失败: {e}")
+
+        if reply is None or chosen_agent is None:
+            detail = "\n".join(attempts_log) if attempts_log else str(last_err)
+            raise RuntimeError(f"员工降级与经理升级均未成功：\n{detail}")
+
+        if chosen_agent["id"] != worker["id"]:
+            task["assigned_to"] = chosen_agent["id"]
+            task["assigned_name"] = chosen_agent["name"]
+            task["assigned_vendor"] = chosen_agent["vendor"]
+
         usage_info = {
             "live": True,
             "model": reply.model,
             "usage": reply.usage,
             "rate_limit_remaining": reply.rate_limit_remaining,
+            "attempts": failures + 1,
         }
         task.setdefault("usage_log", []).append(usage_info)
         if reply.rate_limit_remaining:
-            worker["quota_note"] = f"上次调用响应头剩余次数：{json.dumps(reply.rate_limit_remaining, ensure_ascii=False)}"
+            chosen_agent["quota_note"] = f"上次调用响应头剩余次数：{json.dumps(reply.rate_limit_remaining, ensure_ascii=False)}"
+        fallback_trace = ("• 降级调度轨迹：\n  " + "\n  ".join(attempts_log) + "\n") if attempts_log else ""
         report_body = (
-            f"【真实接口返回 · {worker['name']} ({reply.model})】\n"
+            f"【真实接口返回 · {chosen_agent['name']} ({reply.model})】\n"
+            f"{fallback_trace}"
             f"• 用量统计：`{json.dumps(reply.usage, ensure_ascii=False)}`\n"
             + (f"• 响应头剩余额度：`{json.dumps(reply.rate_limit_remaining, ensure_ascii=False)}`\n" if reply.rate_limit_remaining else "")
             + f"\n---\n{reply.text}"
         )
         self.postmessage({
             "task_id": task["id"],
-            "sender_id": worker["id"],
+            "sender_id": chosen_agent["id"],
             "text": report_body,
             "is_delivery": True,
             "usage": usage_info,
         })
-        return {"mode": "live", "worker": worker["name"], "reply": reply.text, "usage": usage_info}
+        return {"mode": "live", "worker": chosen_agent["name"], "reply": reply.text, "usage": usage_info, "attempts": failures + 1}
 
     def checklivequota(self, payload: dict[str, Any]) -> dict[str, Any]:
         agent = self._find_agent(payload.get("agent_id") or payload.get("id"))
@@ -1204,7 +1248,8 @@ class OfficeStore:
         task = self._find_task(payload.get("task_id") or payload.get("id"))
         custom_ws = (payload.get("workspace_dir") or "").strip()
         if custom_ws:
-            base_dir = Path(custom_ws).expanduser().resolve()
+            safe_ws = self._validate_safe_workspace(custom_ws)
+            base_dir = Path(safe_ws)
             out_dir = base_dir / "tasks" / "inbox"
             rel_path = f"tasks/inbox/{task['id']}.md"
         else:
@@ -1278,9 +1323,84 @@ class OfficeStore:
             "prompt": prompt,
         }
 
+    def collectgitdiff(self, payload: dict[str, Any] | None = None) -> dict[str, Any]:
+        """Collect concise git status + diff summary from workspace for manager QA (zero tokens)."""
+        payload = payload or {}
+        ws = self._validate_safe_workspace(payload.get("workspace_dir") or ".")
+        status_proc = subprocess.run(
+            ["git", "status", "-s"],
+            cwd=ws,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=10,
+            check=False,
+        )
+        if status_proc.returncode != 0:
+            raise RuntimeError(f"当前目录不是 Git 仓库或无法读取 git 状态：{ws}")
+        stat_proc = subprocess.run(
+            ["git", "diff", "--stat"],
+            cwd=ws,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=10,
+            check=False,
+        )
+        st = (status_proc.stdout or "").strip()
+        df = (stat_proc.stdout or "").strip()
+        if not st and not df:
+            summary = f"工作目录 `{ws}` 当前无未提交改动（工作区干净）。"
+        else:
+            summary = f"【本地工作区改动摘要 · `{ws}`】\n• git status:\n{st or '(无)'}\n• git diff --stat:\n{df or '(仅新增未跟踪文件)'}"
+        return {"workspace_dir": ws, "summary": summary}
+
     # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------
+    def _validate_safe_workspace(self, raw_dir: str) -> str:
+        ws = (raw_dir or ".").strip() or "."
+        if ws == ".":
+            return str(Path(__file__).resolve().parents[1])
+        resolved = Path(ws).expanduser().resolve()
+        low = str(resolved).lower()
+        forbidden = (
+            "c:\\windows", "c:\\program files", "c:\\program files (x86)",
+            "/etc", "/usr", "/bin", "/sbin", "/system", "/library",
+        )
+        if any(low == f or low.startswith(f + "\\") or low.startswith(f + "/") for f in forbidden) or resolved == Path(resolved.anchor):
+            raise ValueError(f"安全拦截：禁止将系统敏感目录作为工作空间：{resolved}")
+        return str(resolved)
+
+    def _build_adapter(self, agent: dict[str, Any], workspace_dir: str = "."):
+        kind = agent.get("access_kind")
+        slug = agent.get("adapter_slug") or ""
+        if kind == "api":
+            if agent.get("base_url") and agent.get("key_env"):
+                return get_adapter(
+                    "custom-api",
+                    vendor=agent["vendor"],
+                    model_id=agent["model"],
+                    base_url=agent["base_url"],
+                    key_env=agent["key_env"],
+                    paid=bool(agent.get("paid", False)),
+                )
+            if slug in registered_slugs():
+                return get_adapter(slug)
+        if kind == "cli":
+            return get_adapter(
+                "cli-generic",
+                vendor=agent["vendor"],
+                model_id=agent["model"],
+                executable=agent.get("executable") or "codex",
+                workspace=workspace_dir,
+                paid=bool(agent.get("paid", False)),
+            )
+        if slug in registered_slugs():
+            return get_adapter(slug)
+        raise RuntimeError(f"{agent['name']} 尚未绑定可执行的 Adapter。")
     def _chief_agent(self) -> dict[str, Any]:
         for a in self.state["agents"]:
             if a.get("access_kind") == "chief" or a["id"] in ("chief", "muse"):

@@ -16,6 +16,7 @@ let APP_STATE = {
   latestRecommendations: [],
   exampleCursor: 0,
   customWorkspaceDir: "",
+  reportDrafts: {},
 };
 
 // =========================================================================
@@ -664,6 +665,9 @@ function renderSelectedTaskThread() {
           <button class="btn btn-ghost" onclick="handleExportTaskMd('${task.id}')" title="方式3：在上方指定的工作文件夹生成工单 .md 并复制 @文件 触发句，供 WorkBuddy 等桌面应用执行">
             📂 导出 .md + 复制 @触发句
           </button>
+          <button class="btn btn-ghost" onclick="handleCollectGitDiff('${task.id}')" title="读取工作区 git status/diff 摘要填入下方汇报框（0 Token 质检）">
+            🔍 抓取本地 git diff 摘要
+          </button>
           <button class="btn btn-ghost" onclick="handleCopyWorkerPrompt('${task.id}')" title="仅复制纯文本模板指令">
             📋 仅复制指令
           </button>
@@ -673,9 +677,11 @@ function renderSelectedTaskThread() {
         </div>
 
         <form onsubmit="handleWorkerPrivateReport(event, '${task.id}')" style="margin-bottom:10px;">
-          <label style="font-size:11px;color:#cbd5e1;display:block;margin-bottom:4px;">📤 员工在私聊提交产出汇报（群里只留 🔒 提示）：</label>
-          <textarea id="privateReportInput" rows="3" placeholder="输入员工按模板完成的表格/测试/摘要产出..."
-                    style="width:100%;background:#0f172a;border:1px solid #334155;color:#fff;padding:6px;border-radius:6px;font-size:12px;margin-bottom:6px;" required>| 序号 | 英文原句 | 中文翻译 |\n|---|---|---|\n| 1 | Insulated stainless steel water bottle... | 保温不锈钢水壶，保冷24小时。 |\n| ... | (共10条已按模板全部译完，无自由发挥) | ... |</textarea>
+          <label style="font-size:11px;color:#cbd5e1;display:block;margin-bottom:4px;">📤 员工在私聊提交产出汇报（群里只留 🔒 提示，不刷屏）：</label>
+          <textarea id="privateReportInput" rows="3"
+                    placeholder="在此粘贴员工产出的表格/测试/摘要，或点击上方「🔍 抓取本地 git diff 摘要」自动填入..."
+                    oninput="APP_STATE.reportDrafts['${task.id}'] = this.value"
+                    style="width:100%;background:#0f172a;border:1px solid #334155;color:#fff;padding:6px;border-radius:6px;font-size:12px;margin-bottom:6px;" required>${escapeHTML(APP_STATE.reportDrafts[task.id] || '')}</textarea>
           <button type="submit" class="btn btn-ghost" style="width:100%;">🔒 发送私聊汇报（不刷大群）</button>
         </form>
 
@@ -859,12 +865,24 @@ async function handleWorkerPrivateReport(event, taskId) {
   const task = APP_STATE.tasks.find(t => t.id === taskId);
   await callOfficeAction("postmessage", {
     task_id: taskId,
-    sender_id: task ? task.assigned_to : "deepseek-v4-flash",
+    sender_id: task ? task.assigned_to : "",
     text,
     is_delivery: true,
   });
+  delete APP_STATE.reportDrafts[taskId];
   await openTaskPrivateThread(taskId);
   showToast("🔒 私聊汇报已发给经理（大群仅留折叠提示，未刷屏）！");
+}
+
+async function handleCollectGitDiff(taskId) {
+  const wsInput = document.getElementById("customWorkspaceInput");
+  const workspace_dir = wsInput ? wsInput.value.trim() : (APP_STATE.customWorkspaceDir || "");
+  const res = await callOfficeAction("collectgitdiff", { workspace_dir });
+  if (!res || !res.summary) return;
+  APP_STATE.reportDrafts[taskId] = res.summary;
+  const box = document.getElementById("privateReportInput");
+  if (box) box.value = res.summary;
+  showToast("🔍 已抓取本地 git diff 摘要填入汇报框，核对无误后点击「🔒 发送私聊汇报」即可！");
 }
 
 async function handleRunAdapterTask(taskId, live = false) {

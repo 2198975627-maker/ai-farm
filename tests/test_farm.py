@@ -1,6 +1,10 @@
 """Dry-run tests only — no network, no keys, no spend."""
+import json
 import sys
 import tempfile
+import threading
+import urllib.error
+import urllib.request
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -8,7 +12,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from ai_farm.adapters.base import AgentReply, Quota
 from ai_farm.adapters.cli_agent import CLIAdapter
 from ai_farm.adapters.registry import get_adapter, register, registered_slugs
+from ai_farm.cli import _append_agent_to_yaml, _build_adapter_for_agent, filter_live_executable_agents
 from ai_farm.dispatcher import Task, dispatch
+from ai_farm.office_server import create_server
 from ai_farm.office_store import OfficeStore
 from ai_farm.quota import quota_label, quota_state
 from ai_farm.roster import Agent, Roster, load_roster
@@ -230,6 +236,114 @@ def test_office_clean_starter_and_4_channels():
         assert p_latest["task_id"] == task["id"]
         ext_manifest = Path(__file__).resolve().parents[1] / "browser-extension" / "manifest.json"
         assert ext_manifest.exists()
+
+
+def test_security_cors_and_workspace_guard():
+    with tempfile.TemporaryDirectory() as tmp:
+        srv = create_server("127.0.0.1", 0, state_path=Path(tmp) / "office.json")
+        port = srv.server_address[1]
+        t = threading.Thread(target=srv.serve_forever, daemon=True)
+        t.start()
+        try:
+            # 1. Malicious external web origin must be blocked with 403
+            evil_req = urllib.request.Request(
+                f"http://127.0.0.1:{port}/api/action",
+                data=json.dumps({"action": "listagents", "payload": {}}).encode("utf-8"),
+                headers={"Content-Type": "application/json", "Origin": "https://evil.example.com"},
+                method="POST",
+            )
+            try:
+                urllib.request.urlopen(evil_req, timeout=5)
+                raise AssertionError("External origin must be rejected by CORS guard")
+            except urllib.error.HTTPError as e:
+                assert e.code == 403
+
+            # 2. Chrome extension origin must be allowed
+            ext_req = urllib.request.Request(
+                f"http://127.0.0.1:{port}/api/action",
+                data=json.dumps({"action": "listagents", "payload": {}}).encode("utf-8"),
+                headers={"Content-Type": "application/json", "Origin": "chrome-extension://abcdefghijklmnop"},
+                method="POST",
+            )
+            with urllib.request.urlopen(ext_req, timeout=5) as resp:
+                assert resp.status == 200
+                assert resp.headers.get("Access-Control-Allow-Origin") == "chrome-extension://abcdefghijklmnop"
+        finally:
+            srv.shutdown()
+            srv.server_close()
+
+        # 3. System sensitive directory guard in exporttaskmd
+        store = OfficeStore(state_path=Path(tmp) / "office2.json")
+        task = store.seedexampletask()
+        try:
+            store.exporttaskmd({"task_id": task["id"], "workspace_dir": "C:\\Windows\\System32"})
+            raise AssertionError("Should block writing into Windows system directory")
+        except ValueError:
+            pass
+
+
+def test_office_live_fallback_chain_and_git_diff():
+    with tempfile.TemporaryDirectory() as tmp:
+        store = OfficeStore(state_path=Path(tmp) / "office.json")
+        w1 = store.createagent({
+            "name": "Fail Worker 1", "vendor": "V1", "model": "m1",
+            "access_kind": "cli", "executable": "missing_cli_1", "floor": "worker",
+        })
+        w2 = store.createagent({
+            "name": "Fail Worker 2", "vendor": "V2", "model": "m2",
+            "access_kind": "cli", "executable": "missing_cli_2", "floor": "worker",
+        })
+        mgr = store.createagent({
+            "name": "Mock Manager", "vendor": "M1", "model": "mgr-m",
+            "access_kind": "api", "paid": True, "key_env": "TEST_MGR_KEY",
+            "base_url": "https://example.invalid/v1", "floor": "manager",
+        })
+
+        # Monkeypatch _build_adapter so mgr succeeds after 2 worker failures
+        orig_build = store._build_adapter
+
+        def patched_build(agent, workspace_dir="."):
+            if agent["id"] == mgr["id"]:
+                return FakeAdapter(fail=False)
+            return orig_build(agent, workspace_dir=workspace_dir)
+
+        store._build_adapter = patched_build  # type: ignore[method-assign]
+        task = store.createtask({"title": "Fallback test", "assigned_to": w1["id"]})
+        res = store.runadaptertask({"task_id": task["id"], "live": True})
+        assert res["mode"] == "live"
+        assert res["worker"] == mgr["name"]
+        assert res["attempts"] == 3  # 2 worker failures -> escalated to manager
+
+        # Verify collectgitdiff works on current repo
+        repo_root = str(Path(__file__).resolve().parents[1])
+        diff_res = store.collectgitdiff({"workspace_dir": repo_root})
+        assert "summary" in diff_res
+
+
+def test_cli_recruit_persists_yaml_and_skips_web_on_live():
+    with tempfile.TemporaryDirectory() as tmp:
+        yaml_path = Path(tmp) / "agents.yaml"
+        ag_api = Agent(
+            name="Custom Qwen", slug="custom-api", role="worker", vendor="Qwen",
+            model_id="qwen-plus", access_kind="api", paid=True,
+            key_env="MY_QWEN_KEY", base_url="https://dashscope.aliyuncs.com/compatible-mode/v1",
+        )
+        ag_web = Agent(
+            name="Web Chat", slug="custom-web", role="worker", vendor="WebV",
+            model_id="web-m", access_kind="web", login_url="https://example.com/",
+        )
+        _append_agent_to_yaml(str(yaml_path), ag_api)
+        _append_agent_to_yaml(str(yaml_path), ag_web)
+
+        loaded = load_roster(str(yaml_path))
+        assert len(loaded.agents) == 2
+        adapter = _build_adapter_for_agent(loaded.agents[0])
+        assert adapter.model_id == "qwen-plus"
+        assert adapter.key_env == "MY_QWEN_KEY"
+
+        live_w, skipped_w = filter_live_executable_agents(loaded.workers())
+        assert [a.name for a in live_w] == ["Custom Qwen"]
+        assert [a.name for a in skipped_w] == ["Web Chat"]
 
 
 if __name__ == "__main__":
