@@ -1,16 +1,60 @@
-/* AI Farm Browser Extension - Content Script
+/* AI Farm Browser Extension & Universal Web Bridge - Content Script
  * Runs on free AI web chat pages (Kimi, Doubao, Qwen, Dola, ChatGPT, Gemini, Grok).
- * 1) Auto-detects ?ai_farm_task=TASK-xxx (or latest dispatched task from local AI Farm Office).
- * 2) Auto-fills the templated prompt into the chat input box and triggers Send.
- * 3) Provides a floating bottom-right pill to send the AI's reply straight back to the Office Private Thread.
+ * Works both as a Chrome/Edge Manifest V3 Extension (via background service worker)
+ * and as a direct injected bridge script (via direct CORS fetch to http://127.0.0.1:8765).
  */
 
 (function () {
   if (window.__AI_FARM_BRIDGE_LOADED__) return;
   window.__AI_FARM_BRIDGE_LOADED__ = true;
 
+  const OFFICE_ORIGIN = "http://127.0.0.1:8765";
   let currentTask = null;
   let autoFilledOnce = false;
+
+  function hasExtensionRuntime() {
+    return (
+      typeof chrome !== "undefined" &&
+      chrome.runtime &&
+      typeof chrome.runtime.sendMessage === "function" &&
+      Boolean(chrome.runtime.id)
+    );
+  }
+
+  async function callOfficeBridge(type, payload) {
+    if (hasExtensionRuntime()) {
+      return new Promise((resolve) => {
+        chrome.runtime.sendMessage({ type, ...payload }, (resp) => {
+          resolve(resp || { ok: false, error: "Extension background did not respond" });
+        });
+      });
+    }
+    // Direct fetch fallback when loaded via /bridge.js or bookmarklet
+    try {
+      const action = type === "GET_TASK_PROMPT" ? "gettaskprompt" : "postmessage";
+      const bodyPayload =
+        type === "GET_TASK_PROMPT"
+          ? { task_id: payload.taskId || "" }
+          : {
+              task_id: payload.taskId,
+              sender_id: payload.workerId || "",
+              text: payload.text,
+              is_delivery: true,
+            };
+      const resp = await fetch(`${OFFICE_ORIGIN}/api/action`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action, payload: bodyPayload }),
+      });
+      const data = await resp.json();
+      if (!resp.ok || !data.ok) {
+        return { ok: false, error: data.error || `HTTP ${resp.status}` };
+      }
+      return { ok: true, result: data.result };
+    } catch (err) {
+      return { ok: false, error: err.message || String(err) };
+    }
+  }
 
   function parseTaskIdFromUrl() {
     try {
@@ -46,9 +90,10 @@
   function fillPromptIntoElement(el, text) {
     el.focus();
     if (el.tagName === "TEXTAREA" || el.tagName === "INPUT") {
-      const proto = el.tagName === "TEXTAREA"
-        ? window.HTMLTextAreaElement.prototype
-        : window.HTMLInputElement.prototype;
+      const proto =
+        el.tagName === "TEXTAREA"
+          ? window.HTMLTextAreaElement.prototype
+          : window.HTMLInputElement.prototype;
       const nativeSetter = Object.getOwnPropertyDescriptor(proto, "value")?.set;
       if (nativeSetter) {
         nativeSetter.call(el, text);
@@ -61,7 +106,6 @@
     }
 
     if (el.isContentEditable) {
-      // Clear placeholder or existing text and insert cleanly via execCommand / InputEvent
       const selection = window.getSelection();
       const range = document.createRange();
       range.selectNodeContents(el);
@@ -78,7 +122,6 @@
   }
 
   function triggerSend(inputEl) {
-    // Try common send buttons first
     const btnSelectors = [
       'button[data-testid="send-button"]',
       'button[aria-label*="发送"]',
@@ -93,7 +136,6 @@
         return true;
       }
     }
-    // Fallback: press Enter on the input element
     if (inputEl) {
       inputEl.dispatchEvent(
         new KeyboardEvent("keydown", {
@@ -111,13 +153,10 @@
   }
 
   function extractLatestReplyText() {
-    // 1. If user highlighted specific text on the page, prefer that selection
     const selected = (window.getSelection()?.toString() || "").trim();
     if (selected.length >= 10) {
       return selected;
     }
-
-    // 2. Otherwise inspect common assistant reply containers across Kimi / Doubao / Qwen / ChatGPT / Gemini / Grok
     const replySelectors = [
       '[data-message-author-role="assistant"]',
       "model-response",
@@ -167,55 +206,48 @@
     }
   }
 
-  function handleSendReplyToOffice() {
+  async function handleSendReplyToOffice() {
     if (!currentTask) {
       setStatus("尚未绑定工单，请先点「🔄 同步工单」", true);
       return;
     }
     const text = extractLatestReplyText();
     if (!text) {
-      setStatus("未检测到回复内容（你也可以用鼠标选中回复文字后再点此按钮）", true);
+      setStatus("未检测到回复内容（也可鼠标选中回复文字后再点此按钮）", true);
       return;
     }
     setStatus("⏳ 正在交回农场私聊窗...");
-    chrome.runtime.sendMessage(
-      {
-        type: "SUBMIT_WORKER_REPORT",
-        taskId: currentTask.task_id,
-        workerId: currentTask.assigned_to || "",
-        text,
-      },
-      (resp) => {
-        if (resp && resp.ok) {
-          setStatus(`🎉 已交回农场私聊窗 (${text.length} 字，大群已留 🔒 提示)！`);
-        } else {
-          setStatus(`❌ 交回失败: ${(resp && resp.error) || "请确认 127.0.0.1:8765 已启动"}`, true);
-        }
-      }
-    );
+    const resp = await callOfficeBridge("SUBMIT_WORKER_REPORT", {
+      taskId: currentTask.task_id,
+      workerId: currentTask.assigned_to || "",
+      text,
+    });
+    if (resp && resp.ok) {
+      setStatus(`🎉 已交回农场私聊窗 (${text.length} 字，大群已留 🔒 提示)！`);
+    } else {
+      setStatus(`❌ 交回失败: ${(resp && resp.error) || "请确认 127.0.0.1:8765 已启动"}`, true);
+    }
   }
 
-  function loadTaskFromOffice(autoTrigger = false) {
+  async function loadTaskFromOffice(autoTrigger = false) {
     const urlTaskId = parseTaskIdFromUrl();
-    chrome.runtime.sendMessage({ type: "GET_TASK_PROMPT", taskId: urlTaskId }, (resp) => {
-      const titleEl = document.getElementById("ai-farm-bridge-task");
-      if (!resp || !resp.ok || !resp.result) {
-        if (titleEl) titleEl.textContent = "未连接本地办公室 (127.0.0.1:8765)";
-        setStatus((resp && resp.error) || "请先启动 python -m ai_farm office", true);
-        return;
-      }
-      currentTask = resp.result;
-      if (titleEl) {
-        titleEl.textContent = `${currentTask.task_id} · ${currentTask.title.slice(0, 18)}`;
-      }
-      setStatus(`已就绪：执行者 ${currentTask.assigned_name}`);
+    const resp = await callOfficeBridge("GET_TASK_PROMPT", { taskId: urlTaskId });
+    const titleEl = document.getElementById("ai-farm-bridge-task");
+    if (!resp || !resp.ok || !resp.result) {
+      if (titleEl) titleEl.textContent = "未连接本地办公室 (127.0.0.1:8765)";
+      setStatus((resp && resp.error) || "请先在办公室派发一张工单", true);
+      return;
+    }
+    currentTask = resp.result;
+    if (titleEl) {
+      titleEl.textContent = `${currentTask.task_id} · ${currentTask.title.slice(0, 18)}`;
+    }
+    setStatus(`已就绪：执行者 ${currentTask.assigned_name}`);
 
-      if (autoTrigger && urlTaskId && !autoFilledOnce) {
-        autoFilledOnce = true;
-        // Wait briefly for SPA chat input to finish mounting
-        setTimeout(() => handleAutoFillAndSend(true), 900);
-      }
-    });
+    if (autoTrigger && urlTaskId && !autoFilledOnce) {
+      autoFilledOnce = true;
+      setTimeout(() => handleAutoFillAndSend(true), 900);
+    }
   }
 
   function mountFloatingWidget() {

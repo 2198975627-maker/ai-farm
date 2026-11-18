@@ -19,6 +19,7 @@ from .office_store import OfficeStore
 
 
 WEB_DIR = Path(__file__).resolve().parents[1] / "web"
+EXT_DIR = Path(__file__).resolve().parents[1] / "browser-extension"
 
 
 class OfficeHTTPHandler(BaseHTTPRequestHandler):
@@ -59,6 +60,19 @@ class OfficeHTTPHandler(BaseHTTPRequestHandler):
                 "skills": self.store.listskills(),
             })
             return
+
+        if path == "/bridge.js":
+            target = EXT_DIR / "content.js"
+            if target.exists():
+                content = target.read_bytes()
+                self.send_response(200)
+                self.send_header("Content-Type", "application/javascript; charset=utf-8")
+                self.send_header("Content-Length", str(len(content)))
+                self.send_header("Cache-Control", "no-store")
+                self.send_header("Access-Control-Allow-Origin", "*")
+                self.end_headers()
+                self.wfile.write(content)
+                return
 
         if path in ("/", "/index.html"):
             target = WEB_DIR / "index.html"
