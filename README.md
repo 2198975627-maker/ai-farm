@@ -1,7 +1,5 @@
 # AI Farm — Multi-Level AI Collaboration Workbench
 
-> **English | [简体中文 (README_ZH.md)](README_ZH.md)**
->
 > **🚧 Project Status: Work in Progress (WIP / Early Prototype)**  
 > AI Farm currently provides working standard adapter interfaces, a local web-based "AI Farm Office" workbench, direct OpenAI-compatible API execution, a headless CLI runner, a semi-automated `@task.md` handoff for desktop GUI agents, and passing dry-run tests. However, it is **not yet packaged as a standalone desktop app**, and several orchestration features remain under active development (see [Current Progress & Known Gaps](#current-progress--known-gaps)).
 
@@ -131,3 +129,7 @@ ai-farm/
 ## License
 
 MIT — see [LICENSE](LICENSE).
+
+---
+
+🌐 **Language:** English | [简体中文 (README_ZH.md)](README_ZH.md)
