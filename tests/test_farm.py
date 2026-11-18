@@ -210,6 +210,18 @@ def test_office_clean_starter_and_4_channels():
         })
         assert applied["applied_count"] >= 1
 
+        # 6. Custom workspace_dir export for desktop GUI agents + live guard on web/desktop
+        custom_ws = Path(tmp) / "my_desktop_workspace"
+        exported = store.exporttaskmd({"task_id": task["id"], "workspace_dir": str(custom_ws)})
+        assert Path(exported["file_path"]).exists()
+        assert exported["rel_path"] == f"tasks/inbox/{task['id']}.md"
+
+        try:
+            store.runadaptertask({"task_id": task["id"], "worker_id": new_desktop["id"], "live": True})
+            raise AssertionError("Live adapter call on desktop GUI channel must guide user to @task.md button")
+        except RuntimeError as e:
+            assert "导出 .md" in str(e)
+
 
 if __name__ == "__main__":
     for name in sorted(dir()):

@@ -61,10 +61,31 @@ class CLIAdapter:
         if proc.returncode != 0:
             err_preview = (proc.stderr or proc.stdout or "").strip()[:300]
             raise RuntimeError(f"{self.vendor} CLI exit {proc.returncode}: {err_preview}")
+
+        diff_stat = ""
+        try:
+            diff_proc = subprocess.run(
+                ["git", "diff", "--stat"],
+                cwd=self.workspace,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=10,
+                check=False,
+            )
+            if diff_proc.returncode == 0 and diff_proc.stdout.strip():
+                diff_stat = diff_proc.stdout.strip()
+        except Exception:  # noqa: BLE001
+            pass
+
+        out_text = (proc.stdout or "").strip()
+        if diff_stat:
+            out_text = f"{out_text}\n\n[本地工作区 git diff --stat 摘要（供经理只看 diff 质检）]\n{diff_stat}"
         return AgentReply(
-            text=(proc.stdout or "").strip(),
+            text=out_text,
             model=self.model_id,
-            usage={"channel": "cli", "executable": self.executable},
+            usage={"channel": "cli", "executable": self.executable, "workspace": self.workspace, "has_diff": bool(diff_stat)},
         )
 
     def check_quota(self) -> Quota:

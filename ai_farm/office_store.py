@@ -1064,8 +1064,14 @@ class OfficeStore:
             return {"mode": "dry_run", "worker": worker["name"], "text": dry_text}
 
         slug = worker.get("adapter_slug") or ""
+        if worker.get("access_kind") in ("web", "subscription", "desktop"):
+            raise RuntimeError(
+                f"{worker['name']} 属于「{worker['badge']}」通道：网页端请点「🌐 打开网页 + 复制指令」，"
+                "桌面应用端请点「📂 导出 .md + 复制 @触发句」。「🚀 真调执行」仅用于 API 直连与 CLI 命令行通道。"
+            )
         if slug not in registered_slugs():
             raise RuntimeError(f"{worker['name']} 尚未绑定已注册的 Adapter slug ({slug})。")
+        workspace_dir = (payload.get("workspace_dir") or worker.get("workspace") or ".").strip() or "."
         if slug == "custom-api":
             adapter = get_adapter(
                 "custom-api",
@@ -1081,8 +1087,11 @@ class OfficeStore:
                 vendor=worker["vendor"],
                 model_id=worker["model"],
                 executable=worker.get("executable") or "codex",
+                workspace=workspace_dir,
                 paid=worker["paid"],
             )
+        elif slug == "codex-cli":
+            adapter = get_adapter("codex-cli", workspace=workspace_dir)
         else:
             adapter = get_adapter(slug)
         reply = adapter.chat(prompt)
@@ -1193,9 +1202,16 @@ class OfficeStore:
 
     def exporttaskmd(self, payload: dict[str, Any]) -> dict[str, Any]:
         task = self._find_task(payload.get("task_id") or payload.get("id"))
-        out_dir = Path(__file__).resolve().parents[1] / "ai-team" / "tasks" / "inbox"
+        custom_ws = (payload.get("workspace_dir") or "").strip()
+        if custom_ws:
+            base_dir = Path(custom_ws).expanduser().resolve()
+            out_dir = base_dir / "tasks" / "inbox"
+            rel_path = f"tasks/inbox/{task['id']}.md"
+        else:
+            base_dir = Path(__file__).resolve().parents[1]
+            out_dir = base_dir / "ai-team" / "tasks" / "inbox"
+            rel_path = f"ai-team/tasks/inbox/{task['id']}.md"
         out_dir.mkdir(parents=True, exist_ok=True)
-        rel_path = f"ai-team/tasks/inbox/{task['id']}.md"
         file_path = out_dir / f"{task['id']}.md"
 
         sub_model_hint = ""

@@ -15,6 +15,7 @@ let APP_STATE = {
   recruitLoggedInClicked: false,
   latestRecommendations: [],
   exampleCursor: 0,
+  customWorkspaceDir: "",
 };
 
 // =========================================================================
@@ -638,21 +639,36 @@ function renderSelectedTaskThread() {
         </div>
       </div>
 
-      <!-- 快捷操作栏：干跑 Adapter / 提交私聊汇报 / 跨厂商转交 / 经理统筹交付 -->
+      <!-- 快捷操作栏：4种调用方法全覆盖 + 提交私聊汇报 + 跨厂商转交 + 经理统筹交付 -->
       <div class="identity-block">
-        <h4>⚡ 员工执行与汇报操作</h4>
+        <h4>⚡ 员工执行与汇报操作（4 种调用方法一键直达）</h4>
+        <div style="margin-bottom:8px;">
+          <label style="font-size:11px;color:#cbd5e1;display:block;margin-bottom:3px;">
+            📁 目标工作文件夹路径（选填，供 CLI 执行或给 WorkBuddy 导出 .md 工单用；留空默认当前仓库）：
+          </label>
+          <input type="text" id="customWorkspaceInput" placeholder="例：C:\\Users\\你的用户名\\Desktop\\my-project（留空默认本仓库）"
+                 value="${escapeHTML(APP_STATE.customWorkspaceDir || '')}"
+                 oninput="APP_STATE.customWorkspaceDir = this.value.trim()"
+                 style="width:100%;background:#0f172a;border:1px solid #334155;color:#fff;padding:5px 8px;border-radius:6px;font-size:11px;" />
+        </div>
         <div style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:8px;">
-          <button class="btn btn-example" onclick="handleRunAdapterTask('${task.id}', false)">
-            🧪 调 AgentAdapter 干跑 (0消耗)
+          <button class="btn btn-example" onclick="handleRunAdapterTask('${task.id}', false)" title="不花钱演练路由与降级链">
+            🧪 干跑演练 (0消耗)
           </button>
-          <button class="btn btn-ghost" onclick="handleCopyWorkerPrompt('${task.id}')" title="一键复制标准指令，直接粘贴给 WorkBuddy 桌面端或网页端执行">
-            📋 复制工单指令 (给桌面/网页跑)
+          <button class="btn btn-primary" onclick="handleRunAdapterTask('${task.id}', true)" title="调用真实 API（读环境变量 Key）或本地 CLI（如 Codex）执行并回填结果">
+            🚀 真调执行 (API / CLI)
           </button>
-          <button class="btn btn-ghost" onclick="handleExportTaskMd('${task.id}')" title="生成工单 .md 文件并复制 @文件 触发句，可直接贴进 WorkBuddy @引用文件执行">
+          <button class="btn btn-ghost" onclick="handleOpenWebAndCopyPrompt('${task.id}')" title="方式1：直接打开该员工的免费聊天网页，并自动把标准工单指令复制到剪贴板">
+            🌐 打开网页 + 复制指令
+          </button>
+          <button class="btn btn-ghost" onclick="handleExportTaskMd('${task.id}')" title="方式3：在上方指定的工作文件夹生成工单 .md 并复制 @文件 触发句，供 WorkBuddy 等桌面应用执行">
             📂 导出 .md + 复制 @触发句
           </button>
-          <button class="btn btn-primary" onclick="handleDeliverFinalResult('${task.id}')">
-            📦 经理统筹交付总结果给董事长
+          <button class="btn btn-ghost" onclick="handleCopyWorkerPrompt('${task.id}')" title="仅复制纯文本模板指令">
+            📋 仅复制指令
+          </button>
+          <button class="btn btn-success" onclick="handleDeliverFinalResult('${task.id}')">
+            📦 经理统筹交付总结果
           </button>
         </div>
 
@@ -852,39 +868,69 @@ async function handleWorkerPrivateReport(event, taskId) {
 }
 
 async function handleRunAdapterTask(taskId, live = false) {
-  const res = await callOfficeAction("runadaptertask", { task_id: taskId, live });
+  const wsInput = document.getElementById("customWorkspaceInput");
+  const workspace_dir = wsInput ? wsInput.value.trim() : (APP_STATE.customWorkspaceDir || "");
+  const res = await callOfficeAction("runadaptertask", { task_id: taskId, live, workspace_dir });
   await openTaskPrivateThread(taskId);
   if (res) {
-    showToast(`🔌 ${res.mode === 'dry_run' ? 'AgentAdapter 干跑完成 (0消耗)' : '真实调用完成'}`);
+    showToast(`🔌 ${res.mode === 'dry_run' ? 'AgentAdapter 干跑完成 (0消耗)' : '🚀 真实调用完成，结果已写入私聊窗！'}`);
   }
 }
 
-async function handleCopyWorkerPrompt(taskId) {
-  const task = APP_STATE.tasks.find(t => t.id === taskId);
-  if (!task) return;
-  const promptText =
+function _buildWorkerPromptText(task) {
+  return (
     `你是执行员工，只做下面这件事，不要做决定。\n` +
     `任务目标：${task.goal}\n` +
     `输入内容：\n${task.input_text}\n` +
     `强制输出格式：${task.output_format}\n` +
     `验收标准：${task.acceptance}\n` +
-    `红线：不确定的写“未核实”，不要猜。不许自由发挥。`;
+    `红线：不确定的写“未核实”，不要猜。不许自由发挥。`
+  );
+}
+
+async function handleCopyWorkerPrompt(taskId) {
+  const task = APP_STATE.tasks.find(t => t.id === taskId);
+  if (!task) return;
+  const promptText = _buildWorkerPromptText(task);
   try {
     await navigator.clipboard.writeText(promptText);
-    showToast("📋 已复制标准派单指令！直接切到 WorkBuddy 桌面端粘贴运行，完成后把结果贴回下方汇报框即可。");
+    showToast("📋 已复制标准派单指令！直接粘贴运行，完成后把结果贴回下方汇报框即可。");
   } catch (_) {
     showToast("复制失败，请手动从下方系统消息框复制指令", true);
   }
 }
 
+async function handleOpenWebAndCopyPrompt(taskId) {
+  const task = APP_STATE.tasks.find(t => t.id === taskId);
+  if (!task) return;
+  const promptText = _buildWorkerPromptText(task);
+  try {
+    await navigator.clipboard.writeText(promptText);
+  } catch (_) {}
+
+  let worker = APP_STATE.agents.find(a => a.id === task.assigned_to);
+  if (!worker) {
+    worker = APP_STATE.agents.find(a => a.floor === "worker" && (a.login_url || a.usage_url));
+  }
+  const targetUrl = worker ? (worker.login_url || worker.usage_url) : "";
+  if (targetUrl) {
+    window.open(targetUrl, "_blank", "noopener");
+    showToast(`🌐 已打开 ${worker.name} 网页并将标准指令复制到剪贴板！切过去 Ctrl+V 回车即可。`);
+  } else {
+    showToast("📋 已复制标准指令（当前指派员工未填写网页 URL，请手动切到聊天网页粘贴）。");
+  }
+}
+
 async function handleExportTaskMd(taskId) {
-  const res = await callOfficeAction("exporttaskmd", { task_id: taskId });
+  const wsInput = document.getElementById("customWorkspaceInput");
+  const workspace_dir = wsInput ? wsInput.value.trim() : (APP_STATE.customWorkspaceDir || "");
+  const res = await callOfficeAction("exporttaskmd", { task_id: taskId, workspace_dir });
   if (!res) return;
   try {
     await navigator.clipboard.writeText(res.trigger_text);
-    showToast(`📂 已生成 ${res.rel_path} 并复制 @触发句！直接去 WorkBuddy 粘贴按回车即可。`);
+    showToast(`📂 已生成 ${res.file_path} 并复制 @触发句！直接去 WorkBuddy 粘贴按回车即可。`);
   } catch (_) {
-    showToast(`📂 已生成 ${res.rel_path}，触发句：${res.trigger_text}`);
+    showToast(`📂 已生成 ${res.file_path}，触发句：${res.trigger_text}`);
   }
 }
 
