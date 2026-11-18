@@ -3,45 +3,48 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta name="color-scheme" content="dark" />
   <title>AI 农场办公室 · 多级 AI 协同工作台 (Open Source)</title>
   <link rel="stylesheet" href="styles.css" />
 </head>
 <body>
-  <!-- 顶部总控栏 -->
+  <!-- 顶部总控栏：Linear 双层精密结构 -->
   <header class="topbar">
-    <div class="topbar-brand">
-      <div class="brand-logo" title="AI 农场办公室">🌾</div>
-      <div>
+    <div class="topbar-row-1">
+      <div class="topbar-brand">
+        <div class="brand-logo" title="AI 农场办公室">🌾</div>
         <div class="brand-title-row">
           <h1>AI 农场办公室</h1>
           <span class="tag-pill tag-goal">目标：边角活交免费员工，省付费经理 Token 与额度</span>
           <span id="connModeBadge" class="tag-pill tag-conn">检测后端中...</span>
         </div>
-        <div class="vendor-strip" id="vendorStrip">
-          <!-- 动态渲染各独立厂商条 -->
+      </div>
+
+      <div class="topbar-actions">
+        <div class="view-tabs">
+          <button class="view-tab active" id="tabBtnWorkspace" onclick="switchMainView('workspace')">💬 群聊工作台</button>
+          <button class="view-tab" id="tabBtnSkills" onclick="switchMainView('skills')">🧠 技能中心 (12)</button>
         </div>
+        <button class="btn btn-ghost" onclick="openAutomationGuideModal()" title="查看 4 种调用方法及可选加强自动化组件下载与教程">⚡ 4种调用/加强自动化</button>
+        <button class="btn btn-ghost" onclick="handleLoadSampleTeam()" title="在空白工作台导入匿名占位示例团队体验分工流程">🎭 载入示例团队</button>
+        <button class="btn btn-example" onclick="handleSeedExampleTask()">🧪 一键塞入通用示例任务</button>
+        <button class="btn btn-ghost" onclick="handleSyncProfiles()" title="同步全队账户资料：API查余额+模型列表，网页/订阅核对会员等级与到期时间">🔄 同步资料/额度</button>
+        <button class="btn btn-primary" onclick="openNewTaskModal()">＋ 派新任务</button>
+        <button class="btn btn-ghost" onclick="handleResetDemo()" title="重置回空白开源工作台">↺ 重置为空白</button>
       </div>
     </div>
 
-    <div class="topbar-stats" id="topProgressStats">
-      <div class="stat-chip">已认领 <strong id="statClaimed">0/0</strong></div>
-      <div class="stat-chip">已汇报 <strong id="statReported">0/0</strong></div>
-      <div class="stat-chip">已交付 <strong id="statDelivered">0</strong></div>
-      <div class="stat-chip stat-ok">已验收 <strong id="statAccepted">0</strong></div>
-      <div class="stat-chip stat-alert hidden" id="statLowQuota" title="点击查看低额度模型"></div>
-    </div>
-
-    <div class="topbar-actions">
-      <div class="view-tabs">
-        <button class="view-tab active" id="tabBtnWorkspace" onclick="switchMainView('workspace')">💬 群聊工作台</button>
-        <button class="view-tab" id="tabBtnSkills" onclick="switchMainView('skills')">🧠 技能中心 (12)</button>
+    <div class="topbar-row-2">
+      <div class="vendor-strip" id="vendorStrip">
+        <!-- 动态渲染各独立厂商条 -->
       </div>
-      <button class="btn btn-ghost" onclick="openAutomationGuideModal()" title="查看 4 种调用方法及可选加强自动化组件下载与教程">⚡ 4种调用/加强自动化</button>
-      <button class="btn btn-ghost" onclick="handleLoadSampleTeam()" title="在空白工作台导入匿名占位示例团队体验分工流程">🎭 载入示例团队</button>
-      <button class="btn btn-example" onclick="handleSeedExampleTask()">🧪 一键塞入通用示例任务</button>
-      <button class="btn btn-ghost" onclick="handleSyncProfiles()" title="同步全队账户资料：API查余额+模型列表，网页/订阅核对会员等级与到期时间">🔄 同步资料/额度</button>
-      <button class="btn btn-primary" onclick="openNewTaskModal()">＋ 派新任务</button>
-      <button class="btn btn-ghost" onclick="handleResetDemo()" title="重置回空白开源工作台">↺ 重置为空白</button>
+      <div class="topbar-stats" id="topProgressStats">
+        <div class="stat-chip">已认领 <strong id="statClaimed">0/0</strong></div>
+        <div class="stat-chip">已汇报 <strong id="statReported">0/0</strong></div>
+        <div class="stat-chip">已交付 <strong id="statDelivered">0</strong></div>
+        <div class="stat-chip stat-ok">已验收 <strong id="statAccepted">0</strong></div>
+        <div class="stat-chip stat-alert hidden" id="statLowQuota" title="点击查看低额度模型"></div>
+      </div>
     </div>
   </header>
 
@@ -195,7 +198,7 @@
         <button class="close-btn" onclick="closeRecruitModal()">✕</button>
       </div>
       <div class="modal-body">
-        <div class="path-switcher" style="grid-template-columns: repeat(2, 1fr);">
+        <div class="path-switcher">
           <button type="button" class="path-btn active" id="pathBtnApi" onclick="switchRecruitPath('api')">
             🔌 通道 A：API 接入
             <small>只填环境变量名，绝不收 Key 明文</small>
@@ -452,30 +455,32 @@
 
   <!-- 弹窗 4：4 种调用方法 & 可选加强自动化指南（含 vercel-labs/agent-desktop 下载与教程） -->
   <div class="modal-backdrop hidden" id="automationGuideModal">
-    <div class="modal-card" style="max-width:700px;">
+    <div class="modal-card modal-card-wide">
       <div class="modal-header">
         <h3>⚡ 4 种调用方法 & 可选加强自动化指南（零强迫，自由选择）</h3>
         <button class="close-btn" onclick="closeAutomationGuideModal()">✕</button>
       </div>
-      <div class="modal-body" style="display:flex;flex-direction:column;gap:10px;font-size:12px;line-height:1.55;">
-        <div class="security-banner web-banner" style="margin-bottom:0;">
+      <div class="modal-body modal-body-stack">
+        <div class="security-banner web-banner banner-compact">
           💡 <strong>新手友好说明：</strong>本农场开箱即用，不强制下载任何额外桌面工具！以下 4 种基础调用方法已全部内置；如果你想更进一步全自动解放双手，可按需自由选择下方两个「可选加强组件」。
         </div>
 
         <div class="identity-block">
           <h4>📋 内置 4 种基础调用方法（在任务私聊窗一键触发）</h4>
-          <div>1. <strong>🔌 API 直接调用：</strong>在系统环境变量配置好 Key 后，点 <code>🚀 真调执行</code> 自动并行执行并统计 Token，失败自动切换别家员工。</div>
-          <div>2. <strong>⌨️ CLI 命令行调用（如 Codex CLI）：</strong>点 <code>🚀 真调执行</code> 自动在本机工作区运行命令并收回 <code>git diff</code>。</div>
-          <div>3. <strong>🌐 免费聊天网页派单：</strong>点 <code>🌐 打开网页 + 复制指令</code>，自动打开官网并复制好工单模板，切过去粘贴即跑。</div>
-          <div>4. <strong>🖥️ 桌面端半自动派单（如 WorkBuddy / 豆包 PC）：</strong>点 <code>📂 导出 .md + 复制 @触发句</code>，生成工单文件后粘贴给客户端读本地目录，改完点 <code>🔍 抓取本地 git diff 摘要</code> 汇报。</div>
+          <div class="guide-list">
+            <div>1. <strong>🔌 API 直接调用：</strong>在系统环境变量配置好 Key 后，点 <code>🚀 真调执行</code> 自动并行执行并统计 Token，失败自动切换别家员工。</div>
+            <div>2. <strong>⌨️ CLI 命令行调用（如 Codex CLI）：</strong>点 <code>🚀 真调执行</code> 自动在本机工作区运行命令并收回 <code>git diff</code>。</div>
+            <div>3. <strong>🌐 免费聊天网页派单：</strong>点 <code>🌐 打开网页 + 复制指令</code>，自动打开官网并复制好工单模板，切过去粘贴即跑。</div>
+            <div>4. <strong>🖥️ 桌面端半自动派单（如 WorkBuddy / 豆包 PC）：</strong>点 <code>📂 导出 .md + 复制 @触发句</code>，生成工单文件后粘贴给客户端读本地目录，改完点 <code>🔍 抓取本地 git diff 摘要</code> 汇报。</div>
+          </div>
         </div>
 
         <div class="identity-block">
           <h4>🚀 可选加强自动化 ①：网页端「AI 农场传令兵」插件（免下载外部程序）</h4>
-          <div style="color:#cbd5e1;margin-bottom:6px;">
+          <div class="guide-desc">
             不想手动在网页间来回粘贴？可自由选择加载本项目自带的轻量 Chrome/Edge 扩展（位于仓库 <code>browser-extension/</code> 目录），打开网页自动填表发送、一键抓回最新回复。
           </div>
-          <div style="background:#0f172a;padding:7px 9px;border-radius:6px;border:1px solid #334155;">
+          <div class="guide-steps-box">
             <strong>3 步启用教程：</strong><br/>
             1) 浏览器打开 <code>chrome://extensions</code>（Edge 为 <code>edge://extensions</code>），开启右上角「开发者模式」；<br/>
             2) 点击「加载已解压的扩展程序」，选择本项目的 <code>browser-extension</code> 文件夹；<br/>
@@ -485,18 +490,18 @@
 
         <div class="identity-block">
           <h4>🖥️ 可选加强自动化 ②：桌面端静默驱动（引用开源项目 vercel-labs/agent-desktop）</h4>
-          <div style="color:#cbd5e1;margin-bottom:6px;">
+          <div class="guide-desc">
             对于没有公开 API/CLI 的桌面应用（如 WorkBuddy、豆包电脑版），如需从半自动升级为<strong>后台静默自动填入与发送</strong>，可自由选择下载安装 Vercel 开源的 <strong><code>agent-desktop</code></strong>（Apache-2.0 协议，读取 Windows 无障碍控件树，0 Token 消耗、不抢鼠标焦点）。不安装也完全不影响正常使用本农场！
           </div>
-          <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:8px;">
-            <a class="btn btn-primary" href="https://github.com/vercel-labs/agent-desktop" target="_blank" rel="noopener" style="text-decoration:none;">
+          <div class="guide-actions-row">
+            <a class="btn btn-primary btn-link" href="https://github.com/vercel-labs/agent-desktop" target="_blank" rel="noopener">
               🔗 前往 vercel-labs/agent-desktop 官方下载页 ↗
             </a>
-            <a class="btn btn-ghost" href="https://github.com/vercel-labs/agent-desktop/releases" target="_blank" rel="noopener" style="text-decoration:none;">
+            <a class="btn btn-ghost btn-link" href="https://github.com/vercel-labs/agent-desktop/releases" target="_blank" rel="noopener">
               📦 查看 Releases 安装包 ↗
             </a>
           </div>
-          <div style="background:#0f172a;padding:7px 9px;border-radius:6px;border:1px solid #334155;">
+          <div class="guide-steps-box">
             <strong>使用教程（3 步）：</strong><br/>
             1) 从上方官方链接下载安装 <code>agent-desktop</code> 并将其放入系统 <code>PATH</code>；<br/>
             2) 打开桌面端（如 WorkBuddy），运行 <code>agent-desktop snapshot --app WorkBuddy -i --json</code> 获取输入框与发送按钮的 <code>@ref</code> 编号；<br/>
