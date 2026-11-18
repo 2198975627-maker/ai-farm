@@ -1240,6 +1240,44 @@ class OfficeStore:
         trigger_text = f"@{rel_path} 严格按此工单要求执行（如有 0.00x 限时免费模型请优先切换），完成后直接保存结果。"
         return {"rel_path": rel_path, "file_path": str(file_path), "trigger_text": trigger_text}
 
+    def gettaskprompt(self, payload: dict[str, Any] | None = None) -> dict[str, Any]:
+        """Return the formatted worker prompt for a task (used by browser-extension bridge)."""
+        payload = payload or {}
+        task_id = (payload.get("task_id") or "").strip()
+        if not task_id:
+            task_id = str(self.state.get("last_web_task_id") or "")
+        task = None
+        if task_id:
+            for t in self.state["tasks"]:
+                if t["id"] == task_id:
+                    task = t
+                    break
+        if task is None and self.state["tasks"]:
+            task = self.state["tasks"][-1]
+        if task is None:
+            raise ValueError("当前办公室还没有待执行的工单。")
+
+        if payload.get("mark_dispatched"):
+            self.state["last_web_task_id"] = task["id"]
+            self.save()
+
+        prompt = (
+            f"你是执行员工，只做下面这件事，不要做决定。\n"
+            f"任务目标：{task['goal']}\n"
+            f"输入内容：\n{task['input_text']}\n"
+            f"强制输出格式：{task['output_format']}\n"
+            f"验收标准：{task['acceptance']}\n"
+            f"红线：不确定的写“未核实”，不要猜。不许自由发挥。"
+        )
+        return {
+            "task_id": task["id"],
+            "title": task["title"],
+            "assigned_to": task.get("assigned_to") or "",
+            "assigned_name": task.get("assigned_name") or "网页员工",
+            "status": task["status"],
+            "prompt": prompt,
+        }
+
     # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------

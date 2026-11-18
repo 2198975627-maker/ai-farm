@@ -908,14 +908,23 @@ async function handleOpenWebAndCopyPrompt(taskId) {
     await navigator.clipboard.writeText(promptText);
   } catch (_) {}
 
+  if (APP_STATE.backendOnline) {
+    try {
+      await callOfficeAction("gettaskprompt", { task_id: taskId, mark_dispatched: true });
+    } catch (_) {}
+  }
+
   let worker = APP_STATE.agents.find(a => a.id === task.assigned_to);
   if (!worker) {
     worker = APP_STATE.agents.find(a => a.floor === "worker" && (a.login_url || a.usage_url));
   }
-  const targetUrl = worker ? (worker.login_url || worker.usage_url) : "";
-  if (targetUrl) {
+  const baseUrl = worker ? (worker.login_url || worker.usage_url) : "";
+  if (baseUrl) {
+    const sep = baseUrl.includes("?") ? "&" : "?";
+    const shortQ = promptText.length <= 1200 ? `&q=${encodeURIComponent(promptText)}` : "";
+    const targetUrl = `${baseUrl}${sep}ai_farm_task=${encodeURIComponent(taskId)}${shortQ}#ai_farm_task=${encodeURIComponent(taskId)}`;
     window.open(targetUrl, "_blank", "noopener");
-    showToast(`🌐 已打开 ${worker.name} 网页并将标准指令复制到剪贴板！切过去 Ctrl+V 回车即可。`);
+    showToast(`🌐 已打开 ${worker.name} 网页（已装传令兵插件会自动填入发送；未装插件直接 Ctrl+V 回车即可）！`);
   } else {
     showToast("📋 已复制标准指令（当前指派员工未填写网页 URL，请手动切到聊天网页粘贴）。");
   }

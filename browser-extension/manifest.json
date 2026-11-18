@@ -1,0 +1,35 @@
+{
+  "manifest_version": 3,
+  "name": "AI Farm 农场传令兵 (Web Worker Bridge)",
+  "version": "0.1.0",
+  "description": "Connects free web AI chats (Kimi, Doubao, Qwen, Dola, ChatGPT, Gemini, Grok) to your local AI Farm Office (127.0.0.1:8765): auto-fills task prompts and sends replies back with one click.",
+  "permissions": [
+    "storage",
+    "activeTab"
+  ],
+  "host_permissions": [
+    "http://127.0.0.1:8765/*",
+    "http://localhost:8765/*"
+  ],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "content_scripts": [
+    {
+      "matches": [
+        "*://*.kimi.com/*",
+        "*://*.moonshot.cn/*",
+        "*://*.doubao.com/*",
+        "*://*.dola.com/*",
+        "*://*.qianwen.com/*",
+        "*://*.aliyun.com/*",
+        "*://chat.qwen.ai/*",
+        "*://chatgpt.com/*",
+        "*://gemini.google.com/*",
+        "*://grok.com/*"
+      ],
+      "js": ["content.js"],
+      "run_at": "document_idle"
+    }
+  ]
+}

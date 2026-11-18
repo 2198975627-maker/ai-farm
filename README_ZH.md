@@ -33,7 +33,7 @@
 ### ✅ 已经完成并可用
 - **四大标准接入接口（`ai_farm/adapters/`）**：统一抽象为 `AgentAdapter`（`chat()` + `check_quota()`）：
   - `🔌 API 通道`（`OpenAICompatibleAdapter`）：纯 Python 标准库直连 `/chat/completions`，Key 只读系统环境变量，支持查余额时顺便拉取 `GET /models` 可用模型列表；
-  - `🌐 网页 / 订阅通道`（`WebAdapter`）：在厂商官网「登录一次」，本地会话隔离，串行调用；
+  - `🌐 网页 / 订阅通道`（`WebAdapter` + `browser-extension/`）：在厂商官网「登录一次」，配套轻量级 Chrome/Edge 传令兵扩展（`browser-extension/`），打开聊天网页即可自动填入发送工单，并一键将最新回复交回农场私聊窗；
   - `⌨️ CLI 命令行通道`（`CLIAdapter`）：本地子进程执行终端 Agent 并回收改动 diff；
   - `🖥️ 桌面应用通道`：导出标准工单 `.md` + 一键复制 `@工单.md` 触发句，零封号风险联动本地文件夹。
 - **「AI 农场办公室」全栈网页工作台（`web/` + `office_server.py` + `office_store.py`）**：

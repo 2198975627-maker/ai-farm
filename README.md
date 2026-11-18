@@ -30,7 +30,7 @@ When building real projects with AI, two common extremes fail:
 ### ✅ Working Now
 - **4 Standard Access Channels (`ai_farm/adapters/`)** behind one unified `AgentAdapter` interface (`chat()` + `check_quota()`):
   - `🔌 API` (`OpenAICompatibleAdapter`): Zero-dependency stdlib client for `/chat/completions`; reads keys from env vars only; queries `GET /models` alongside balance checks.
-  - `🌐 Web / Subscription` (`WebAdapter`): One-time sign-in on the vendor's own page; sessions stay local (`~/.ai-farm/sessions/`).
+  - `🌐 Web / Subscription` (`WebAdapter` + `browser-extension/`): One-time sign-in on the vendor's own page; includes a lightweight Chrome/Edge extension (`browser-extension/`) that auto-fills dispatched task prompts into web chat tabs and posts replies back to the Office private thread with one click.
   - `⌨️ CLI Agents` (`CLIAdapter`): Headless subprocess execution in the target workspace directory, returning diffs/output for review.
   - `🖥️ Desktop GUI Agents`: Exports structured `ai-team/tasks/inbox/<TASK_ID>.md` tickets and copies an `@file` trigger prompt for safe, zero-ban local workspace handoff.
 - **Full-Stack "AI Farm Office" Web Workbench (`web/` + `office_server.py` + `office_store.py`)**:

@@ -222,6 +222,15 @@ def test_office_clean_starter_and_4_channels():
         except RuntimeError as e:
             assert "导出 .md" in str(e)
 
+        # 7. Browser extension bridge action (gettaskprompt) & manifest check
+        p_info = store.gettaskprompt({"task_id": task["id"], "mark_dispatched": True})
+        assert p_info["task_id"] == task["id"]
+        assert "不许自由发挥" in p_info["prompt"]
+        p_latest = store.gettaskprompt({})
+        assert p_latest["task_id"] == task["id"]
+        ext_manifest = Path(__file__).resolve().parents[1] / "browser-extension" / "manifest.json"
+        assert ext_manifest.exists()
+
 
 if __name__ == "__main__":
     for name in sorted(dir()):
