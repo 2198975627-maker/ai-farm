@@ -10,6 +10,7 @@ agents.yml
 .ai-farm/
 sessions/
 office_state.json
+.agents/
 
 # Python
 __pycache__/
