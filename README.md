@@ -1,132 +1,133 @@
-# AI Farm — 多级 AI 协同工作台（开源版）
+# AI Farm — Multi-Level AI Collaboration Workbench
 
-> **🚧 项目状态：半成品 / 开源原型演进中（Work in Progress）**
-> 本项目目前已跑通核心接口规范、本地「AI 农场办公室」网页工作台、API 直连与桌面端 `@工单.md` 半自动联动，并通过全部干跑测试；但**尚未打包为最终桌面客户端（App）**，网页端自动化与父子任务自动聚合仍在持续完善中（详见下文「当前进度与已知短板」）。
+> **English | [简体中文 (README_ZH.md)](README_ZH.md)**
+>
+> **🚧 Project Status: Work in Progress (WIP / Early Prototype)**  
+> AI Farm currently provides working standard adapter interfaces, a local web-based "AI Farm Office" workbench, direct OpenAI-compatible API execution, a headless CLI runner, a semi-automated `@task.md` handoff for desktop GUI agents, and passing dry-run tests. However, it is **not yet packaged as a standalone desktop app**, and several orchestration features remain under active development (see [Current Progress & Known Gaps](#current-progress--known-gaps)).
 
-> One icon = one model. Managers think, workers do, the chief integrates.  
-> 一个图标 = 一个模型。经理动脑，员工动手，总管整合。
-
----
-
-## 为什么要做这个 AI Farm？（项目核心目的）
-
-**核心目标：通过整合分工，把简单、重复、边角的工作交给免费资源轮换执行，从而节省付费强模型的 Token 和额度开销。**
-
-日常用 AI 做复杂项目时，大家常遇到两个痛点：
-1. **全用最强付费模型太贵、额度烧得太快**：拿昂贵的推理主力去干“批量翻译、整理表格、写样板测试、长文初筛”这些体力活，纯属高射炮打蚊子。
-2. **全用免费小模型又扛不住深度思考**：免费模型眼界、规划能力和代码架构判断力不够，直接让它主导项目很容易写崩。
-
-因此 **AI Farm** 借鉴公司协作制度，把 AI 团队拆成三层：
-- **第 0 层（你 / 董事长）**：只管发需求、拍板、验收结果、管好自己的环境变量 Key。
-- **第 1 层（总管 / Chief）**：唯一对接入口，负责拆小工单、按技能派单、记账、质检、整合汇报。
-- **第 2 层（经理层 · 2楼）**：强推理 / 付费模型，**只动脑**——做架构规划、技术选型、审查结果，且**只看摘要与 `git diff`，绝不重读万字原文**。
-- **第 3 层（员工层 · 1楼）**：来自多家不同厂商的免费 API、免费网页、CLI 或桌面应用端，**只动手**——专攻规则明确、重复度高、容易检查的小任务；谁今天额度用完就去「院子休息」明天再来，活自动轮换给别家不累的免费员工。
-
-> **框架定位说明**：本开源仓库**只提供“AI 农场办公室”的协作场地、调度规则与四大标准接入接口，不预设或捆绑任何私人账号与模型**——下载后具体接哪家 API、用什么网页端 AI、还是挂载什么本地 CLI / 桌面端 Agent，全部由你自己在界面里自由招募。
+> **One icon = one model. Managers think, workers do, the chief integrates.**
 
 ---
 
-## 当前真实进度与已知短板（半成品诚实清单）
+## Why AI Farm Exists (Core Goal)
 
-### ✅ 已经完成并可用
-- **四大标准接入接口（`ai_farm/adapters/`）**：统一抽象为 `AgentAdapter`（`chat()` + `check_quota()`）：
-  - `🔌 API 通道`（`OpenAICompatibleAdapter`）：纯 Python 标准库直连 `/chat/completions`，Key 只读系统环境变量，支持查余额时顺便拉取 `GET /models` 可用模型列表；
-  - `🌐 网页 / 订阅通道`（`WebAdapter`）：在厂商官网「登录一次」，本地会话隔离，串行调用；
-  - `⌨️ CLI 命令行通道`（`CLIAdapter`）：本地子进程执行终端 Agent 并回收改动 diff；
-  - `🖥️ 桌面应用通道`：导出标准工单 `.md` + 一键复制 `@工单.md` 触发句，零封号风险联动本地文件夹。
-- **「AI 农场办公室」全栈网页工作台（`web/` + `office_server.py` + `office_store.py`）**：
-  - 空白纯净起步（默认 1 个通用总管插槽 + 一键 **`🎭 载入示例团队`** 体验），支持鼠标拖拽图标在 2楼/1楼/院子休息之间换岗；
-  - 完整群聊闭环：经理发模板化任务卡 → 员工认领 → **🔒 私聊窗汇报（正文不刷大群）** → 跨厂商轮换转交（拦截同家多开）→ 经理统筹交付 → 董事长验收/打回；
-  - **四路招募弹窗**：API 路线绝不设 Key 输入框（误填 `sk-...` 直接拦截）；
-  - **法力值蓝条**：订阅制按周期（到限额降级为轻量模型，不真停），API 按余额（归零真停），`≤10%` 红条闪烁告警，未知一律显示「`额度未填`」不编造；
-  - **独立「技能中心」**：内置 12 个固定流程种子技能（SOP），支持选定高级模型作为裁判打分推荐、勾选批准后一键装备。
-- **干跑测试与隐私安全**：`tests/test_farm.py` 全部 **10 项干跑测试通过**（0 外部网络请求、0 费用消耗）；Windows 提供安全的本地环境变量配置脚本 `scripts/set-deepseek-key.ps1`。
+**The goal is to cut paid token and quota costs through division of labor: offload small, repetitive, well-defined edge work to free-tier resources, while reserving strong paid models for planning, review, and integration.**
 
-### 🚧 半成品 / 尚未打通（后续演进方向，详见 [docs/ROADMAP.md](docs/ROADMAP.md)）
-1. **父子任务自动拆合**：目前 1 张任务卡对应 1 名执行者；一个大需求同时拆成多张并行子任务再自动合回一张总交付卡的流程尚待完善。
-2. **本地零 Token 自动验算卡口**：如核对关键数字、字符数、自动运行单测后才报给经理审阅的自动化前置质检门禁，尚未完全固化到所有工单流里。
-3. **网页端免费员工自动调度**：受限于普通浏览器的跨域安全沙箱，当前网页工作台无法自己跨站控制第三方聊天网页，需由外置浏览器助手代跑，或等后续打包桌面应用。
-4. **桌面应用端打包与订阅自动同步**：目前为本地 Python + 网页版；后续计划打包为桌面客户端（内置浏览器托管登录态，开机自动同步各家网页会员等级与到期时间，并可直接用本地 MCP 反向连接 WorkBuddy / Codex 等客户端）。
+When building real projects with AI, two common extremes fail:
+1. **Using flagship paid models for everything burns quota too fast:** Spending expensive reasoning tokens on batch translation, table formatting, boilerplate unit tests, or summarizing long drafts wastes budget.
+2. **Relying solely on free/smaller models lacks depth:** Free or lightweight models often fail on architecture decisions, cross-file consistency, and strict judgment.
+
+**AI Farm** solves this with a structured 3-layer hierarchy:
+- **Layer 0 — Owner (You):** Publishes goals, makes final decisions, accepts/rejects deliveries, and manages your own environment variable keys.
+- **Layer 1 — Chief (Sole Entrypoint):** Breaks requests into small templated tasks, dispatches by skill, tracks quotas, runs QA, and integrates results.
+- **Layer 2 — Managers (2F · Paid / Strong Reasoning):** **Think only.** They plan architecture and review **diffs or summaries only** (never re-reading full source texts).
+- **Layer 3 — Workers (1F · Free / Low-Cost Rotation):** **Execute only.** Drawn from many *different* vendors' free tiers (free APIs, free web chats, local CLIs, or desktop apps). When one vendor hits its daily limit or rate limit, it moves to the **Rest Yard** until tomorrow, and work rotates to another vendor.
+
+> **Vendor-Agnostic Framework:** This open-source repository ships **only the collaboration office, rules, and standard adapter interfaces — zero pre-bundled personal accounts or hard-coded vendor locks**. Every user recruits their own APIs, web chats, CLI agents, or desktop tools after cloning.
 
 ---
 
-## 核心规则（Hard Rules）
+## Current Progress & Known Gaps
 
-1. **一个图标 = 一个模型/独立额度池。** 同一家既有付费又有免费，必须分开两个图标，角标标 `免费/付费` + `网页/API/订阅/CLI/桌面端`。不直接拥有独立免费积分的工具壳，不单占模型图标。
-2. **一厂商一免费号（免费农场轮换制）。** 不靠多开同一家小号绕额度，不做同款复制/孵化；转交任务只允许转给不同厂商。
-3. **经理动脑，员工动手。** 小活不请经理；经理只看 diff / 摘要，不重读全文；指令强制模板化（目标 + 输入 + 强制输出格式 + 验收标准 + “不许自由发挥”）；失败先换另一个免费员工，连续两次失败才升级给经理。
-4. **额度必须是真的。** 订阅制只显示当前刷新周期，API 制显示到余额归零；`≤10%` 变红闪烁告警；查不到就写 `额度未填`，绝不编造百分比。
-5. **密钥不进仓库。** API Key 只放系统环境变量，网页登录会话只存本地 `~/.ai-farm/sessions/`，个人花名册状态只存 `~/.ai-farm/office_state.json`（或单独建私有仓库备份），永远不写进开源代码仓库。
+### ✅ Working Now
+- **4 Standard Access Channels (`ai_farm/adapters/`)** behind one unified `AgentAdapter` interface (`chat()` + `check_quota()`):
+  - `🔌 API` (`OpenAICompatibleAdapter`): Zero-dependency stdlib client for `/chat/completions`; reads keys from env vars only; queries `GET /models` alongside balance checks.
+  - `🌐 Web / Subscription` (`WebAdapter`): One-time sign-in on the vendor's own page; sessions stay local (`~/.ai-farm/sessions/`).
+  - `⌨️ CLI Agents` (`CLIAdapter`): Headless subprocess execution in the target workspace directory, returning diffs/output for review.
+  - `🖥️ Desktop GUI Agents`: Exports structured `ai-team/tasks/inbox/<TASK_ID>.md` tickets and copies an `@file` trigger prompt for safe, zero-ban local workspace handoff.
+- **Full-Stack "AI Farm Office" Web Workbench (`web/` + `office_server.py` + `office_store.py`)**:
+  - Clean empty starter (only 1 generic Chief slot + optional **`🎭 Load Sample Team`** button for quick exploration); drag-and-drop icons across Manager / Worker / Rest floors.
+  - End-to-end group chat flow: Manager posts templated task card → Worker claims → **🔒 Private thread reporting (keeps long outputs out of main group chat)** → Cross-vendor-only reassignment → Manager consolidates final card → Owner accepts or rejects.
+  - 4-path Recruit modal: API path has **no key input box** (accepts env var names only and rejects plaintext `sk-...` keys).
+  - Real quota mana bars: Subscriptions track the current refresh cycle (downgrading to lite models at limit); APIs track balance to zero; `≤10%` turns red and flashes; unverified quotas display `额度未填` (Not filled in) — never invented.
+  - Independent **Skill Center**: 12 built-in SOP seed skills + senior-model judge scoring & batch approval.
+- **Tests & Key Safety:** All **10 dry-run tests** in `tests/test_farm.py` pass with zero network calls and zero spend; includes a Windows helper (`scripts/set-deepseek-key.ps1`) to save API keys safely into user env vars without printing or logging them.
+
+### 🚧 Work in Progress / Known Gaps (See [docs/ROADMAP.md](docs/ROADMAP.md))
+1. **Parent-to-Child Task Auto-Split & Aggregation:** Currently 1 task card maps to 1 worker thread; splitting one large request into N parallel worker sub-cards and auto-merging them into one delivery card is still planned.
+2. **Automated Zero-Token Pre-QA Gate:** Deterministic local verification scripts (character counts, number consistency checks, automated unit-test execution before manager review) are not yet wired into every task transition automatically.
+3. **Autonomous Web-Worker Driving:** Due to browser cross-origin sandboxes, the web UI cannot directly drive third-party web chat tabs on its own; web workers currently rely on an external browser assistant or manual copy-paste until packaged into a desktop shell.
+4. **Desktop App Packaging & Live Subscription Sync:** Packaging as an Electron/Tauri/PyWebView desktop app — to auto-sync subscription tiers/expiry dates at startup and connect desktop agents via a local MCP server — is planned for the next phase.
 
 ---
 
-## 快速开始
+## Hard Rules
+
+1. **One icon = one model / independent pool.** Paid and free tiers from the same vendor must be separate icons with clear badges (`Paid/Free` + `API/Web/Subscription/CLI/Desktop`). CLI wrappers without their own independent quota do not take separate model icons.
+2. **One free account per vendor.** Never create multi-account clones on the same vendor or let bots clone themselves; reassignments are enforced to **different vendors only**.
+3. **Managers think, workers do.** Small tasks never go to managers. Managers read diffs/summaries only. Instructions are strictly templated (`Goal + Input + Forced Output Format + Acceptance + "Do not improvise"`). Escalate to a manager only after **2 worker failures**.
+4. **Quotas must be real.** Never fabricate percentages. Unknown quotas stay marked as unverified (`额度未填`) and link to the vendor's live usage page.
+5. **Secrets never enter the repo.** API keys live strictly in environment variables; web sessions stay local (`~/.ai-farm/sessions/`); personal office state (`~/.ai-farm/office_state.json`) and `agents.yaml` are gitignored.
+
+---
+
+## Quick Start
 
 ```bash
-# 1. 克隆开源框架仓库
+# 1. Clone the open-source framework
 git clone https://github.com/2198975627-maker/ai-farm.git
 cd ai-farm
 
-# 2. 启动「AI 农场办公室」全栈网页工作台（仅用 Python 标准库，无需装第三方依赖）
+# 2. Start the "AI Farm Office" web workbench (Python 3.11+ stdlib only, zero extra dependencies)
 python -m ai_farm office --port 8765
-# 浏览器打开 http://127.0.0.1:8765 （或直接双击打开 web/index.html 静态预览）
+# Open http://127.0.0.1:8765 in your browser (or open web/index.html directly for static preview)
 
-# 3. 命令行交互式招募新 Agent（API 只问环境变量名，网页引导点登录一次）
+# 3. Recruit an agent interactively via CLI (asks for env var NAME only, or opens vendor login page)
 python -m ai_farm recruit
 
-# 4. 运行干跑测试（10 项测试，不调真实接口、不花一分钱额度）
+# 4. Run dry-run tests (10 tests, zero network calls, zero cost)
 python tests/test_farm.py
 python -m ai_farm run examples/tasks/example-task.md --dry-run
 
-# 5. 核查花名册中已配置接口的真实额度与可用模型
+# 5. Check live quota & available models for configured APIs
 python -m ai_farm quota
 
-# 6. 真跑一次 API 工单（需先在自己的终端设置好环境变量 Key，并加 --live）
-export DEEPSEEK_API_KEY="<你的 Key>"   # Windows PowerShell: $env:DEEPSEEK_API_KEY="<你的 Key>"
+# 6. Run a live API task (set your key in your shell env var first)
+export DEEPSEEK_API_KEY="<YOUR_KEY>"   # PowerShell: $env:DEEPSEEK_API_KEY="<YOUR_KEY>"
 python -m ai_farm run examples/tasks/example-task.md --live
 ```
 
-## 无 CLI 桌面应用端（WorkBuddy / 豆包电脑版等）半自动调用法
+## Semi-Automated Handoff for GUI Desktop Agents (No CLI / No Public API)
 
-对于**没有开放 HTTP API 或 CLI 命令行**、但能直接读写本地电脑目录的桌面应用，农场采用零封号风险的**「工作空间文件信箱 + `@工单.md` 触发」半自动协同**：
+For desktop AI agents that can read/write local workspace folders but expose no public API or CLI (e.g., WorkBuddy, Doubao Desktop), AI Farm uses a zero-ban **Workspace File Mailbox (`@task.md`)** workflow:
 
-1. **绑定同一工作空间**：在桌面端左下角点击「选择工作空间」，选定本项目的工程目录。
-2. **导出工单并复制触发句**：在办公室网页（`http://127.0.0.1:8765`）打开任意任务的私聊汇报窗，点击 **`📂 导出 .md + 复制 @触发句`**。系统会自动在 `ai-team/tasks/inbox/` 生成标准工单 `.md`（若配置了子模型倍率清单，自动注明优先切换 `0.00x` 限时免费模型），并复制触发句。
-3. **一键投喂与交差**：切到桌面端输入框直接 `Ctrl+V` 粘贴并回车（如 `@ai-team/tasks/inbox/TASK-xxx.md 严格按此工单要求执行...`）。桌面端改完本地文件后，回到农场审阅 `git diff` 并验收即可。
+1. **Bind the same workspace:** Point the desktop agent's workspace folder to this repository directory.
+2. **Export & copy trigger:** Open any task's private thread in the Office web UI (`http://127.0.0.1:8765`) and click **`📂 导出 .md + 复制 @触发句`**. This writes `ai-team/tasks/inbox/<TASK_ID>.md` (noting any preferred `0.00x` free sub-model) and copies an `@file` trigger prompt to your clipboard.
+3. **Execute & review diff:** Paste (`Ctrl+V`) into the desktop agent and hit Enter. Once it edits local files, review `git diff` in the farm and accept the delivery.
 
 ---
 
-## 项目结构
+## Project Structure
 
 ```text
 ai-farm/
   ai_farm/
-    adapters/base.py               # AgentAdapter 统一接口 (chat + check_quota)
-    adapters/openai_compatible.py  # API 通道：/chat/completions + /models，Key 仅读环境变量
-    adapters/web.py                # 网页/订阅通道：厂商官网登录一次 + 本地会话
-    adapters/cli_agent.py          # CLI 通道：本地命令行 Agent 子进程调度
-    adapters/registry.py           # 按 slug 注册适配器（30行内即可接入新厂商）
-    roster.py                      # 花名册校验：一图标一模型、拦截 Key 明文
-    dispatcher.py                  # 派单器：员工优先、失败换员工、两次失败升经理
-    quota.py                       # 额度状态：订阅降级 vs API 归零停用、<=10% 告警
-    skills.py                      # 技能中心：12 个固定流程种子技能 + 高级模型裁判打分
-    office_store.py                # 办公室状态引擎：工作台动作、同步、导出 @工单.md
-    office_server.py               # 办公室本地 HTTP 服务端（纯 Python 标准库）
-    cli.py                         # 命令行入口：office / recruit / run / quota
+    adapters/base.py               # Unified AgentAdapter protocol (chat + check_quota)
+    adapters/openai_compatible.py  # API channel: /chat/completions + /models via env var keys
+    adapters/web.py                # Web/Subscription channel: local one-time browser login
+    adapters/cli_agent.py          # CLI channel: local subprocess workspace runner
+    adapters/registry.py           # Slug registry (add a new vendor in <= 30 lines)
+    roster.py                      # Roster validation: one icon = one model, blocks raw keys
+    dispatcher.py                  # Worker-first fallback dispatcher (2 worker fails -> manager)
+    quota.py                       # Quota state logic (subscription downgrade vs API hard stop)
+    skills.py                      # Skill Center: 12 SOP seed skills + senior-model judge
+    office_store.py                # Office state engine, profile sync & @task.md export
+    office_server.py               # Local HTTP server (Python stdlib only)
+    cli.py                         # CLI entrypoint: office / recruit / run / quota
   web/
-    index.html                     # 办公室前端（三栏工作台 + 技能中心 + 四路招募弹窗）
-    styles.css                     # 样式表（含 <=10% 红条闪烁告警与手机端响应式布局）
-    app.js                         # 前端交互逻辑（支持连接 Python 后端或静态演示）
-  ai-team/                         # 协作设计文档、通用花名册模板、dispatcher v2、工单模板
-  scripts/                         # 安全写入环境变量的辅助脚本（不保存 Key 明文）
+    index.html                     # Office workbench UI (3-column layout, Skill Center, 4-path recruit)
+    styles.css                     # Responsive styles & <=10% red flashing mana bars
+    app.js                         # Frontend controller (live Python backend or static preview)
+  ai-team/                         # Collaboration design docs, blank roster template, task template
+  scripts/                         # Safe env-var key setup helpers (never store plaintext keys)
   docs/                            # ARCHITECTURE / OFFICE / RECRUITING / ROADMAP / SECURITY
   examples/
-    agents.example.yaml            # 示例花名册（仅含环境变量名占位符，无真实 Key）
-    tasks/example-task.md          # 通用示例工单
+    agents.example.yaml            # Placeholder roster example (no real keys or accounts)
+    tasks/example-task.md          # Generic sample task
   tests/
-    test_farm.py                   # 10 项干跑测试（零网络请求、零额度消耗）
+    test_farm.py                   # 10 dry-run tests (zero network, zero spend)
 ```
 
 ## License
 
-MIT — 见 `LICENSE`。
+MIT — see [LICENSE](LICENSE).
