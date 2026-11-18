@@ -95,6 +95,18 @@ For desktop AI agents that can read/write local workspace folders but expose no 
 
 ---
 
+## Optional Automation Enhancements & Acknowledgements
+
+AI Farm works out-of-the-box with Python's standard library alone — **no extra tools are required for beginners**. If you want deeper hands-free automation for web chats or desktop GUI apps, you can optionally enable either of the following:
+
+1. **Web Chat Auto-Fill & Reply Capture (`browser-extension/`):** Load the included Chrome/Edge MV3 extension (`browser-extension/`) in Developer Mode to auto-fill dispatched prompts into free web chat tabs and send replies back with one click.
+2. **Headless Desktop GUI Automation (powered by [`vercel-labs/agent-desktop`](https://github.com/vercel-labs/agent-desktop)):**
+   - For desktop AI apps without public APIs or CLIs (e.g., WorkBuddy, Doubao Desktop), you can optionally install **`agent-desktop`** (Apache-2.0, Rust CLI using native OS Accessibility Trees — zero vision tokens, no mouse-focus stealing).
+   - **Download & Docs:** [https://github.com/vercel-labs/agent-desktop](https://github.com/vercel-labs/agent-desktop)
+   - **Quick usage:** Run `agent-desktop snapshot --app <AppName> -i --json` to locate the input box `ref`, then feed `@ai-team/tasks/inbox/<TASK_ID>.md` via `agent-desktop type` without interrupting your desktop workflow.
+
+---
+
 ## Project Structure
 
 ```text

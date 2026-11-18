@@ -98,6 +98,18 @@ python -m ai_farm run examples/tasks/example-task.md --live
 
 ---
 
+## 可选加强自动化与开源致谢（自由选择，新手无需强装）
+
+本农场仅依赖 Python 标准库即可开箱运行，**不强迫新手安装额外软件**。如果你希望把网页端或桌面端进一步升级为免手动全自动，可以按需自由选择：
+
+1. **网页端加强（`browser-extension/`）**：在 Chrome / Edge 加载本项目自带的轻量传令兵扩展，打开免费聊天网页自动填入发送、一键抓回复交回农场私聊窗。
+2. **桌面端加强（引用开源项目 [`vercel-labs/agent-desktop`](https://github.com/vercel-labs/agent-desktop)）**：
+   - 针对没有公开 API / CLI 的桌面客户端（如 WorkBuddy、豆包电脑版），可选下载安装 Vercel 开源的 **`agent-desktop`**（Apache-2.0 协议，读取 Windows 原生无障碍控件树，0 视觉 Token 消耗、不抢鼠标焦点）。
+   - **官方下载与文档**：[https://github.com/vercel-labs/agent-desktop](https://github.com/vercel-labs/agent-desktop)
+   - **用法**：安装后通过 `agent-desktop snapshot --app <应用名> -i --json` 获取输入框编号，配合本农场的 `@工单.md` 实现后台静默投喂。
+
+---
+
 ## 项目结构
 
 ```text

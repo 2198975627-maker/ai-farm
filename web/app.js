@@ -1172,6 +1172,12 @@ function openNewSkillModal() {
 function closeNewSkillModal() {
   document.getElementById("newSkillModal").classList.add("hidden");
 }
+function openAutomationGuideModal() {
+  document.getElementById("automationGuideModal").classList.remove("hidden");
+}
+function closeAutomationGuideModal() {
+  document.getElementById("automationGuideModal").classList.add("hidden");
+}
 async function handleCreateSkillSubmit(event) {
   event.preventDefault();
   await callOfficeAction("createskill", {
