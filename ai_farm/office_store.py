@@ -65,8 +65,42 @@ def _default_agents() -> list[dict[str, Any]]:
             "icon_kind": "chief",
             "tier": "总管插槽",
             "expires_at": "",
+            "tokens_used": 0,
+            "session_count": 0,
         }
     ]
+
+
+CODE_REVIEW_SKILL_SLUGS = {"cheap-code-jobs", "code-review-checklist", "test-cases"}
+CRITICAL_OPS = {"merge", "delete_code", "deploy"}
+LOW_RISK_OPS = {"auto_dispatch", "low_risk_run"}
+
+
+def format_conclusion_report(
+    conclusion: str,
+    changed_files: list[str] | str | None = None,
+    test_result: str = "未运行测试",
+    diff_summary: str = "",
+) -> str:
+    """Build a strict Conclusion-Only report ('A message, not the conversation')."""
+    conc = (conclusion or "").strip()
+    if not conc:
+        raise ValueError("结论不能为空（只传结论，不传整段对话）。")
+    if isinstance(changed_files, list):
+        files_clean = [str(f).strip() for f in changed_files if str(f).strip()]
+        files_str = ", ".join(files_clean) if files_clean else "无"
+    else:
+        files_str = (str(changed_files or "").strip()) or "无"
+    tests_str = (test_result or "").strip() or "未运行测试"
+    parts = [
+        f"【结论】{conc}",
+        f"【改动文件】{files_str}",
+        f"【测试结果】{tests_str}",
+    ]
+    ds = (diff_summary or "").strip()
+    if ds:
+        parts.append(f"【Diff摘要】{ds[:360]}")
+    return "\n".join(parts)
 
 
 SAMPLE_DEMO_TEAM: list[dict[str, Any]] = [
@@ -146,6 +180,7 @@ GENERIC_EXAMPLE_TASKS: list[dict[str, Any]] = [
         "output_format": "Markdown 三列表格：| 序号 | 英文原句 | 中文翻译 |，不增不减，不要开场白。",
         "acceptance": "10/10 条全齐、无漏译、无编造参数；经理只审表格，不重读原文。不许自由发挥。",
         "skill_slug": "batch-translate",
+        "task_kind": "small",
     },
     {
         "title": "【通用示例 2/4】杂乱活动报名名单去重并整理成标准表格",
@@ -162,6 +197,7 @@ GENERIC_EXAMPLE_TASKS: list[dict[str, Any]] = [
         "output_format": "Markdown 表格：| 姓名 | 班级 | 分工 | 备注(缺失项标[缺失]) |",
         "acceptance": "去重后共 4 人，缺失字段标 [缺失]，不编造电话或班级。不许自由发挥。",
         "skill_slug": "table-cleanup",
+        "task_kind": "small",
     },
     {
         "title": "【通用示例 3/4】科普短文生成三档摘要（一句话 / 100字 / 要点清单）",
@@ -176,16 +212,18 @@ GENERIC_EXAMPLE_TASKS: list[dict[str, Any]] = [
         "output_format": "严格分三块：1.【一句话结论】 2.【百字摘要】 3.【关键数字核对清单】",
         "acceptance": "日期、数字、人名与原文100%一致；字数按去空白后全部字符计。不许自由发挥。",
         "skill_slug": "three-tier-summary",
+        "task_kind": "small",
     },
     {
-        "title": "【通用示例 4/4】纯函数 calc_discount 的 3 个边界单元测试生成",
+        "title": "【通用示例 4/4】修复 calc_discount 负数折扣 Bug 并补边界测试（写-审-改闭环）",
         "manager_id": "chief",
         "assigned_to": "",
-        "goal": "为纯函数 calc_discount(price, rate) 编写正常、边界、异常 3 个单元测试。",
+        "goal": "为纯函数 calc_discount(price, rate) 修复边界校验漏洞并编写 3 个单元测试（写完需独立审查 Agent 过问题清单）。",
         "input_text": "def calc_discount(price: float, rate: float) -> float: # rate in [0.0, 1.0], raises ValueError if invalid",
-        "output_format": "仅输出 Python 测试函数代码 + 3 行覆盖说明，不改业务代码。",
-        "acceptance": "包含正常折扣(100, 0.8 -> 80)、边界(100, 0 -> 0)、异常(ValueError)三类断言。不许自由发挥。",
+        "output_format": "只输出：【结论】+【改动文件】+【测试结果】+【Diff摘要】，不贴全文对话。",
+        "acceptance": "包含正常折扣(100, 0.8 -> 80)、边界(100, 0 -> 0)、异常(ValueError)断言，且通过独立 Agent 审查清单。不许自由发挥。",
         "skill_slug": "test-cases",
+        "task_kind": "code_change",
     },
 ]
 
@@ -201,9 +239,29 @@ class OfficeStore:
             "tasks": [],
             "group_messages": [],
             "task_messages": {},
+            "hud_flights": [],
+            "pending_approvals": [],
+            "settings": {"auto_execute_low_risk": False},
             "example_cursor": 0,
         }
         self._load_or_seed()
+
+    def _ensure_runtime_keys(self) -> None:
+        self.state.setdefault("hud_flights", [])
+        self.state.setdefault("pending_approvals", [])
+        settings = self.state.setdefault("settings", {})
+        settings.setdefault("auto_execute_low_risk", False)
+        for a in self.state.get("agents", []):
+            a.setdefault("tokens_used", 0)
+            a.setdefault("session_count", 0)
+        for t in self.state.get("tasks", []):
+            t.setdefault("task_kind", "small")
+            t.setdefault("requires_code_review", t.get("task_kind") == "code_change")
+            t.setdefault("reviewer_id", "")
+            t.setdefault("reviewer_name", "")
+            t.setdefault("review_status", "pending_review" if t.get("requires_code_review") else "not_needed")
+            t.setdefault("review_issues", [])
+            t.setdefault("revision_round", 0)
 
     def _load_or_seed(self) -> None:
         if self.state_path.exists():
@@ -211,6 +269,7 @@ class OfficeStore:
                 loaded = json.loads(self.state_path.read_text(encoding="utf-8"))
                 if isinstance(loaded, dict) and loaded.get("agents"):
                     self.state = loaded
+                    self._ensure_runtime_keys()
                     return
             except Exception:  # noqa: BLE001
                 pass
@@ -240,6 +299,9 @@ class OfficeStore:
         ]
         self.state["tasks"] = []
         self.state["task_messages"] = {}
+        self.state["hud_flights"] = []
+        self.state["pending_approvals"] = []
+        self.state["settings"] = {"auto_execute_low_risk": False}
         self.state["example_cursor"] = 0
         self.state["group_messages"] = [
             {
@@ -421,6 +483,8 @@ class OfficeStore:
             "expires_at": payload.get("expires_at") or "",
             "icon_kind": "text",
             "adapter_slug": adapter_slug,
+            "tokens_used": 0,
+            "session_count": 0,
         }
         if access_kind in ("web", "subscription") and payload.get("logged_in"):
             sdir = session_dir(slug_id)
@@ -557,7 +621,7 @@ class OfficeStore:
     def listtasks(self) -> dict[str, Any]:
         tasks = list(reversed(self.state["tasks"]))
         total = len(tasks)
-        claimed = sum(1 for t in tasks if t["status"] in ("accepted", "working", "delivered", "accepted_done"))
+        claimed = sum(1 for t in tasks if t["status"] in ("accepted", "working", "in_review", "delivered", "accepted_done"))
         reported = sum(1 for t in tasks if t.get("worker_reported"))
         delivered = sum(1 for t in tasks if t["status"] in ("delivered", "accepted_done"))
         accepted = sum(1 for t in tasks if t["status"] == "accepted_done")
@@ -571,6 +635,20 @@ class OfficeStore:
                 "accepted": accepted,
             },
         }
+
+    def _pick_reviewer(self, assigned_id: str, manager: dict[str, Any], requested_id: str = "") -> dict[str, Any]:
+        """Choose a reviewer strictly distinct from the coding author."""
+        if requested_id:
+            if requested_id == assigned_id:
+                raise ValueError("写—审—改闭环铁律：写代码的 Agent 与审查 Agent 必须分开，不能自己审自己。")
+            cand = self._find_agent(requested_id)
+            if cand["floor"] == "rest" or cand["status"] == "exhausted":
+                raise ValueError(f"审查 Agent {cand['name']} 正在休息或额度已耗尽，请换一位在线成员。")
+            return cand
+        for a in self.state["agents"]:
+            if a["id"] != assigned_id and a["floor"] in ("manager", "worker") and a["status"] == "ready":
+                return a
+        return manager
 
     def createtask(self, payload: dict[str, Any]) -> dict[str, Any]:
         title = (payload.get("title") or "").strip()
@@ -598,6 +676,28 @@ class OfficeStore:
         acceptance = (payload.get("acceptance") or "结果完整、不编造数据、符合格式要求").strip()
         skill_slug = payload.get("skill_slug") or ""
 
+        raw_kind = (payload.get("task_kind") or "").strip().lower()
+        if raw_kind in ("code_change", "small"):
+            task_kind = raw_kind
+        elif payload.get("requires_code_review") is True:
+            task_kind = "code_change"
+        elif payload.get("requires_code_review") is False:
+            task_kind = "small"
+        else:
+            task_kind = "code_change" if skill_slug in CODE_REVIEW_SKILL_SLUGS else "small"
+        requires_code_review = task_kind == "code_change"
+
+        reviewer_id = ""
+        reviewer_name = ""
+        if requires_code_review:
+            rev = self._pick_reviewer(
+                assigned_id=assigned_agent["id"] if assigned_agent else "",
+                manager=manager,
+                requested_id=(payload.get("reviewer_id") or "").strip(),
+            )
+            reviewer_id = rev["id"]
+            reviewer_name = rev["name"]
+
         task = {
             "id": task_id,
             "title": title,
@@ -610,8 +710,15 @@ class OfficeStore:
             "input_text": input_text,
             "output_format": output_format,
             "acceptance": acceptance,
-            "rule_footer": "不许自由发挥。不确定写「未核实」，绝不乱猜。",
+            "rule_footer": "只传结论、改动文件、测试结果，不传整段对话。不许自由发挥，不确定写「未核实」。",
             "skill_slug": skill_slug,
+            "task_kind": task_kind,
+            "requires_code_review": requires_code_review,
+            "reviewer_id": reviewer_id,
+            "reviewer_name": reviewer_name,
+            "review_status": "pending_review" if requires_code_review else "not_needed",
+            "review_issues": [],
+            "revision_round": 0,
             "status": "assigned",
             "worker_reported": False,
             "latest_report_summary": "",
@@ -620,6 +727,11 @@ class OfficeStore:
             "created_at": _now_iso(),
         }
         self.state["tasks"].append(task)
+        review_line = (
+            f"\n• **写—审—改闭环**：开启（改代码任务，写完由 **{reviewer_name}** 独立审查问题清单）"
+            if requires_code_review
+            else "\n• **流程档位**：小活直通（免代码审查，省 Token）"
+        )
         self.state["task_messages"][task_id] = [
             {
                 "id": f"tmsg-{int(time.time() * 1000)}",
@@ -628,12 +740,13 @@ class OfficeStore:
                 "sender_name": manager["name"],
                 "kind": "template_dispatch",
                 "text": (
-                    f"📋 **模板化指令下发（省 Token 规范）**\n"
+                    f"📋 **模板化指令下发（只传结论 · 省 Token）**\n"
                     f"• **目标**：{goal}\n"
                     f"• **输入**：{input_text}\n"
                     f"• **强制输出格式**：{output_format}\n"
                     f"• **验收标准**：{acceptance}\n"
-                    f"• **红线**：不许自由发挥，做完在本私聊窗汇报，切勿把长正文刷到大群里。"
+                    f"• **汇报模板**：【结论】+【改动文件】+【测试结果】（不贴整段对话）"
+                    f"{review_line}"
                 ),
                 "created_at": _now_iso(),
             }
@@ -646,12 +759,23 @@ class OfficeStore:
             kind="task_card",
             task_id=task_id,
             text=(
-                f"📌 **派发新任务卡片** `{task_id}` · **{title}**\n"
-                f"{mention}请按模板执行：\n"
+                f"📌 **派发新任务卡片** `{task_id}` · **{title}**"
+                + (" `写-审-改闭环`" if requires_code_review else " `小活省Token`")
+                + f"\n{mention}请按模板执行：\n"
                 f"• **目标**：{goal}\n"
                 f"• **强制格式**：{output_format}\n"
-                f"• **验收标准**：{acceptance}（**不许自由发挥**）"
+                f"• **验收标准**：{acceptance}（**只传结论不贴对话**）"
             ),
+        )
+        self._record_flight(
+            from_id=manager["id"],
+            from_name=manager["name"],
+            to_id=assigned_agent["id"] if assigned_agent else "workers",
+            to_name=assigned_agent["name"] if assigned_agent else "1楼空闲员工池",
+            kind="dispatch",
+            task_id=task_id,
+            summary=f"派单: {title[:24]}",
+            channel=self._channel_label(assigned_agent) if assigned_agent else "工作台广播",
         )
         self.save()
         return task
@@ -687,6 +811,11 @@ class OfficeStore:
         task["assigned_name"] = worker["name"]
         task["assigned_vendor"] = worker["vendor"]
         task["status"] = "working"
+        if task.get("requires_code_review") and (not task.get("reviewer_id") or task.get("reviewer_id") == worker["id"]):
+            mgr = self._find_agent(task["manager_id"]) if task.get("manager_id") else self._chief_agent()
+            rev = self._pick_reviewer(assigned_id=worker["id"], manager=mgr)
+            task["reviewer_id"] = rev["id"]
+            task["reviewer_name"] = rev["name"]
 
         self._append_task_msg(
             task["id"],
@@ -701,30 +830,70 @@ class OfficeStore:
             sender_role="worker",
             kind="claim_notice",
             task_id=task["id"],
-            text=f"✋ **{worker['name']}**（`{worker['badge']}`）已领取任务 `{task['id']}`《{task['title']}》，正在执行中（详细汇报走私聊，不刷群）。",
+            text=f"✋ **{worker['name']}**（`{worker['badge']}`）已领取任务 `{task['id']}`《{task['title']}》，正在执行中（只传结论汇报，不刷群）。",
+        )
+        self._record_flight(
+            from_id=worker["id"],
+            from_name=worker["name"],
+            to_id=task["manager_id"],
+            to_name=task["manager_name"],
+            kind="claim",
+            task_id=task["id"],
+            summary="接单开工",
+            channel=self._channel_label(worker),
         )
         self.save()
         return task
 
     # ------------------------------------------------------------------
-    # Action 12 & 13: listmessages & postmessage (Private Thread Report)
+    # Action 12 & 13: listmessages & postmessage (Conclusion-Only Report)
     # ------------------------------------------------------------------
     def listmessages(self, payload: dict[str, Any]) -> list[dict[str, Any]]:
         task_id = payload.get("task_id") or payload.get("id")
         return self.state["task_messages"].get(task_id, [])
+
+    def _reject_full_conversation_paste(self, text: str) -> None:
+        """Prevent pasting raw multi-turn chat transcripts instead of conclusions."""
+        turn_markers = len(re.findall(r"(?im)^(user|assistant|human|ai|老板|员工)\s*[:：]", text))
+        if turn_markers >= 3 or (len(text) > 1600 and "【结论】" not in text):
+            raise ValueError(
+                "结论-only 拦截：禁止粘贴整段聊天记录或超长全文！请只填【结论】+【改动文件】+【测试结果】。"
+            )
 
     def postmessage(self, payload: dict[str, Any]) -> dict[str, Any]:
         task = self._find_task(payload.get("task_id"))
         chief = self._chief_agent()
         sender_id = payload.get("sender_id") or task.get("assigned_to") or chief["id"]
         if sender_id in ("owner", "gao"):
-            sender = {"id": "owner", "name": "你 (董事长)"}
+            sender: dict[str, Any] = {"id": "owner", "name": "你 (董事长)", "access_kind": "chief"}
         else:
             sender = self._find_agent(sender_id)
-        text = (payload.get("text") or "").strip()
+
         is_delivery = bool(payload.get("is_delivery", True))
-        if not text:
-            raise ValueError("私聊汇报内容不能为空。")
+        conclusion = (payload.get("conclusion") or "").strip()
+        changed_files = payload.get("changed_files")
+        test_result = (payload.get("test_result") or "").strip()
+        diff_summary = (payload.get("diff_summary") or "").strip()
+
+        if conclusion:
+            text = format_conclusion_report(
+                conclusion=conclusion,
+                changed_files=changed_files,
+                test_result=test_result or "未运行测试",
+                diff_summary=diff_summary,
+            )
+            report_meta = {
+                "conclusion": conclusion,
+                "changed_files": changed_files if isinstance(changed_files, list) else ([changed_files] if changed_files else []),
+                "test_result": test_result or "未运行测试",
+            }
+        else:
+            text = (payload.get("text") or "").strip()
+            if not text:
+                raise ValueError("私聊汇报内容不能为空。")
+            if is_delivery:
+                self._reject_full_conversation_paste(text)
+            report_meta = None
 
         msg = self._append_task_msg(
             task["id"],
@@ -734,11 +903,25 @@ class OfficeStore:
             text=text,
             usage=payload.get("usage"),
         )
+        if report_meta:
+            msg["report_meta"] = report_meta
+
         if is_delivery:
+            if sender["id"] not in ("owner", "gao"):
+                sender["session_count"] = int(sender.get("session_count") or 0) + 1
             task["worker_reported"] = True
-            task["latest_report_summary"] = text[:280] + ("..." if len(text) > 280 else "")
-            if task["status"] in ("assigned", "accepted"):
+            task["latest_report_summary"] = text[:320] + ("..." if len(text) > 320 else "")
+            if task.get("requires_code_review"):
+                task["status"] = "in_review"
+                task["review_status"] = "pending_review"
+                if not task.get("reviewer_id") or task.get("reviewer_id") == sender["id"]:
+                    mgr = self._find_agent(task["manager_id"]) if task.get("manager_id") else chief
+                    rev = self._pick_reviewer(assigned_id=sender["id"], manager=mgr)
+                    task["reviewer_id"] = rev["id"]
+                    task["reviewer_name"] = rev["name"]
+            elif task["status"] in ("assigned", "accepted"):
                 task["status"] = "working"
+
             self._append_group_msg(
                 sender_id=sender["id"],
                 sender_name=sender["name"],
@@ -746,12 +929,126 @@ class OfficeStore:
                 kind="private_report_lock",
                 task_id=task["id"],
                 text=(
-                    f"🔒 **{sender['name']}** 已在私聊向经理 **@{task['manager_name']}** 提交了任务 `{task['id']}` 的执行汇报"
-                    f"（正文共 {len(text)} 字已折叠在私聊窗，不在大群刷屏，经理仅审摘要/diff）。"
+                    f"🔒 **{sender['name']}** 已向 **@{task['manager_name']}** 提交结论-only 汇报（`{task['id']}` · {len(text)} 字摘要已折叠，经理不重读对话）。"
+                    + (f" 已自动飞书交给独立审查 **@{task['reviewer_name']}** 挑刺。" if task.get("requires_code_review") else "")
                 ),
+            )
+            self._record_flight(
+                from_id=sender["id"],
+                from_name=sender["name"],
+                to_id=task["reviewer_id"] if task.get("requires_code_review") else task["manager_id"],
+                to_name=task["reviewer_name"] if task.get("requires_code_review") else task["manager_name"],
+                kind="review_send" if task.get("requires_code_review") else "report",
+                task_id=task["id"],
+                summary=f"结论汇报 ({len(text)}字)" + (" → 等审查" if task.get("requires_code_review") else ""),
+                channel=self._channel_label(sender),
             )
         self.save()
         return msg
+
+    # ------------------------------------------------------------------
+    # Action 13b: submitcodereview (Write -> Review -> Revise Loop)
+    # ------------------------------------------------------------------
+    def submitcodereview(self, payload: dict[str, Any]) -> dict[str, Any]:
+        """Independent reviewer submits ONLY an issue checklist (or pass) for code_change tasks."""
+        task = self._find_task(payload.get("task_id") or payload.get("id"))
+        if not task.get("requires_code_review"):
+            raise ValueError("该任务属于小活，未开启写—审—改闭环（避免空耗审查 Token）。")
+
+        chief = self._chief_agent()
+        reviewer_id = (payload.get("reviewer_id") or task.get("reviewer_id") or "").strip()
+        if not reviewer_id:
+            mgr = self._find_agent(task["manager_id"]) if task.get("manager_id") else chief
+            reviewer = self._pick_reviewer(assigned_id=task.get("assigned_to") or "", manager=mgr)
+        else:
+            reviewer = self._pick_reviewer(assigned_id=task.get("assigned_to") or "", manager=chief, requested_id=reviewer_id)
+
+        dry_run = bool(payload.get("dry_run", False))
+        passed = bool(payload.get("passed", False))
+        raw_issues = payload.get("issues") or []
+        if isinstance(raw_issues, str):
+            issues = [ln.strip(" -•\t") for ln in raw_issues.splitlines() if ln.strip()]
+        elif isinstance(raw_issues, list):
+            issues = [str(x).strip() for x in raw_issues if str(x).strip()]
+        else:
+            issues = []
+
+        joined = "\n".join(issues)
+        if len(joined) > 2500 or "```" in joined and len(joined) > 800:
+            raise ValueError("审查红线：只回问题清单（文件/行号/原因），不要贴大段全文代码。")
+
+        if dry_run and not issues and not payload.get("simulate_reject"):
+            passed = True
+        elif dry_run and payload.get("simulate_reject") and not issues:
+            passed = False
+            issues = ["[干跑演练问题1] calc_discount(100, -0.1) 未校验负数折扣率，请补 ValueError 断言与实现。"]
+
+        if not passed and not issues:
+            raise ValueError("审查不通过打回时，必须给出至少 1 条精简问题清单。")
+
+        task["reviewer_id"] = reviewer["id"]
+        task["reviewer_name"] = reviewer["name"]
+        reviewer["session_count"] = int(reviewer.get("session_count") or 0) + 1
+
+        if passed:
+            task["review_status"] = "approved"
+            task["review_issues"] = []
+            task["status"] = "working"
+            msg_text = (
+                f"✅ **独立代码审查通过**（审查者：{reviewer['name']} · 写代码与审查已分开）\n"
+                f"• 问题清单：无阻断问题（可由经理统筹交付）"
+            )
+            self._append_task_msg(task["id"], sender_id=reviewer["id"], sender_name=reviewer["name"], kind="code_review_pass", text=msg_text)
+            self._append_group_msg(
+                sender_id=reviewer["id"],
+                sender_name=reviewer["name"],
+                sender_role=reviewer.get("floor", "manager"),
+                kind="review_notice",
+                task_id=task["id"],
+                text=f"✅ **审查通过** `{task['id']}`（{reviewer['name']} 只读摘要+diff 确认无阻断项，可交付）。",
+            )
+            self._record_flight(
+                from_id=reviewer["id"],
+                from_name=reviewer["name"],
+                to_id=task["manager_id"],
+                to_name=task["manager_name"],
+                kind="review_pass",
+                task_id=task["id"],
+                summary="审查通过 (0阻断)",
+                channel=self._channel_label(reviewer),
+            )
+        else:
+            task["review_status"] = "changes_requested"
+            task["review_issues"] = issues
+            task["revision_round"] = int(task.get("revision_round") or 0) + 1
+            task["status"] = "rejected"
+            checklist_md = "\n".join(f"  {idx + 1}. {item}" for idx, item in enumerate(issues))
+            msg_text = (
+                f"↩ **独立审查打回重做（第 {task['revision_round']} 轮 · 只回问题清单，不回全文）**\n"
+                f"• 审查者：{reviewer['name']} → 退回给：{task['assigned_name']}\n"
+                f"• 问题清单：\n{checklist_md}"
+            )
+            self._append_task_msg(task["id"], sender_id=reviewer["id"], sender_name=reviewer["name"], kind="code_review_reject", text=msg_text)
+            self._append_group_msg(
+                sender_id=reviewer["id"],
+                sender_name=reviewer["name"],
+                sender_role=reviewer.get("floor", "manager"),
+                kind="review_notice",
+                task_id=task["id"],
+                text=f"↩ **审查打回重做** `{task['id']}`：{reviewer['name']} 列出 {len(issues)} 条问题清单，飞回给 **@{task['assigned_name']}** 修改。",
+            )
+            self._record_flight(
+                from_id=reviewer["id"],
+                from_name=reviewer["name"],
+                to_id=task.get("assigned_to") or "workers",
+                to_name=task["assigned_name"],
+                kind="review_reject",
+                task_id=task["id"],
+                summary=f"打回 ({len(issues)} 项问题)",
+                channel=self._channel_label(reviewer),
+            )
+        self.save()
+        return task
 
     # ------------------------------------------------------------------
     # Action 14: updatetaskstatus
@@ -759,7 +1056,7 @@ class OfficeStore:
     def updatetaskstatus(self, payload: dict[str, Any]) -> dict[str, Any]:
         task = self._find_task(payload.get("task_id") or payload.get("id"))
         new_status = payload.get("status")
-        valid = ("assigned", "accepted", "working", "delivered", "accepted_done", "rejected")
+        valid = ("assigned", "accepted", "working", "in_review", "delivered", "accepted_done", "rejected")
         if new_status not in valid:
             raise ValueError(f"状态必须是 {valid} 之一。")
         task["status"] = new_status
@@ -821,6 +1118,16 @@ class OfficeStore:
             task_id=task["id"],
             text=note,
         )
+        self._record_flight(
+            from_id=old_worker_id or chief["id"],
+            from_name=old_name,
+            to_id=target["id"],
+            to_name=target["name"],
+            kind="transfer",
+            task_id=task["id"],
+            summary=f"跨厂转交 ({target['vendor']})",
+            channel=self._channel_label(target),
+        )
         self.save()
         return task
 
@@ -839,6 +1146,10 @@ class OfficeStore:
     # ------------------------------------------------------------------
     def deliverfinalresult(self, payload: dict[str, Any]) -> dict[str, Any]:
         task = self._find_task(payload.get("task_id") or payload.get("id"))
+        if task.get("requires_code_review") and task.get("review_status") != "approved":
+            raise ValueError(
+                f"写—审—改闭环拦截：改代码任务 `{task['id']}` 必须先经独立审查 Agent（{task.get('reviewer_name') or '待指定'}）审查通过，当前审查状态：{task.get('review_status')}。"
+            )
         chief = self._chief_agent()
         manager_id = payload.get("manager_id") or task["manager_id"] or chief["id"]
         try:
@@ -849,10 +1160,10 @@ class OfficeStore:
         if not summary:
             report_preview = task.get("latest_report_summary") or "（员工已完成规定格式产出，质检通过）"
             summary = (
-                f"经 **{manager['name']}** 抽查 diff/摘要核验通过（未重读长原文，节省经理 Token）：\n"
+                f"经 **{manager['name']}** 抽查 diff/结论摘要核验通过（未重读对话全文，节省经理 Token）：\n"
                 f"• 执行员工：**{task['assigned_name']}**\n"
-                f"• 质检结论：符合强制输出格式与验收标准\n"
-                f"• 成果摘要：\n{report_preview}"
+                + (f"• 独立审查：**{task.get('reviewer_name')}**（✅ 问题清单清零）\n" if task.get("requires_code_review") else "")
+                + f"• 成果摘要：\n{report_preview}"
             )
         task["final_delivery_text"] = summary
         task["status"] = "delivered"
@@ -872,6 +1183,16 @@ class OfficeStore:
             task_id=task["id"],
             text=f"🏁 **最终交付 · 总结果 · 给 董事长 (You)**\n任务：`{task['id']}` 《{task['title']}》\n@你 (董事长) 请验收：\n\n{summary}",
         )
+        self._record_flight(
+            from_id=manager["id"],
+            from_name=manager["name"],
+            to_id="owner",
+            to_name="你 (董事长)",
+            kind="deliver",
+            task_id=task["id"],
+            summary="统筹交付待验收",
+            channel="结论摘要",
+        )
         self.save()
         return task
 
@@ -883,11 +1204,15 @@ class OfficeStore:
         decision = (payload.get("decision") or "verified").strip().lower()
         comment = (payload.get("comment") or "").strip()
         if decision in ("verified", "accepted", "pass", "accept"):
+            if task.get("requires_code_review") and task.get("review_status") != "approved":
+                raise ValueError("写—审—改闭环拦截：代码审查尚未通过，不能直接标记验收完成。")
             task["status"] = "accepted_done"
             text = f"✅ **你 (董事长) 已验收通过** 任务 `{task['id']}`《{task['title']}》！" + (f" 批注：{comment}" if comment else "")
+            fl_summary = "董事长验收通过"
         else:
             task["status"] = "rejected"
             text = f"↩ **你 (董事长) 打回重做** 任务 `{task['id']}`《{task['title']}》！" + (f" 原因：{comment}" if comment else " 请按验收标准修正后重新汇报。")
+            fl_summary = "董事长打回重做"
 
         self._append_task_msg(task["id"], sender_id="owner", sender_name="你 (董事长)", kind="review", text=text)
         self._append_group_msg(
@@ -897,6 +1222,16 @@ class OfficeStore:
             kind="review_notice",
             task_id=task["id"],
             text=text,
+        )
+        self._record_flight(
+            from_id="owner",
+            from_name="你 (董事长)",
+            to_id=task["manager_id"],
+            to_name=task["manager_name"],
+            kind="review_pass" if task["status"] == "accepted_done" else "review_reject",
+            task_id=task["id"],
+            summary=fl_summary,
+            channel="人工验收",
         )
         self.save()
         return task
@@ -1044,21 +1379,23 @@ class OfficeStore:
             f"输入：\n{task['input_text']}\n"
             f"输出格式：{task['output_format']}\n"
             f"验收标准：{task['acceptance']}\n"
-            f"不确定的写“未核实”，不要猜。不许自由发挥。"
+            f"汇报规范：只回【结论】【改动文件】【测试结果】三项结论，不贴整段对话，不许自由发挥，不确定写「未核实」。"
         )
         if not live:
-            dry_text = (
-                f"【干跑演练 DRY-RUN · 0 额度消耗】\n"
-                f"• 拟调用员工：{worker['name']}（厂商：{worker['vendor']} · 模型：{worker['model']} · `{worker['badge']}`）\n"
-                f"• 通道类型：{worker['access_kind']} "
-                + (f"（读取环境变量 `${worker.get('key_env')}`）" if worker["access_kind"] == "api" else f"（入口：{worker.get('login_url') or worker.get('executable') or '桌面工作空间'}）")
-                + f"\n• 降级链就绪：若该员工失败 → 自动换另一家免费员工重试；连续 2 名员工失败 → 才升级给经理 {task['manager_name']}。\n"
-                f"• 本次干跑未发起外部网络请求，花费 Token：0。"
+            dry_conclusion = f"[干跑演练 0消耗] 已模拟路由给 {worker['name']}（{worker['badge']}），降级链就绪。"
+            dry_text = format_conclusion_report(
+                conclusion=dry_conclusion,
+                changed_files="无（干跑演练未改文件）",
+                test_result="0 Token 干跑路由通过（未发起付费外部调用）",
+                diff_summary=f"通道={worker['access_kind']} | 失败2次才升级给经理 {task['manager_name']}",
             )
             self.postmessage({
                 "task_id": task["id"],
                 "sender_id": worker["id"],
-                "text": dry_text,
+                "conclusion": dry_conclusion,
+                "changed_files": ["无（干跑演练）"],
+                "test_result": "0 Token 干跑通过",
+                "diff_summary": f"通道={worker['access_kind']} | 降级链就绪",
                 "is_delivery": True,
                 "usage": {"dry_run": True, "prompt_tokens": 0, "completion_tokens": 0},
             })
@@ -1144,20 +1481,25 @@ class OfficeStore:
             "attempts": failures + 1,
         }
         task.setdefault("usage_log", []).append(usage_info)
+        # Accumulate real observed token count only (never fabricate when missing)
+        tok_total = 0
+        if isinstance(reply.usage, dict):
+            tok_total = int(
+                reply.usage.get("total_tokens")
+                or (int(reply.usage.get("prompt_tokens") or 0) + int(reply.usage.get("completion_tokens") or 0))
+            )
+        chosen_agent["tokens_used"] = int(chosen_agent.get("tokens_used") or 0) + tok_total
         if reply.rate_limit_remaining:
             chosen_agent["quota_note"] = f"上次调用响应头剩余次数：{json.dumps(reply.rate_limit_remaining, ensure_ascii=False)}"
-        fallback_trace = ("• 降级调度轨迹：\n  " + "\n  ".join(attempts_log) + "\n") if attempts_log else ""
-        report_body = (
-            f"【真实接口返回 · {chosen_agent['name']} ({reply.model})】\n"
-            f"{fallback_trace}"
-            f"• 用量统计：`{json.dumps(reply.usage, ensure_ascii=False)}`\n"
-            + (f"• 响应头剩余额度：`{json.dumps(reply.rate_limit_remaining, ensure_ascii=False)}`\n" if reply.rate_limit_remaining else "")
-            + f"\n---\n{reply.text}"
-        )
+        fallback_trace = (" | ".join(attempts_log)) if attempts_log else "直调命中"
+        conc_line = (reply.text or "").strip().splitlines()[0][:200] if (reply.text or "").strip() else "已完成"
         self.postmessage({
             "task_id": task["id"],
             "sender_id": chosen_agent["id"],
-            "text": report_body,
+            "conclusion": f"[{chosen_agent['name']} ({reply.model})] {conc_line}",
+            "changed_files": ["见本地工作区 git diff"],
+            "test_result": f"Token={tok_total} | 调度={fallback_trace}",
+            "diff_summary": (reply.text or "")[:300],
             "is_delivery": True,
             "usage": usage_info,
         })
@@ -1279,10 +1621,14 @@ class OfficeStore:
             f"## 2. 输入\n{task['input_text']}\n\n"
             f"## 3. 强制输出格式\n{task['output_format']}\n\n"
             f"## 4. 验收标准\n{task['acceptance']}\n\n"
-            f"## 5. 红线\n{task['rule_footer']}\n"
+            f"## 5. 结论-only 汇报模板（不贴全文对话）\n"
+            f"- 【结论】1-2句总结\n"
+            f"- 【改动文件】路径列表或 无\n"
+            f"- 【测试结果】通过/失败明细\n\n"
+            f"## 6. 红线\n{task['rule_footer']}\n"
         )
         file_path.write_text(md_body, encoding="utf-8")
-        trigger_text = f"@{rel_path} 严格按此工单要求执行（如有 0.00x 限时免费模型请优先切换），完成后直接保存结果。"
+        trigger_text = f"@{rel_path} 严格按此工单要求执行（如有 0.00x 限时免费模型请优先切换），完成后只回【结论】【改动文件】【测试结果】。"
         return {"rel_path": rel_path, "file_path": str(file_path), "trigger_text": trigger_text}
 
     def gettaskprompt(self, payload: dict[str, Any] | None = None) -> dict[str, Any]:
@@ -1312,6 +1658,7 @@ class OfficeStore:
             f"输入内容：\n{task['input_text']}\n"
             f"强制输出格式：{task['output_format']}\n"
             f"验收标准：{task['acceptance']}\n"
+            f"汇报模板：只传【结论】【改动文件】【测试结果】，不要贴整段聊天记录。\n"
             f"红线：不确定的写“未核实”，不要猜。不许自由发挥。"
         )
         return {
@@ -1351,11 +1698,229 @@ class OfficeStore:
         )
         st = (status_proc.stdout or "").strip()
         df = (stat_proc.stdout or "").strip()
+        changed_files = [
+            line[3:].strip().split(" -> ")[-1]
+            for line in st.splitlines()
+            if line.strip() and len(line) > 3
+        ]
         if not st and not df:
             summary = f"工作目录 `{ws}` 当前无未提交改动（工作区干净）。"
         else:
             summary = f"【本地工作区改动摘要 · `{ws}`】\n• git status:\n{st or '(无)'}\n• git diff --stat:\n{df or '(仅新增未跟踪文件)'}"
-        return {"workspace_dir": ws, "summary": summary}
+        return {"workspace_dir": ws, "summary": summary, "changed_files": changed_files, "diff_stat": df}
+
+    # ------------------------------------------------------------------
+    # Action 26–32: HUD Flights, Human Authorization Gate & MCP Conclusion Relay
+    # ------------------------------------------------------------------
+    def getsettings(self, payload: dict[str, Any] | None = None) -> dict[str, Any]:
+        self._ensure_runtime_keys()
+        return dict(self.state["settings"])
+
+    def toggleautoexecute(self, payload: dict[str, Any] | None = None) -> dict[str, Any]:
+        self._ensure_runtime_keys()
+        payload = payload or {}
+        curr = bool(self.state["settings"].get("auto_execute_low_risk", False))
+        new_val = bool(payload["enabled"]) if "enabled" in payload else (not curr)
+        self.state["settings"]["auto_execute_low_risk"] = new_val
+        chief = self._chief_agent()
+        self._append_group_msg(
+            sender_id="owner",
+            sender_name="你 (董事长)",
+            sender_role="chairman",
+            kind="system_notice",
+            text=(
+                f"🛡️ 授权策略切换：低风险任务自动执行已设为 **{'开启' if new_val else '关闭（安全默认）'}**。"
+                " 合并、删代码、部署等关键操作**永远先弹窗请示你批准一次**，绝不私自放行。"
+            ),
+        )
+        self._record_flight(
+            from_id="owner",
+            from_name="你 (董事长)",
+            to_id=chief["id"],
+            to_name=chief["name"],
+            kind="approval",
+            summary=f"低风险自动执行={'开' if new_val else '关'}",
+            channel="安全门禁",
+        )
+        self.save()
+        return dict(self.state["settings"])
+
+    def listhudflights(self, payload: dict[str, Any] | None = None) -> list[dict[str, Any]]:
+        self._ensure_runtime_keys()
+        return list(self.state.get("hud_flights", []))
+
+    def listapprovals(self, payload: dict[str, Any] | None = None) -> list[dict[str, Any]]:
+        self._ensure_runtime_keys()
+        return list(self.state.get("pending_approvals", []))
+
+    def requestapproval(self, payload: dict[str, Any]) -> dict[str, Any]:
+        """Queue an explicit human authorization request (always asks for critical ops)."""
+        self._ensure_runtime_keys()
+        op_type = (payload.get("op_type") or "merge").strip().lower()
+        target = (payload.get("target") or "main").strip()
+        task_id = (payload.get("task_id") or "").strip()
+        requested_by = (payload.get("requested_by") or "chief").strip()
+        try:
+            requester = self._find_agent(requested_by) if requested_by not in ("owner", "gao") else {"id": "owner", "name": "你 (董事长)"}
+        except KeyError:
+            requester = self._chief_agent()
+
+        is_critical = op_type in CRITICAL_OPS or payload.get("risk_level") == "critical"
+        risk_level = "critical" if is_critical else "low"
+        op_labels = {
+            "merge": "合并分支 (git merge)",
+            "delete_code": "删除代码 / 清理文件",
+            "deploy": "发布部署 (deploy)",
+            "auto_dispatch": "低风险自动派发",
+            "low_risk_run": "低风险自动执行",
+        }
+        title = (payload.get("title") or f"{op_labels.get(op_type, op_type)} → {target}").strip()
+
+        auto_low = bool(self.state["settings"].get("auto_execute_low_risk", False))
+        apr_id = f"apr-{int(time.time() * 1000) % 1000000}-{len(self.state['pending_approvals']) + 1}"
+        entry = {
+            "id": apr_id,
+            "op_type": op_type,
+            "title": title,
+            "target": target,
+            "task_id": task_id,
+            "requested_by": requester["id"],
+            "requested_by_name": requester["name"],
+            "risk_level": risk_level,
+            "status": "auto_approved" if (not is_critical and auto_low) else "pending",
+            "created_at": _now_iso(),
+        }
+        self.state["pending_approvals"].append(entry)
+        if not is_critical and auto_low:
+            self._record_flight(
+                from_id=requester["id"],
+                from_name=requester["name"],
+                to_id="owner",
+                to_name="自动门禁(低风险)",
+                kind="approval",
+                task_id=task_id,
+                summary=f"低风险自动放行: {title[:22]}",
+                channel="自动开关已开",
+            )
+            self.save()
+            return entry
+
+        self._append_group_msg(
+            sender_id=requester["id"],
+            sender_name=requester["name"],
+            sender_role="chief",
+            kind="approval_request",
+            task_id=task_id or None,
+            text=(
+                f"🛡️ **{'关键操作等待人工授权' if is_critical else '低风险操作请求确认（自动开关已关）'}**\n"
+                f"• 操作：`{op_type}` · {title}\n"
+                f"• 目标：`{target}`\n"
+                f"• 请在上方 HUD 授权条点击 **「✅ 允许一次」** 或 **「🚫 拒绝」**（不会私自执行）。"
+            ),
+        )
+        self._record_flight(
+            from_id=requester["id"],
+            from_name=requester["name"],
+            to_id="owner",
+            to_name="你 (待授权)",
+            kind="approval",
+            task_id=task_id,
+            summary=f"请求人工批准: {op_type}",
+            channel="关键操作门禁",
+        )
+        self.save()
+        return entry
+
+    def resolveapproval(self, payload: dict[str, Any]) -> dict[str, Any]:
+        self._ensure_runtime_keys()
+        apr_id = (payload.get("approval_id") or payload.get("id") or "").strip()
+        decision = (payload.get("decision") or "allow_once").strip().lower()
+        if decision not in ("allow_once", "always_allow", "deny"):
+            raise ValueError("授权决策只能是 allow_once / always_allow / deny。")
+        target_item = None
+        for item in self.state["pending_approvals"]:
+            if item["id"] == apr_id:
+                target_item = item
+                break
+        if target_item is None:
+            raise KeyError(f"找不到授权请求: {apr_id}")
+
+        if target_item["risk_level"] == "critical" and decision == "always_allow":
+            raise ValueError("合并、删代码、部署属于关键操作，禁止设置「总是允许」，每次必须人工点「允许一次」或「拒绝」。")
+
+        if decision == "deny":
+            target_item["status"] = "denied"
+            msg = f"🚫 **你 (董事长) 拒绝了操作**：{target_item['title']}（`{target_item['op_type']}`）"
+        elif decision == "always_allow":
+            target_item["status"] = "approved_once"
+            self.state["settings"]["auto_execute_low_risk"] = True
+            msg = f"⚡ **你 (董事长) 允许并开启低风险自动执行**：{target_item['title']}"
+        else:
+            target_item["status"] = "approved_once"
+            msg = f"✅ **你 (董事长) 允许一次**：{target_item['title']}（执行后自动失效，下次重问）"
+
+        target_item["resolved_at"] = _now_iso()
+        self._append_group_msg(
+            sender_id="owner",
+            sender_name="你 (董事长)",
+            sender_role="chairman",
+            kind="system_notice",
+            task_id=target_item.get("task_id") or None,
+            text=msg,
+        )
+        self._record_flight(
+            from_id="owner",
+            from_name="你 (董事长)",
+            to_id=target_item["requested_by"],
+            to_name=target_item["requested_by_name"],
+            kind="approval",
+            task_id=target_item.get("task_id") or "",
+            summary="允许一次" if decision == "allow_once" else ("总是允许低风险" if decision == "always_allow" else "已拒绝"),
+            channel="人工批复",
+        )
+        self.save()
+        return target_item
+
+    def executecriticalop(self, payload: dict[str, Any]) -> dict[str, Any]:
+        """Gate merge / delete_code / deploy behind a single-use human approval."""
+        self._ensure_runtime_keys()
+        op_type = (payload.get("op_type") or "merge").strip().lower()
+        target = (payload.get("target") or "main").strip()
+        task_id = (payload.get("task_id") or "").strip()
+        approval_id = (payload.get("approval_id") or "").strip()
+        dry_run = bool(payload.get("dry_run", True))
+
+        matched = None
+        for item in reversed(self.state["pending_approvals"]):
+            if approval_id and item["id"] != approval_id:
+                continue
+            if item["op_type"] == op_type and item["target"] == target and item["status"] == "approved_once":
+                matched = item
+                break
+
+        if matched is None:
+            req = self.requestapproval({
+                "op_type": op_type,
+                "target": target,
+                "task_id": task_id,
+                "requested_by": payload.get("requested_by") or "chief",
+                "title": payload.get("title"),
+            })
+            return {"executed": False, "requires_approval": True, "approval": req}
+
+        # Consume one-time approval immediately so next run asks again
+        matched["status"] = "executed"
+        matched["executed_at"] = _now_iso()
+        self._append_group_msg(
+            sender_id="chief",
+            sender_name=self._chief_agent()["name"],
+            sender_role="chief",
+            kind="system_notice",
+            task_id=task_id or None,
+            text=f"⚙️ 已凭人工单次授权执行 `{op_type}` → `{target}`（{'干跑演练' if dry_run else '实操'}完成，该次授权已消耗）。",
+        )
+        self.save()
+        return {"executed": True, "dry_run": dry_run, "op_type": op_type, "target": target, "approval_id": matched["id"]}
 
     # ------------------------------------------------------------------
     # Internal helpers
@@ -1450,12 +2015,56 @@ class OfficeStore:
         msgs.append(msg)
         return msg
 
+    def _channel_label(self, agent: dict[str, Any] | None) -> str:
+        if not agent:
+            return "工作台"
+        ak = (agent.get("access_kind") or "").lower()
+        if ak in ("web", "subscription"):
+            return "浏览器传令兵/网页"
+        if ak == "desktop":
+            return ".md 文件信箱 (桌面端)"
+        if ak == "cli":
+            return "CLI 命令行"
+        if ak == "api":
+            return "API 结论通道"
+        return "总管统筹"
+
+    def _record_flight(
+        self,
+        from_id: str,
+        from_name: str,
+        to_id: str,
+        to_name: str,
+        kind: str,
+        task_id: str = "",
+        summary: str = "",
+        channel: str = "",
+    ) -> dict[str, Any]:
+        flights = self.state.setdefault("hud_flights", [])
+        entry = {
+            "id": f"flt-{int(time.time() * 1000)}-{len(flights) + 1}",
+            "from_id": from_id,
+            "from_name": from_name,
+            "to_id": to_id,
+            "to_name": to_name,
+            "kind": kind,
+            "task_id": task_id,
+            "summary": summary,
+            "channel": channel,
+            "created_at": _now_iso(),
+        }
+        flights.append(entry)
+        if len(flights) > 30:
+            del flights[:-30]
+        return entry
+
     def dispatch_action(self, action_name: str, payload: dict[str, Any] | None = None) -> Any:
         payload = payload or {}
         name = action_name.strip().lower()
         no_arg_actions = {
             "listagents", "listgroupmessages", "listtasks", "listskills",
             "seedexampletask", "reset_to_seed", "syncprofiles", "loadsampleteam",
+            "getsettings", "listhudflights", "listapprovals",
         }
         if not hasattr(self, name):
             raise ValueError(f"未知的办公室动作: {action_name}")

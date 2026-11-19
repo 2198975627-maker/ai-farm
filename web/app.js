@@ -7,6 +7,9 @@ let APP_STATE = {
   taskSummary: { total: 0, claimed: 0, reported: 0, delivered: 0, accepted: 0 },
   groupMessages: [],
   taskMessages: {},
+  hudFlights: [],
+  pendingApprovals: [],
+  settings: { auto_execute_low_risk: false },
   skills: [],
   equippedBy: {},
   byFloor: { manager: [], worker: [], rest: [] },
@@ -94,6 +97,15 @@ function applySnapshot(snap) {
   if (snap.group_messages) {
     APP_STATE.groupMessages = snap.group_messages;
   }
+  if (snap.hud_flights) {
+    APP_STATE.hudFlights = snap.hud_flights;
+  }
+  if (snap.pending_approvals) {
+    APP_STATE.pendingApprovals = snap.pending_approvals;
+  }
+  if (snap.settings) {
+    APP_STATE.settings = snap.settings;
+  }
   if (snap.skills && snap.skills.skills) {
     APP_STATE.skills = snap.skills.skills;
     APP_STATE.equippedBy = snap.skills.equipped_by || {};
@@ -157,6 +169,8 @@ function renderAvatarHTML(agent) {
 function renderAll() {
   renderTopBar();
   renderRoster();
+  renderHudFlightStrip();
+  renderApprovalBanner();
   renderGroupChat();
   renderSelectedAgentProfile();
   renderSelectedTaskThread();
@@ -165,6 +179,14 @@ function renderAll() {
 }
 
 function renderTopBar() {
+  // 自动执行低风险开关（默认关闭）
+  const autoBtn = document.getElementById("autoExecuteToggleBtn");
+  if (autoBtn) {
+    const autoOn = Boolean(APP_STATE.settings && APP_STATE.settings.auto_execute_low_risk);
+    autoBtn.textContent = autoOn ? "⚡ 自动执行低风险: 开" : "🛡️ 自动执行低风险: 关";
+    autoBtn.className = "btn " + (autoOn ? "btn-safety-on" : "btn-safety-off");
+  }
+
   // 厂商条
   const vendors = [...new Set(APP_STATE.agents.map(a => `${a.vendor}`))];
   const strip = document.getElementById("vendorStrip");
@@ -254,10 +276,15 @@ function renderAgentCardHTML(agent) {
   const isSelected = agent.id === APP_STATE.selectedAgentId ? "selected" : "";
   const hasPct = agent.quota_percent !== null && agent.quota_percent !== undefined;
   const pct = hasPct ? Number(agent.quota_percent) : null;
+  // 对齐 Agent HUD：已用<70%(剩>30%)绿、已用70%-90%(剩11-30%)黄、剩<=10%变红闪烁
   const isLow = hasPct && pct <= 10;
-  const fillClass = !hasPct ? "unknown" : isLow ? "low-red" : "";
-  const labelText = !hasPct ? "额度未填" : isLow ? `⚠️ 剩 ${pct}%` : `剩 ${pct}%`;
+  const isWarn = hasPct && pct > 10 && pct <= 30;
+  const fillClass = !hasPct ? "unknown" : isLow ? "low-red" : isWarn ? "quota-yellow" : "quota-green";
+  const labelText = !hasPct ? "额度未填" : isLow ? `⚠️ 剩 ${pct}%` : isWarn ? `⚡ 剩 ${pct}%` : `剩 ${pct}%`;
   const widthPct = !hasPct ? 100 : Math.max(4, pct);
+  const tokensUsed = Number(agent.tokens_used || 0);
+  const sessCount = Number(agent.session_count || 0);
+  const hoverTelemetry = `剩余额度: ${hasPct ? pct + '%' : '额度未填'} | Token花费: ${tokensUsed} | 会话数: ${sessCount} | ${agent.quota_note || ''}`;
 
   const toolsHTML = (agent.attached_tools || []).map(t =>
     `<div class="tool-attachment-pill">${escapeHTML(t)}</div>`
@@ -266,7 +293,8 @@ function renderAgentCardHTML(agent) {
   return `
     <div class="agent-card ${isSelected}" draggable="true"
          ondragstart="onAgentDragStart(event, '${agent.id}')"
-         onclick="selectAgent('${agent.id}')">
+         onclick="selectAgent('${agent.id}')"
+         title="${escapeHTML(hoverTelemetry)}">
       <div class="agent-row-top">
         ${renderAvatarHTML(agent)}
         <div class="agent-meta">
@@ -274,25 +302,31 @@ function renderAgentCardHTML(agent) {
             <span class="agent-name">${escapeHTML(agent.name)}</span>
             <span class="access-badge ${agent.badge_color || 'green'}">${escapeHTML(agent.badge)}</span>
           </div>
-          <div class="agent-subline">
-            模型: <strong>${escapeHTML(agent.model)}</strong> · ${escapeHTML(agent.vendor)}
-          </div>
-          ${(agent.tier || agent.expires_at) ? `
-          <div class="agent-subline" style="color:#a5b4fc;">
-            ${agent.tier ? `等级: <strong>${escapeHTML(agent.tier)}</strong>` : ''}${agent.tier && agent.expires_at ? ' · ' : ''}${agent.expires_at ? `到期: ${escapeHTML(agent.expires_at)}` : ''}
-          </div>` : ''}
-          <div class="agent-fallback-line" title="${escapeHTML(agent.fallback_note || '')}">
-            ↳ ${escapeHTML(agent.fallback_note || '降级后：换其他免费员工')}
+          <div class="agent-extra-info">
+            <div class="agent-subline">
+              模型: <strong>${escapeHTML(agent.model)}</strong> · ${escapeHTML(agent.vendor)}
+            </div>
+            ${(agent.tier || agent.expires_at) ? `
+            <div class="agent-subline" style="color:#a5b4fc;">
+              ${agent.tier ? `等级: <strong>${escapeHTML(agent.tier)}</strong>` : ''}${agent.tier && agent.expires_at ? ' · ' : ''}${agent.expires_at ? `到期: ${escapeHTML(agent.expires_at)}` : ''}
+            </div>` : ''}
+            <div class="agent-fallback-line" title="${escapeHTML(agent.fallback_note || '')}">
+              ↳ ${escapeHTML(agent.fallback_note || '降级后：换其他免费员工')}
+            </div>
+            ${toolsHTML}
           </div>
         </div>
       </div>
-      ${toolsHTML}
       <div class="mana-bar-wrap" onclick="handleManaBarClick(event, '${agent.id}')"
-           title="${escapeHTML(agent.quota_note || '')}${agent.usage_url ? '（点击跳转官方实时查额度页）' : '（无独立查额度链接）'}">
+           title="${escapeHTML(hoverTelemetry)}${agent.usage_url ? '（点击跳转官方实时查额度页）' : '（无独立查额度链接）'}">
         <div class="mana-track">
           <div class="mana-fill ${fillClass}" style="width:${widthPct}%"></div>
         </div>
         <span class="mana-label ${fillClass}">${labelText} ${agent.usage_url ? '↗' : ''}</span>
+      </div>
+      <div class="agent-telemetry-line">
+        <span>Token: ${tokensUsed}</span>
+        <span>会话: ${sessCount}</span>
       </div>
     </div>
   `;
@@ -350,20 +384,79 @@ function formatChatTextWithMentions(text) {
     .replace(/@([^\s:：,，。！\n]+)/g, '<span class="mention-highlight">@$1</span>');
 }
 
-function renderTaskStepFlow(status) {
-  const order = ["assigned", "accepted", "working", "delivered", "accepted_done"];
-  const labels = [
-    { key: "assigned", text: "1.派单" },
-    { key: "accepted", text: "2.接单" },
-    { key: "working", text: "3.进行中" },
-    { key: "delivered", text: "4.交付" },
-    { key: "accepted_done", text: "5.验收" },
-  ];
+function renderHudFlightStrip() {
+  const strip = document.getElementById("hudFlightStrip");
+  if (!strip) return;
+  const flights = (APP_STATE.hudFlights || []).slice(-6).reverse();
+  if (flights.length === 0) {
+    strip.innerHTML = `<span class="hud-flight-label">✈️ HUD 纸飞机线：</span><span style="font-size:11px;color:var(--text-muted);">等待派单或汇报飞线（谁发给谁 · 卡在哪一步）</span>`;
+    return;
+  }
+  strip.innerHTML = `<span class="hud-flight-label">✈️ HUD 飞线 (${flights.length})：</span>` + flights.map((fl, idx) => `
+    <button type="button" class="flight-pill ${idx === 0 ? 'latest' : ''} kind-${escapeHTML(fl.kind)}"
+            onclick="${fl.task_id ? `openTaskPrivateThread('${escapeHTML(fl.task_id)}')` : `selectAgent('${escapeHTML(fl.from_id)}')`}"
+            title="${escapeHTML(fl.created_at)} · 通道：${escapeHTML(fl.channel)}">
+      <span class="flight-node">${escapeHTML(fl.from_name)}</span>
+      <span class="flight-plane">──✈</span>
+      <span class="flight-node">${escapeHTML(fl.to_name)}</span>
+      <span class="flight-meta-tag">${escapeHTML(fl.summary || fl.kind)}</span>
+    </button>
+  `).join("");
+}
+
+function renderApprovalBanner() {
+  const banner = document.getElementById("approvalBanner");
+  if (!banner) return;
+  const pending = (APP_STATE.pendingApprovals || []).filter(a => a.status === "pending");
+  if (pending.length === 0) {
+    banner.classList.add("hidden");
+    banner.innerHTML = "";
+    return;
+  }
+  banner.classList.remove("hidden");
+  banner.innerHTML = pending.map(item => `
+    <div class="approval-row">
+      <div class="approval-meta">
+        <span>🛡️ <strong>${item.risk_level === 'critical' ? '关键操作待人工授权' : '待确认操作'}</strong></span>
+        <span>· <code>${escapeHTML(item.op_type)}</code></span>
+        <span>· ${escapeHTML(item.title)}</span>
+        <span style="color:var(--text-muted);">(发起: ${escapeHTML(item.requested_by_name)})</span>
+      </div>
+      <div class="approval-actions">
+        <button type="button" class="btn btn-success btn-xs" onclick="handleResolveApproval('${escapeHTML(item.id)}', 'allow_once')">✅ 允许一次</button>
+        ${item.risk_level !== 'critical' ? `<button type="button" class="btn btn-ghost btn-xs" onclick="handleResolveApproval('${escapeHTML(item.id)}', 'always_allow')">⚡ 总是允许低风险</button>` : ""}
+        <button type="button" class="btn btn-danger btn-xs" onclick="handleResolveApproval('${escapeHTML(item.id)}', 'deny')">🚫 拒绝</button>
+      </div>
+    </div>
+  `).join("");
+}
+
+function renderTaskStepFlow(status, task = null) {
+  const needReview = Boolean(task && task.requires_code_review);
+  const order = needReview
+    ? ["assigned", "accepted", "working", "in_review", "delivered", "accepted_done"]
+    : ["assigned", "accepted", "working", "delivered", "accepted_done"];
+  const labels = needReview
+    ? [
+        { key: "assigned", text: "1.派单" },
+        { key: "accepted", text: "2.接单" },
+        { key: "working", text: "3.写代码" },
+        { key: "in_review", text: "4.独立审查" },
+        { key: "delivered", text: "5.交付" },
+        { key: "accepted_done", text: "6.验收" },
+      ]
+    : [
+        { key: "assigned", text: "1.派单" },
+        { key: "accepted", text: "2.接单" },
+        { key: "working", text: "3.进行中" },
+        { key: "delivered", text: "4.交付" },
+        { key: "accepted_done", text: "5.验收" },
+      ];
   const currIdx = status === "rejected" ? 2 : order.indexOf(status);
   return `<div class="step-flow-bar">` + labels.map((st, idx) => {
     const cls = idx < currIdx ? "done" : idx === currIdx ? "curr" : "";
     return `<span class="step-item ${cls}">${st.text}</span>`;
-  }).join("<span>→</span>") + (status === "rejected" ? ` <span style="color:#f87171;font-weight:700;">(↩已打回重做)</span>` : "") + `</div>`;
+  }).join("<span>→</span>") + (status === "rejected" ? ` <span style="color:#f87171;font-weight:700;">(↩审查打回重做)</span>` : "") + `</div>`;
 }
 
 function renderGroupChat() {
@@ -389,7 +482,7 @@ function renderGroupChat() {
     if (task && msg.kind === "task_card") {
       actionBarHTML = `
         <div class="card-actions-bar">
-          ${renderTaskStepFlow(task.status)}
+          ${renderTaskStepFlow(task.status, task)}
           ${task.status === "assigned" ? `
             <button class="btn btn-example" onclick="handleClaimTask('${task.id}', '${task.assigned_to || ''}')">
               ✋ 员工点击领取 (${escapeHTML(task.assigned_name)})
@@ -409,7 +502,7 @@ function renderGroupChat() {
       actionBarHTML = `
         <div class="card-actions-bar">
           <button class="btn btn-ghost" onclick="openTaskPrivateThread('${task.id}')">
-            🔍 经理点此审阅私聊摘要/diff
+            🔍 经理点此审阅结论/diff
           </button>
           <button class="btn btn-primary" onclick="handleDeliverFinalResult('${task.id}')">
             📦 经理统筹交付给 Gao
@@ -419,7 +512,7 @@ function renderGroupChat() {
     } else if (task && msg.kind === "final_delivery_card") {
       actionBarHTML = `
         <div class="card-actions-bar">
-          ${renderTaskStepFlow(task.status)}
+          ${renderTaskStepFlow(task.status, task)}
           <button class="btn btn-success" onclick="handleReviewFinalResult('${task.id}', 'verified')">
             ✅ 验收通过
           </button>
@@ -628,65 +721,116 @@ function renderSelectedTaskThread() {
     return `<option value="${w.id}">${escapeHTML(w.name)} (${escapeHTML(w.vendor)} · ${escapeHTML(w.badge)})${sameVendor ? ' [同厂商将拦截]' : ' [可跨厂商轮换]'}</option>`;
   }).join("");
 
+  const draft = APP_STATE.reportDrafts[task.id] || {};
+  const reviewerCandidates = APP_STATE.agents.filter(
+    a => a.floor !== "rest" && a.status !== "exhausted" && a.id !== task.assigned_to
+  );
+  const reviewerOptions = reviewerCandidates.map(r =>
+    `<option value="${r.id}" ${r.id === task.reviewer_id ? 'selected' : ''}>${escapeHTML(r.name)} (${escapeHTML(r.badge)})</option>`
+  ).join("");
+  const reviewIssues = task.review_issues || [];
+
   container.innerHTML = `
     <div class="profile-box">
       <div class="identity-block">
         <h4>🔒 私聊专线：${escapeHTML(task.assigned_name)} ⇄ 经理 ${escapeHTML(task.manager_name)}</h4>
         <div style="font-size:12px;font-weight:700;margin-bottom:4px;">${escapeHTML(task.id)} · ${escapeHTML(task.title)}</div>
-        ${renderTaskStepFlow(task.status)}
-        <div style="font-size:11px;color:#94a3b8;margin-top:6px;">
+        ${renderTaskStepFlow(task.status, task)}
+        <div style="font-size:11px;color:var(--text-secondary);margin-top:6px;">
           • <strong>当前执行员工</strong>：${escapeHTML(task.assigned_name)}（厂商：${escapeHTML(task.assigned_vendor || '待认领')}）<br/>
-          • <strong>省 Token 规则</strong>：员工汇报正文只留在本私聊窗，大群里仅发一条 🔒 提示；经理核验后再点「统筹交付」发回大群给董事长。
+          • <strong>A message, not the conversation</strong>：汇报只传【结论 / 改动文件 / 测试结果】，不传全对话记录。
         </div>
       </div>
 
-      <!-- 快捷操作栏：4种调用方法全覆盖 + 提交私聊汇报 + 跨厂商转交 + 经理统筹交付 -->
+      ${task.requires_code_review ? `
       <div class="identity-block">
-        <h4>⚡ 员工执行与汇报操作（4 种调用方法一键直达）</h4>
+        <h4>🔍 写—审—改闭环（改代码任务专属 · 写手与审查必须分开）</h4>
+        <div style="font-size:11px;color:var(--text-secondary);margin-bottom:6px;">
+          写代码：<strong>${escapeHTML(task.assigned_name)}</strong> → 独立审查：<strong>${escapeHTML(task.reviewer_name || '待指定')}</strong>
+          · 状态：<span class="access-badge ${task.review_status === 'approved' ? 'green' : task.review_status === 'changes_requested' ? 'red' : 'orange'}">${escapeHTML(task.review_status || 'pending_review')}</span>
+          ${task.revision_round ? ` · 已返修 ${task.revision_round} 轮` : ''}
+        </div>
+        ${reviewIssues.length > 0 ? `
+          <div class="review-checklist-box">
+            <div style="font-weight:700;margin-bottom:4px;color:#fca5a5;">当前待修改问题清单：</div>
+            ${reviewIssues.map((it, idx) => `<div class="review-issue-item">${idx + 1}. ${escapeHTML(it)}</div>`).join("")}
+          </div>
+        ` : ""}
+        <div style="display:flex;gap:6px;margin-bottom:6px;align-items:center;">
+          <select id="reviewAgentSelect" class="select-sm" style="flex:1;">${reviewerOptions}</select>
+        </div>
+        <textarea id="reviewIssuesInput" rows="2" class="obsidian-input" placeholder="审查只写问题清单（每行一条：文件:行号 问题描述）；点下方「通过」则无需填问题" style="margin-bottom:6px;"></textarea>
+        <div style="display:flex;gap:6px;flex-wrap:wrap;">
+          <button type="button" class="btn btn-success btn-xs" onclick="handleSubmitCodeReview('${task.id}', true, false)">✅ 审查通过 (干跑/免消耗)</button>
+          <button type="button" class="btn btn-danger btn-xs" onclick="handleSubmitCodeReview('${task.id}', false, true)">↩ 打回重做 (问题清单)</button>
+        </div>
+      </div>
+      ` : ""}
+
+      <!-- 快捷操作栏：4种调用方法 + 结论-only 汇报模板 + 关键操作门禁 -->
+      <div class="identity-block">
+        <h4>⚡ 员工执行与结论-only 汇报</h4>
         <div style="margin-bottom:8px;">
-          <label style="font-size:11px;color:#cbd5e1;display:block;margin-bottom:3px;">
-            📁 目标工作文件夹路径（选填，供 CLI 执行或给 WorkBuddy 导出 .md 工单用；留空默认当前仓库）：
+          <label style="font-size:11px;color:var(--text-secondary);display:block;margin-bottom:3px;">
+            📁 目标工作文件夹路径（选填，供 CLI 执行或给 WorkBuddy 导出 .md 工单用）：
           </label>
-          <input type="text" id="customWorkspaceInput" placeholder="例：C:\\Users\\你的用户名\\Desktop\\my-project（留空默认本仓库）"
+          <input type="text" id="customWorkspaceInput" class="obsidian-input"
+                 placeholder="例：C:\\Users\\你的用户名\\Desktop\\my-project（留空默认本仓库）"
                  value="${escapeHTML(APP_STATE.customWorkspaceDir || '')}"
-                 oninput="APP_STATE.customWorkspaceDir = this.value.trim()"
-                 style="width:100%;background:#0f172a;border:1px solid #334155;color:#fff;padding:5px 8px;border-radius:6px;font-size:11px;" />
+                 oninput="APP_STATE.customWorkspaceDir = this.value.trim()" />
         </div>
         <div style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:8px;">
-          <button class="btn btn-example" onclick="handleRunAdapterTask('${task.id}', false)" title="不花钱演练路由与降级链">
+          <button class="btn btn-ghost" onclick="handleRunAdapterTask('${task.id}', false)" title="不花钱演练路由与降级链">
             🧪 干跑演练 (0消耗)
           </button>
-          <button class="btn btn-primary" onclick="handleRunAdapterTask('${task.id}', true)" title="调用真实 API（读环境变量 Key）或本地 CLI（如 Codex）执行并回填结果">
+          <button class="btn btn-primary" onclick="handleRunAdapterTask('${task.id}', true)" title="调用真实 API（读环境变量 Key）或本地 CLI（如 Codex）执行并回填结论">
             🚀 真调执行 (API / CLI)
           </button>
           <button class="btn btn-ghost" onclick="handleOpenWebAndCopyPrompt('${task.id}')" title="方式1：直接打开该员工的免费聊天网页，并自动把标准工单指令复制到剪贴板">
             🌐 打开网页 + 复制指令
           </button>
-          <button class="btn btn-ghost" onclick="handleExportTaskMd('${task.id}')" title="方式3：在上方指定的工作文件夹生成工单 .md 并复制 @文件 触发句，供 WorkBuddy 等桌面应用执行">
+          <button class="btn btn-ghost" onclick="handleExportTaskMd('${task.id}')" title="生成工单 .md 并复制 @文件 触发句，供桌面端/信箱执行">
             📂 导出 .md + 复制 @触发句
           </button>
-          <button class="btn btn-ghost" onclick="handleCollectGitDiff('${task.id}')" title="读取工作区 git status/diff 摘要填入下方汇报框（0 Token 质检）">
+          <button class="btn btn-ghost" onclick="handleCollectGitDiff('${task.id}')" title="读取工作区 git status/diff 摘要并填入改动文件（0 Token 质检）">
             🔍 抓取本地 git diff 摘要
           </button>
           <button class="btn btn-ghost" onclick="handleCopyWorkerPrompt('${task.id}')" title="仅复制纯文本模板指令">
             📋 仅复制指令
           </button>
-          <button class="btn btn-success" onclick="handleDeliverFinalResult('${task.id}')">
+          <button class="btn btn-ghost" onclick="handleDeliverFinalResult('${task.id}')">
             📦 经理统筹交付总结果
           </button>
         </div>
 
-        <form onsubmit="handleWorkerPrivateReport(event, '${task.id}')" style="margin-bottom:10px;">
-          <label style="font-size:11px;color:#cbd5e1;display:block;margin-bottom:4px;">📤 员工在私聊提交产出汇报（群里只留 🔒 提示，不刷屏）：</label>
-          <textarea id="privateReportInput" rows="3"
-                    placeholder="在此粘贴员工产出的表格/测试/摘要，或点击上方「🔍 抓取本地 git diff 摘要」自动填入..."
-                    oninput="APP_STATE.reportDrafts['${task.id}'] = this.value"
-                    style="width:100%;background:#0f172a;border:1px solid #334155;color:#fff;padding:6px;border-radius:6px;font-size:12px;margin-bottom:6px;" required>${escapeHTML(APP_STATE.reportDrafts[task.id] || '')}</textarea>
-          <button type="submit" class="btn btn-ghost" style="width:100%;">🔒 发送私聊汇报（不刷大群）</button>
+        <form onsubmit="handleWorkerPrivateReport(event, '${task.id}')" class="conclusion-grid">
+          <label style="font-size:11px;color:var(--text-secondary);">📤 固定「结论-only」汇报模板（经理不读整段对话）：</label>
+          <input type="text" id="reportConclusionInput" class="obsidian-input" required
+                 placeholder="1. 【结论】一句话说清做了什么、是否完成..."
+                 value="${escapeHTML(draft.conclusion || '')}"
+                 oninput="updateReportDraft('${task.id}', 'conclusion', this.value)" />
+          <input type="text" id="reportFilesInput" class="obsidian-input"
+                 placeholder="2. 【改动文件】例：ai_farm/office_store.py, web/app.js（或填 无）"
+                 value="${escapeHTML(draft.files || '')}"
+                 oninput="updateReportDraft('${task.id}', 'files', this.value)" />
+          <input type="text" id="reportTestInput" class="obsidian-input"
+                 placeholder="3. 【测试结果】例：python tests/test_farm.py 全部 PASS（或 未运行）"
+                 value="${escapeHTML(draft.tests || '')}"
+                 oninput="updateReportDraft('${task.id}', 'tests', this.value)" />
+          <button type="submit" class="btn btn-ghost" style="width:100%;">🔒 发送结论-only 私聊汇报（不刷大群）</button>
         </form>
 
-        <div style="border-top:1px dashed #334155;padding-top:8px;">
-          <label style="font-size:11px;color:#cbd5e1;display:block;margin-bottom:4px;">↪ 跨厂商轮换转交（强制仅限不同厂商，禁止同家多开倒手）：</label>
+        <div style="border-top:1px dashed var(--border);padding-top:8px;margin-bottom:8px;">
+          <label style="font-size:11px;color:var(--text-secondary);display:block;margin-bottom:4px;">🛡️ 关键操作人工授权测试（合并 / 删代码 / 部署，默认先问老板）：</label>
+          <div style="display:flex;gap:6px;flex-wrap:wrap;">
+            <button type="button" class="btn btn-ghost btn-xs" onclick="handleRequestCriticalApproval('${task.id}', 'merge')">请求合并授权</button>
+            <button type="button" class="btn btn-ghost btn-xs" onclick="handleRequestCriticalApproval('${task.id}', 'delete_code')">请求删代码授权</button>
+            <button type="button" class="btn btn-ghost btn-xs" onclick="handleRequestCriticalApproval('${task.id}', 'deploy')">请求部署授权</button>
+          </div>
+        </div>
+
+        <div style="border-top:1px dashed var(--border);padding-top:8px;">
+          <label style="font-size:11px;color:var(--text-secondary);display:block;margin-bottom:4px;">↪ 跨厂商轮换转交（强制仅限不同厂商，禁止同家多开倒手）：</label>
           <div style="display:flex;gap:6px;">
             <select id="reassignTargetSelect" class="select-sm" style="flex:1;">${transferOptions}</select>
             <button type="button" class="btn btn-ghost" onclick="handleReassignTask('${task.id}')">↪ 转交</button>
@@ -699,8 +843,8 @@ function renderSelectedTaskThread() {
         <h4>💬 私聊汇报记录 (${msgs.length} 条)</h4>
         <div style="display:flex;flex-direction:column;gap:8px;max-height:260px;overflow-y:auto;">
           ${msgs.map(m => `
-            <div style="background:#1e293b;border:1px solid #334155;border-radius:6px;padding:7px 9px;font-size:12px;">
-              <div style="display:flex;justify-content:space-between;color:#94a3b8;font-size:10px;margin-bottom:3px;">
+            <div style="background:var(--bg-card);border:1px solid var(--border);border-radius:var(--radius-sm);padding:7px 9px;font-size:12px;">
+              <div style="display:flex;justify-content:space-between;color:var(--text-muted);font-size:10px;margin-bottom:3px;">
                 <strong>${escapeHTML(m.sender_name)}</strong>
                 <span>${escapeHTML(m.created_at || '')}</span>
               </div>
@@ -858,31 +1002,87 @@ async function handleClaimTask(taskId, workerId) {
   showToast("✋ 员工已认领任务，私聊汇报窗已打开！");
 }
 
+function updateReportDraft(taskId, field, value) {
+  if (!APP_STATE.reportDrafts[taskId]) APP_STATE.reportDrafts[taskId] = {};
+  APP_STATE.reportDrafts[taskId][field] = value;
+}
+
 async function handleWorkerPrivateReport(event, taskId) {
   event.preventDefault();
-  const text = document.getElementById("privateReportInput").value.trim();
-  if (!text) return;
+  const conclusion = document.getElementById("reportConclusionInput").value.trim();
+  const filesRaw = document.getElementById("reportFilesInput").value.trim();
+  const testResult = document.getElementById("reportTestInput").value.trim();
+  if (!conclusion) return;
+  const changed_files = filesRaw ? filesRaw.split(/[,，\n]/).map(s => s.trim()).filter(Boolean) : ["无"];
   const task = APP_STATE.tasks.find(t => t.id === taskId);
   await callOfficeAction("postmessage", {
     task_id: taskId,
     sender_id: task ? task.assigned_to : "",
-    text,
+    conclusion,
+    changed_files,
+    test_result: testResult || "未运行测试",
     is_delivery: true,
   });
   delete APP_STATE.reportDrafts[taskId];
   await openTaskPrivateThread(taskId);
-  showToast("🔒 私聊汇报已发给经理（大群仅留折叠提示，未刷屏）！");
+  showToast("🔒 结论-only 汇报已发送给经理（未贴全对话，大群仅留折叠提示）！");
 }
 
 async function handleCollectGitDiff(taskId) {
   const wsInput = document.getElementById("customWorkspaceInput");
   const workspace_dir = wsInput ? wsInput.value.trim() : (APP_STATE.customWorkspaceDir || "");
   const res = await callOfficeAction("collectgitdiff", { workspace_dir });
-  if (!res || !res.summary) return;
-  APP_STATE.reportDrafts[taskId] = res.summary;
-  const box = document.getElementById("privateReportInput");
-  if (box) box.value = res.summary;
-  showToast("🔍 已抓取本地 git diff 摘要填入汇报框，核对无误后点击「🔒 发送私聊汇报」即可！");
+  if (!res) return;
+  const filesStr = (res.changed_files && res.changed_files.length) ? res.changed_files.join(", ") : "无未提交改动";
+  updateReportDraft(taskId, "files", filesStr);
+  if (res.diff_stat) {
+    updateReportDraft(taskId, "conclusion", `已完成本地代码改动 (${res.changed_files ? res.changed_files.length : 0} 个文件)`);
+  }
+  const fBox = document.getElementById("reportFilesInput");
+  if (fBox) fBox.value = filesStr;
+  const cBox = document.getElementById("reportConclusionInput");
+  if (cBox && !cBox.value && res.diff_stat) cBox.value = `已完成本地代码改动 (${res.changed_files ? res.changed_files.length : 0} 个文件)`;
+  showToast("🔍 已抓取本地改动文件清单填入汇报模板（0 Token 质检）！");
+}
+
+async function handleToggleAutoExecute() {
+  const res = await callOfficeAction("toggleautoexecute", {});
+  if (res) {
+    showToast(res.auto_execute_low_risk
+      ? "⚡ 低风险任务自动执行已开启（合并/删代码/部署依然每次人工授权）"
+      : "🛡️ 低风险自动执行已关闭（安全默认）");
+  }
+}
+
+async function handleResolveApproval(approvalId, decision) {
+  await callOfficeAction("resolveapproval", { approval_id: approvalId, decision });
+  showToast(decision === "deny" ? "🚫 已拒绝该操作" : "✅ 已批准该授权请求");
+}
+
+async function handleRequestCriticalApproval(taskId, opType) {
+  await callOfficeAction("requestapproval", {
+    op_type: opType,
+    target: opType === "merge" ? "main" : opType === "deploy" ? "production" : "src/legacy",
+    task_id: taskId,
+    requested_by: "chief",
+  });
+  showToast("🛡️ 已在 HUD 顶部发起人工授权请求，请点击「允许一次」或「拒绝」！");
+}
+
+async function handleSubmitCodeReview(taskId, passed, simulateReject = false) {
+  const reviewerId = (document.getElementById("reviewAgentSelect") || {}).value || "";
+  const rawIssues = (document.getElementById("reviewIssuesInput") || {}).value || "";
+  const issues = rawIssues.split(/\r?\n/).map(s => s.trim()).filter(Boolean);
+  await callOfficeAction("submitcodereview", {
+    task_id: taskId,
+    reviewer_id: reviewerId,
+    passed,
+    issues,
+    dry_run: true,
+    simulate_reject: Boolean(simulateReject && issues.length === 0),
+  });
+  await openTaskPrivateThread(taskId);
+  showToast(passed ? "✅ 独立审查通过，可交付！" : "↩ 已退回问题清单给写代码员工重做！");
 }
 
 async function handleRunAdapterTask(taskId, live = false) {
@@ -1139,7 +1339,30 @@ function openNewTaskModal() {
   skSel.innerHTML = `<option value="">-- 不限定固定技能 --</option>` +
     APP_STATE.skills.map(s => `<option value="${s.slug}">${escapeHTML(s.name)} (${escapeHTML(s.best_for)})</option>`).join("");
 
+  const revSel = document.getElementById("taskReviewerSelect");
+  if (revSel) {
+    const allOnline = APP_STATE.agents.filter(a => a.floor !== "rest" && a.status !== "exhausted");
+    revSel.innerHTML = allOnline.map(a => `<option value="${a.id}">${escapeHTML(a.name)} (${escapeHTML(a.badge)})</option>`).join("");
+  }
+  toggleReviewerField();
   document.getElementById("newTaskModal").classList.remove("hidden");
+}
+
+function syncNewTaskKindFromSkill() {
+  const sk = document.getElementById("taskSkillSelect").value;
+  const kindSel = document.getElementById("taskKindSelect");
+  if (!kindSel) return;
+  if (["cheap-code-jobs", "code-review-checklist", "test-cases"].includes(sk)) {
+    kindSel.value = "code_change";
+  }
+  toggleReviewerField();
+}
+
+function toggleReviewerField() {
+  const kindSel = document.getElementById("taskKindSelect");
+  const grp = document.getElementById("taskReviewerGroup");
+  if (!kindSel || !grp) return;
+  grp.classList.toggle("hidden", kindSel.value !== "code_change");
 }
 
 function closeNewTaskModal() {
@@ -1148,11 +1371,17 @@ function closeNewTaskModal() {
 
 async function handleCreateTaskSubmit(event) {
   event.preventDefault();
+  const task_kind = (document.getElementById("taskKindSelect") || {}).value || "small";
+  const reviewer_id = task_kind === "code_change"
+    ? ((document.getElementById("taskReviewerSelect") || {}).value || "")
+    : "";
   const payload = {
     title: document.getElementById("taskTitle").value.trim(),
     manager_id: document.getElementById("taskManagerSelect").value,
     assigned_to: document.getElementById("taskWorkerSelect").value,
     skill_slug: document.getElementById("taskSkillSelect").value,
+    task_kind,
+    reviewer_id,
     goal: document.getElementById("taskGoal").value.trim(),
     input_text: document.getElementById("taskInput").value.trim(),
     output_format: document.getElementById("taskFormat").value.trim(),
@@ -1194,6 +1423,17 @@ async function handleCreateSkillSubmit(event) {
 // =========================================================================
 // 视图与辅助工具
 // =========================================================================
+function closeTopbarDropdown(id) {
+  const el = document.getElementById(id);
+  if (el) el.removeAttribute("open");
+}
+
+document.addEventListener("click", (ev) => {
+  document.querySelectorAll("details.topbar-dropdown[open]").forEach((det) => {
+    if (!det.contains(ev.target)) det.removeAttribute("open");
+  });
+});
+
 function switchMainView(view) {
   document.getElementById("tabBtnWorkspace").classList.toggle("active", view === "workspace");
   document.getElementById("tabBtnSkills").classList.toggle("active", view === "skills");

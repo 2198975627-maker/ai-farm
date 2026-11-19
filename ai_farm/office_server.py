@@ -83,6 +83,9 @@ class OfficeHTTPHandler(BaseHTTPRequestHandler):
                 "tasks": self.store.listtasks(),
                 "group_messages": self.store.listgroupmessages(),
                 "skills": self.store.listskills(),
+                "hud_flights": self.store.listhudflights(),
+                "pending_approvals": self.store.listapprovals(),
+                "settings": self.store.getsettings(),
             }, origin=origin)
             return
 
@@ -123,7 +126,10 @@ class OfficeHTTPHandler(BaseHTTPRequestHandler):
 
     def do_POST(self) -> None:  # noqa: N802
         origin = self.headers.get("Origin")
+        length = int(self.headers.get("Content-Length", "0"))
         if origin and not self._is_allowed_origin(origin):
+            if 0 < length <= 65536:
+                self.rfile.read(length)
             self._send_json(403, {"ok": False, "error": f"Forbidden Origin: {origin}"})
             return
 
@@ -132,7 +138,6 @@ class OfficeHTTPHandler(BaseHTTPRequestHandler):
             self._send_json(404, {"ok": False, "error": "Unknown endpoint"}, origin=origin)
             return
 
-        length = int(self.headers.get("Content-Length", "0"))
         body = self.rfile.read(length).decode("utf-8") if length > 0 else "{}"
         try:
             req = json.loads(body) if body else {}
@@ -148,6 +153,9 @@ class OfficeHTTPHandler(BaseHTTPRequestHandler):
                     "tasks": self.store.listtasks(),
                     "group_messages": self.store.listgroupmessages(),
                     "skills": self.store.listskills(),
+                    "hud_flights": self.store.listhudflights(),
+                    "pending_approvals": self.store.listapprovals(),
+                    "settings": self.store.getsettings(),
                 },
             }, origin=origin)
         except Exception as e:  # noqa: BLE001

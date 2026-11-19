@@ -16,7 +16,7 @@ from ai_farm.cli import _append_agent_to_yaml, _build_adapter_for_agent, filter_
 from ai_farm.dispatcher import Task, dispatch
 from ai_farm.office_server import create_server
 from ai_farm.office_store import OfficeStore
-from ai_farm.quota import quota_label, quota_state
+from ai_farm.quota import quota_band, quota_label, quota_state
 from ai_farm.roster import Agent, Roster, load_roster
 from ai_farm.skills import SKILLS, get_skill
 
@@ -344,6 +344,125 @@ def test_cli_recruit_persists_yaml_and_skips_web_on_live():
         live_w, skipped_w = filter_live_executable_agents(loaded.workers())
         assert [a.name for a in live_w] == ["Custom Qwen"]
         assert [a.name for a in skipped_w] == ["Web Chat"]
+
+
+def test_agent_hud_4_features_and_red_lines_dry_run():
+    assert quota_band(None) == "unknown"
+    assert quota_band(80.0) == "green"
+    assert quota_band(25.0) == "yellow"
+    assert quota_band(10.0) == "red"
+    assert quota_state(Quota(kind="api", percent_remaining=20.0)) == "warn"
+
+    with tempfile.TemporaryDirectory() as tmp:
+        store = OfficeStore(state_path=Path(tmp) / "hud_office.json")
+        assert store.getsettings()["auto_execute_low_risk"] is False
+
+        coder = store.createagent({
+            "name": "API Coder", "vendor": "V-Coder", "model": "coder-lite",
+            "access_kind": "api", "paid": False, "key_env": "TEST_CODER_KEY",
+            "base_url": "https://coder.invalid/v1", "floor": "worker",
+        })
+        reviewer = store.createagent({
+            "name": "CLI Reviewer", "vendor": "V-Rev", "model": "rev-m",
+            "access_kind": "cli", "paid": False, "executable": "codex", "floor": "worker",
+        })
+        web_worker = store.createagent({
+            "name": "Free Web Chat", "vendor": "KimiWeb", "model": "web-free",
+            "access_kind": "web", "login_url": "https://kimi.moonshot.cn/", "floor": "worker",
+        })
+
+        # 1. Small task skips code review to save tokens; conclusion-only blocks chat dumps
+        small_task = store.createtask({"title": "Small batch translate", "assigned_to": coder["id"], "task_kind": "small"})
+        assert small_task["requires_code_review"] is False
+        try:
+            store.postmessage({
+                "task_id": small_task["id"],
+                "sender_id": coder["id"],
+                "text": "User: hi\nAssistant: ok\nUser: step 2\nAssistant: full chat dump",
+                "is_delivery": True,
+            })
+            raise AssertionError("Multi-turn chat dump must be rejected by Conclusion-Only guard")
+        except ValueError:
+            pass
+        dry_res = store.runadaptertask({"task_id": small_task["id"], "live": False})
+        assert dry_res["mode"] == "dry_run" and "【结论】" in dry_res["text"]
+
+        # 2. Code change task enforces Write -> Review -> Revise with separate agents
+        try:
+            store.createtask({
+                "title": "Fix bug same reviewer", "assigned_to": coder["id"],
+                "task_kind": "code_change", "reviewer_id": coder["id"],
+            })
+            raise AssertionError("Reviewer cannot be the same agent as coder")
+        except ValueError:
+            pass
+
+        code_task = store.createtask({
+            "title": "Fix login bug", "assigned_to": coder["id"],
+            "task_kind": "code_change", "reviewer_id": reviewer["id"],
+        })
+        assert code_task["requires_code_review"] is True
+        store.postmessage({
+            "task_id": code_task["id"],
+            "sender_id": coder["id"],
+            "conclusion": "已修复空密码登录越界校验",
+            "changed_files": ["auth.py"],
+            "test_result": "dry-run 3/3 PASS",
+            "is_delivery": True,
+        })
+        # Delivery blocked before independent review passes
+        try:
+            store.deliverfinalresult({"task_id": code_task["id"]})
+            raise AssertionError("Cannot deliver code_change task before code review approval")
+        except ValueError:
+            pass
+
+        # Reject once -> revision_round = 1 -> revise -> approve -> deliver -> accept
+        rejected = store.submitcodereview({
+            "task_id": code_task["id"],
+            "reviewer_id": reviewer["id"],
+            "passed": False,
+            "issues": ["auth.py:42 缺少空字符串 strip() 检查"],
+        })
+        assert rejected["status"] == "rejected" and rejected["revision_round"] == 1
+        approved = store.submitcodereview({
+            "task_id": code_task["id"],
+            "reviewer_id": reviewer["id"],
+            "passed": True,
+            "dry_run": True,
+        })
+        assert approved["review_status"] == "approved"
+        store.deliverfinalresult({"task_id": code_task["id"]})
+        done = store.reviewfinalresult({"task_id": code_task["id"], "decision": "verified"})
+        assert done["status"] == "accepted_done"
+
+        # 3. HUD flights recorded across workflow
+        flights = store.listhudflights()
+        assert any(f["kind"] == "review_reject" for f in flights)
+        assert any(f["kind"] == "review_pass" for f in flights)
+
+        # 4. Human authorization switch & critical op gating
+        low_req = store.requestapproval({"op_type": "low_risk_run", "target": "demo", "requested_by": "chief"})
+        assert low_req["status"] == "pending"  # default OFF
+        store.toggleautoexecute({"enabled": True})
+        low_auto = store.requestapproval({"op_type": "low_risk_run", "target": "demo", "requested_by": "chief"})
+        assert low_auto["status"] == "auto_approved"
+
+        # Critical ops ALWAYS require human allow_once even when low-risk auto-execute is ON
+        blocked_merge = store.executecriticalop({"op_type": "merge", "target": "main", "task_id": code_task["id"], "dry_run": True})
+        assert blocked_merge["executed"] is False and blocked_merge["requires_approval"] is True
+        apr_id = blocked_merge["approval"]["id"]
+        try:
+            store.resolveapproval({"approval_id": apr_id, "decision": "always_allow"})
+            raise AssertionError("Critical ops must forbid always_allow")
+        except ValueError:
+            pass
+        store.resolveapproval({"approval_id": apr_id, "decision": "allow_once"})
+        exec_ok = store.executecriticalop({"op_type": "merge", "target": "main", "task_id": code_task["id"], "dry_run": True})
+        assert exec_ok["executed"] is True and exec_ok["dry_run"] is True
+        # Consumed single-use approval -> second run asks again
+        re_asked = store.executecriticalop({"op_type": "merge", "target": "main", "task_id": code_task["id"], "dry_run": True})
+        assert re_asked["executed"] is False and re_asked["requires_approval"] is True
 
 
 if __name__ == "__main__":
