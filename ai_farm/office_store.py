@@ -2363,6 +2363,12 @@ class OfficeStore:
         else:
             result = self._run_controlled_git_op(op_type, target, payload)
 
+        with self._lock:
+            matched["backup_ref"] = result.get("backup_ref")
+            matched["rollback_available"] = bool(result.get("rollback_available"))
+            matched["workspace_dir"] = result.get("workspace_dir")
+            matched["real_executed"] = bool(result.get("real_executed"))
+
         chief_name = self._chief_agent()["name"]
         if result.get("real_executed"):
             note = (

@@ -1,4 +1,5 @@
 """Dry-run tests only — no network, no keys, no spend."""
+import http.client
 import json
 import subprocess
 import sys
@@ -282,6 +283,54 @@ def test_security_cors_and_workspace_guard():
             raise AssertionError("Should block writing into Windows system directory")
         except ValueError:
             pass
+
+
+def test_security_static_traversal_and_body_cap():
+    import ai_farm.office_server as srv_mod
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp_path = Path(tmp)
+        web_root = tmp_path / "web"
+        web_root.mkdir()
+        (web_root / "index.html").write_text("<html>ok</html>", encoding="utf-8")
+        # Sibling sharing the "web" prefix: a separator-less startswith() guard
+        # would wrongly serve it; is_relative_to() must reject it.
+        secret = tmp_path / "web-secret"
+        secret.mkdir()
+        (secret / "leak.txt").write_text("TOP-SECRET", encoding="utf-8")
+
+        orig_web = srv_mod.WEB_DIR
+        srv_mod.WEB_DIR = web_root
+        srv = create_server("127.0.0.1", 0, state_path=tmp_path / "office.json")
+        port = srv.server_address[1]
+        t = threading.Thread(target=srv.serve_forever, daemon=True)
+        t.start()
+        try:
+            with urllib.request.urlopen(f"http://127.0.0.1:{port}/index.html", timeout=5) as resp:
+                assert resp.status == 200
+
+            # Raw ../ traversal (http.client keeps the path verbatim) -> 403.
+            conn = http.client.HTTPConnection("127.0.0.1", port, timeout=5)
+            conn.putrequest("GET", "/../web-secret/leak.txt")
+            conn.endheaders()
+            resp = conn.getresponse()
+            assert resp.status == 403, f"traversal must be blocked, got {resp.status}"
+            resp.read()
+            conn.close()
+
+            # Oversized Content-Length -> 413 before the body is read.
+            conn = http.client.HTTPConnection("127.0.0.1", port, timeout=5)
+            conn.putrequest("POST", "/api/action")
+            conn.putheader("Content-Type", "application/json")
+            conn.putheader("Content-Length", str(srv_mod.MAX_ACTION_BODY_BYTES + 1))
+            conn.endheaders()
+            resp = conn.getresponse()
+            assert resp.status == 413, f"oversized body must be 413, got {resp.status}"
+            resp.read()
+            conn.close()
+        finally:
+            srv.shutdown()
+            srv.server_close()
+            srv_mod.WEB_DIR = orig_web
 
 
 def test_office_live_fallback_chain_and_git_diff():
@@ -1130,6 +1179,34 @@ def test_p4_controlled_merge_backup_and_one_click_rollback():
         # one-click owner rollback restores pre-merge state
         rb = store.rollbackcriticalop({"confirm": True, "backup_ref": real["backup_ref"], "workspace_dir": str(repo)})
         assert rb["rolled_back"] is True and rb["head_after"] == head0
+        assert (repo / "file.txt").read_text(encoding="utf-8") == "base\n"
+
+
+def test_p4_executed_approval_carries_rollback_metadata_for_drawer():
+    with tempfile.TemporaryDirectory() as tmp:
+        repo = _init_temp_repo(Path(tmp) / "repo")
+        store = OfficeStore(state_path=Path(tmp) / "office.json")
+        _git(repo, "checkout", "-q", "-b", "feature")
+        (repo / "file.txt").write_text("feature\n", encoding="utf-8")
+        _git(repo, "add", "file.txt")
+        _git(repo, "commit", "-q", "-m", "f")
+        _git(repo, "checkout", "-q", "main")
+
+        store.executecriticalop({"op_type": "merge", "target": "feature", "dry_run": True, "workspace_dir": str(repo)})
+        apr = store.listapprovals()[-1]
+        store.resolveapproval({"approval_id": apr["id"], "decision": "allow_once"})
+        real = store.executecriticalop({"op_type": "merge", "target": "feature", "dry_run": False, "workspace_dir": str(repo)})
+        assert real["real_executed"] is True
+
+        entry = [a for a in store.listapprovals() if a["id"] == apr["id"]][0]
+        assert entry["status"] == "executed"
+        assert entry["backup_ref"] == real["backup_ref"]
+        assert entry["rollback_available"] is True
+        assert entry["workspace_dir"] == str(repo)
+
+        rb = store.rollbackcriticalop({"confirm": True, "backup_ref": entry["backup_ref"],
+                                       "workspace_dir": entry["workspace_dir"]})
+        assert rb["rolled_back"] is True
         assert (repo / "file.txt").read_text(encoding="utf-8") == "base\n"
 
 

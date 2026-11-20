@@ -20,6 +20,7 @@ from .office_store import OfficeStore
 
 WEB_DIR = Path(__file__).resolve().parents[1] / "web"
 EXT_DIR = Path(__file__).resolve().parents[1] / "browser-extension"
+MAX_ACTION_BODY_BYTES = 1_048_576  # 1 MiB cap on /api/action bodies (localhost boundary guard)
 
 
 class OfficeHTTPHandler(BaseHTTPRequestHandler):
@@ -110,8 +111,9 @@ class OfficeHTTPHandler(BaseHTTPRequestHandler):
             target = WEB_DIR / "index.html"
         else:
             rel = path.lstrip("/")
-            target = (WEB_DIR / rel).resolve()
-            if not str(target).startswith(str(WEB_DIR.resolve())):
+            web_root = WEB_DIR.resolve()
+            target = (web_root / rel).resolve()
+            if not target.is_relative_to(web_root):
                 self._send_json(403, {"ok": False, "error": "Forbidden"})
                 return
 
@@ -140,6 +142,10 @@ class OfficeHTTPHandler(BaseHTTPRequestHandler):
         parsed = urlparse(self.path)
         if parsed.path != "/api/action":
             self._send_json(404, {"ok": False, "error": "Unknown endpoint"}, origin=origin)
+            return
+
+        if length > MAX_ACTION_BODY_BYTES:
+            self._send_json(413, {"ok": False, "error": "Request body too large"}, origin=origin)
             return
 
         body = self.rfile.read(length).decode("utf-8") if length > 0 else "{}"
@@ -184,7 +190,7 @@ def create_server(host: str = "127.0.0.1", port: int = 8765,
 def run_office_server(host: str = "127.0.0.1", port: int = 8765,
                       state_path: Path | None = None) -> None:
     srv = create_server(host=host, port=port, state_path=state_path)
-    print(f"🏡 AI 农场办公室已启动: http://{host}:{port}")
+    print(f"AI 农场办公室已启动: http://{host}:{port}")
     print("按 Ctrl+C 停止服务。")
     try:
         srv.serve_forever()
