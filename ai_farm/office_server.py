@@ -87,6 +87,7 @@ class OfficeHTTPHandler(BaseHTTPRequestHandler):
                 "pending_approvals": self.store.listapprovals(),
                 "bus_messages": self.store.listbusmessages(),
                 "discussions": self.store.listdiscussions(),
+                "savings_ledger": self.store.savingsledger(),
                 "settings": self.store.getsettings(),
             }, origin=origin)
             return
@@ -159,6 +160,7 @@ class OfficeHTTPHandler(BaseHTTPRequestHandler):
                     "pending_approvals": self.store.listapprovals(),
                     "bus_messages": self.store.listbusmessages(),
                     "discussions": self.store.listdiscussions(),
+                    "savings_ledger": self.store.savingsledger(),
                     "settings": self.store.getsettings(),
                 },
             }, origin=origin)

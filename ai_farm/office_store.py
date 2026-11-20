@@ -15,6 +15,7 @@ Pure open-source framework:
 from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor
+from datetime import date
 import functools
 import hashlib
 import json
@@ -744,6 +745,10 @@ class OfficeStore:
             if cand["floor"] == "rest" or cand["status"] == "exhausted":
                 raise ValueError(f"审查 Agent {cand['name']} 正在休息或额度已耗尽，请换一位在线成员。")
             return cand
+        for a in self.state["agents"]:
+            if a["id"] != assigned_id and a["floor"] in ("manager", "worker") and a["status"] == "ready":
+                if a.get("access_kind") in ("api", "cli"):
+                    return a
         for a in self.state["agents"]:
             if a["id"] != assigned_id and a["floor"] in ("manager", "worker") and a["status"] == "ready":
                 return a
@@ -1668,6 +1673,7 @@ class OfficeStore:
                 task["assigned_vendor"] = chosen_agent["vendor"]
             task.setdefault("usage_log", []).append(usage_info)
             chosen_agent["tokens_used"] = int(chosen_agent.get("tokens_used") or 0) + tok_total
+            self._record_savings(chosen_agent, tok_total, task["id"], "execute")
             if reply.rate_limit_remaining:
                 chosen_agent["quota_note"] = f"上次调用响应头剩余次数：{json.dumps(reply.rate_limit_remaining, ensure_ascii=False)}"
             self._store_receipt(live_fp, "runadaptertask_live", {
@@ -2263,9 +2269,23 @@ class OfficeStore:
                 "task_kind": spec.get("task_kind") or "small",
                 "reviewer_id": spec.get("reviewer_id") or "",
                 "parent_task_id": parent_id,
+                "depends_on": spec.get("depends_on") or [],
             })
             parent_task["subtask_ids"].append(sub["id"])
             created_subtasks.append(sub)
+
+        # Resolve DAG deps given as 1-based sibling indices (model planner output)
+        # into concrete subtask ids; drop self/unknown references.
+        for idx, sub in enumerate(created_subtasks):
+            resolved: list[str] = []
+            for dep in (sub.get("depends_on") or []):
+                if isinstance(dep, int) or (isinstance(dep, str) and dep.isdigit()):
+                    j = int(dep) - 1
+                    if 0 <= j < len(created_subtasks) and j != idx:
+                        resolved.append(created_subtasks[j]["id"])
+                elif isinstance(dep, str) and dep != sub["id"] and any(s["id"] == dep for s in created_subtasks):
+                    resolved.append(dep)
+            sub["depends_on"] = list(dict.fromkeys(resolved))
 
         lines = "\n".join(
             f"  {i + 1}. `{s['id']}` {s['title']} → **{s['assigned_name']}**"
@@ -2295,7 +2315,11 @@ class OfficeStore:
         return {"parent": parent_task, "subtasks": created_subtasks}
 
     def runbigtasksubtasks(self, payload: dict[str, Any]) -> dict[str, Any]:
-        """Batch-run (dry-run or concurrent API/CLI live) all pending subtasks of a parent task."""
+        """Batch-run all pending subtasks of a parent task, respecting the
+        depends_on DAG: independent siblings run concurrently (API/CLI live),
+        a subtask only starts once its upstream siblings have reported. Web /
+        desktop siblings are handed to the courier extension / .md mailbox and
+        their dependents wait honestly (no copy-paste, no fake success)."""
         parent = self._find_task(payload.get("parent_task_id") or payload.get("task_id") or payload.get("id"))
         if not parent.get("is_parent") or not parent.get("subtask_ids"):
             raise ValueError("该任务不是包含子单的大任务。")
@@ -2303,33 +2327,11 @@ class OfficeStore:
         workspace_dir = (payload.get("workspace_dir") or "").strip()
 
         subtasks = [self._find_task(sid) for sid in parent["subtask_ids"] if any(t["id"] == sid for t in self.state["tasks"])]
+        by_id = {s["id"]: s for s in subtasks}
         results: list[dict[str, Any]] = []
-
-        if not live:
-            for sub in subtasks:
-                if sub["status"] in ("delivered", "accepted_done"):
-                    results.append({"task_id": sub["id"], "skipped": True, "reason": "已完成"})
-                    continue
-                res = self.runadaptertask({"task_id": sub["id"], "live": False, "workspace_dir": workspace_dir})
-                results.append({"task_id": sub["id"], "mode": "dry_run", "worker": res["worker"]})
-            return {"parent_id": parent["id"], "mode": "dry_run", "executed_count": len(results), "results": results}
-
-        # Live mode: run only API/CLI subtasks concurrently, guide web/desktop subtasks cleanly
-        auto_subs: list[dict[str, Any]] = []
-        for sub in subtasks:
-            if sub["status"] in ("delivered", "accepted_done"):
-                results.append({"task_id": sub["id"], "skipped": True, "reason": "已完成"})
-                continue
-            wid = sub.get("assigned_to") or ""
-            agent = self._find_agent(wid) if wid else None
-            if agent and agent.get("access_kind") in ("web", "subscription", "desktop"):
-                results.append({
-                    "task_id": sub["id"],
-                    "skipped": True,
-                    "reason": f"{agent['name']} 属于{agent['badge']}通道，请点网页/导出.md按钮执行",
-                })
-                continue
-            auto_subs.append(sub)
+        done: set[str] = {s["id"] for s in subtasks if s["status"] in ("delivered", "accepted_done")}
+        stalled: dict[str, str] = {}
+        remaining = [s for s in subtasks if s["id"] not in done]
 
         def _exec_one(sub_task: dict[str, Any]) -> dict[str, Any]:
             try:
@@ -2338,11 +2340,58 @@ class OfficeStore:
             except Exception as exc:  # noqa: BLE001
                 return {"task_id": sub_task["id"], "mode": "live", "ok": False, "error": str(exc)}
 
-        if auto_subs:
-            with ThreadPoolExecutor(max_workers=min(4, len(auto_subs))) as pool:
-                results.extend(list(pool.map(_exec_one, auto_subs)))
+        while remaining:
+            wave: list[dict[str, Any]] = []
+            blocked: list[dict[str, Any]] = []
+            for s in remaining:
+                deps = [d for d in (s.get("depends_on") or []) if d in by_id]
+                if all(d in done for d in deps):
+                    wave.append(s)
+                elif any(d in stalled for d in deps):
+                    blocked.append(s)
+            for s in blocked:
+                stalled[s["id"]] = "upstream"
+                results.append({"task_id": s["id"], "skipped": True, "reason": "依赖未满足（上游子单未完成/被跳过）"})
+            wave_ids = {s["id"] for s in wave}
+            blocked_ids = {s["id"] for s in blocked}
+            remaining = [s for s in remaining if s["id"] not in wave_ids and s["id"] not in blocked_ids]
+            if not wave:
+                for s in remaining:
+                    results.append({"task_id": s["id"], "skipped": True, "reason": "依赖未满足，等待上游子单"})
+                break
 
-        return {"parent_id": parent["id"], "mode": "live", "executed_count": len(auto_subs), "results": results}
+            if not live:
+                for s in wave:
+                    res = self.runadaptertask({"task_id": s["id"], "live": False, "workspace_dir": workspace_dir})
+                    results.append({"task_id": s["id"], "mode": "dry_run", "worker": res["worker"]})
+                    done.add(s["id"])
+                continue
+
+            auto_subs: list[dict[str, Any]] = []
+            for s in wave:
+                wid = s.get("assigned_to") or ""
+                agent = self._find_agent(wid) if wid else None
+                if agent and agent.get("access_kind") in ("web", "subscription", "desktop"):
+                    stalled[s["id"]] = "channel"
+                    results.append({
+                        "task_id": s["id"], "skipped": True,
+                        "reason": f"{agent['name']} 属于{agent['badge']}通道，等待传令兵扩展/信箱自动回执（不复制粘贴）",
+                    })
+                else:
+                    auto_subs.append(s)
+            if auto_subs:
+                with ThreadPoolExecutor(max_workers=min(4, len(auto_subs))) as pool:
+                    wave_results = list(pool.map(_exec_one, auto_subs))
+                results.extend(wave_results)
+                for r in wave_results:
+                    if r.get("ok"):
+                        done.add(r["task_id"])
+                    else:
+                        stalled[r["task_id"]] = "failed"
+
+        executed = len([r for r in results if not r.get("skipped") and r.get("ok", True)])
+        return {"parent_id": parent["id"], "mode": "live" if live else "dry_run",
+                "executed_count": executed, "results": results}
 
     def runautocodereview(self, payload: dict[str, Any]) -> dict[str, Any]:
         """Auto-collect local git diff (0 tokens) and run independent reviewer (dry-run or live API/CLI)."""
@@ -2382,10 +2431,14 @@ class OfficeStore:
             }
 
         if reviewer.get("access_kind") not in ("api", "cli"):
-            raise RuntimeError(
-                f"独立审查者 {reviewer['name']}（{reviewer['badge']}）不是 API/CLI 通道，无法自动真调；"
-                "请切换 API/CLI 审查者，或用干跑/手动填入审查问题清单。"
-            )
+            alt = self._pick_reviewer(assigned_id=task.get("assigned_to") or "", manager=chief, requested_id="")
+            if alt.get("access_kind") in ("api", "cli") and alt["id"] != (task.get("assigned_to") or ""):
+                reviewer = alt
+            else:
+                raise RuntimeError(
+                    f"独立审查者 {reviewer['name']}（{reviewer['badge']}）不是 API/CLI 通道，无法自动真调；"
+                    "请切换 API/CLI 审查者，或用干跑/手动填入审查问题清单。"
+                )
         safe_ws = self._validate_safe_workspace(workspace_dir)
         adapter = self._build_adapter(reviewer, workspace_dir=safe_ws)
         review_prompt = (
@@ -2397,6 +2450,10 @@ class OfficeStore:
             "如果有问题，每行一条输出精简问题清单（格式：文件:行号 问题描述），绝不贴整文件代码。"
         )
         reply = adapter.chat(review_prompt, max_tokens=600)
+        rev_tok = self._reply_tokens(reply)
+        with self._lock:
+            reviewer["tokens_used"] = int(reviewer.get("tokens_used") or 0) + rev_tok
+            self._record_savings(reviewer, rev_tok, task["id"], "review")
         raw = (reply.text or "").strip()
         is_pass = raw.upper().startswith("PASS") or ("无阻断" in raw and len(raw) < 80)
         issues_list = [] if is_pass else [ln.strip(" -•\t") for ln in raw.splitlines() if ln.strip()][:12]
@@ -2508,7 +2565,8 @@ class OfficeStore:
         requested = [str(p).strip() for p in (payload.get("participants") or []) if str(p).strip()]
         debaters = self._roundtable_debaters(requested, chief)
         with self._lock:
-            task["mode"] = "roundtable"
+            if not payload.get("as_step"):
+                task["mode"] = "roundtable"
 
         if len(debaters) < 2:
             self._append_group_msg(
@@ -2571,6 +2629,7 @@ class OfficeStore:
             tok = self._reply_tokens(reply)
             with self._lock:
                 d["tokens_used"] = int(d.get("tokens_used") or 0) + tok
+                self._record_savings(d, tok, task["id"], "discuss")
             tokens_total += tok
             stance = "oppose" if ("反对" in text or "不同意" in text) else ("revise" if ("修改" in text or "建议" in text) else "support")
             res = self.postdiscussionmessage({
@@ -2606,6 +2665,7 @@ class OfficeStore:
                 tok = self._reply_tokens(reply)
                 with self._lock:
                     chief["tokens_used"] = int(chief.get("tokens_used") or 0) + tok
+                    self._record_savings(chief, tok, task["id"], "discuss_chief")
                 tokens_total += tok
                 adopted = next((o["from_name"] for o in opinions if o["from_name"] in resolution), opinions[0]["from_name"])
             except Exception:  # noqa: BLE001 - honest handoff to owner
@@ -2732,6 +2792,7 @@ class OfficeStore:
                 chief_tokens = self._reply_tokens(reply)
                 with self._lock:
                     chief["tokens_used"] = int(chief.get("tokens_used") or 0) + chief_tokens
+                    self._record_savings(chief, chief_tokens, task["id"], "swarm_pick")
                 m = re.search(r"初稿\s*(\d+)", rationale)
                 if m:
                     idx = int(m.group(1)) - 1
@@ -3087,6 +3148,330 @@ class OfficeStore:
         return disc
 
     # ------------------------------------------------------------------
+    # P2: Auto-orchestration closed loop + savings ledger.
+    # publish -> split -> dispatch -> execute -> report -> review -> discuss
+    # -> aggregate -> deliver, pushed unattended by the office. Every
+    # model-dependent step runs ONLY when a real model is available; otherwise
+    # it stops honestly and records why (red line §七). The savings ledger
+    # counts REAL recorded tokens only — dry-run contributes 0, never invented.
+    # ------------------------------------------------------------------
+    def _record_savings(self, agent: dict[str, Any], tokens: int, task_id: str, kind: str = "execute") -> None:
+        with self._lock:
+            ledger = self.state.setdefault("savings_ledger", [])
+            ledger.append({
+                "ts": _now_iso(), "date": _now_iso()[:10],
+                "agent_id": agent.get("id", ""), "agent_name": agent.get("name", ""),
+                "vendor": agent.get("vendor", ""), "floor": agent.get("floor", ""),
+                "paid": bool(agent.get("paid", False)), "access_kind": agent.get("access_kind", ""),
+                "tokens": int(tokens or 0), "task_id": task_id, "kind": kind,
+            })
+            if len(ledger) > 5000:
+                self.state["savings_ledger"] = ledger[-5000:]
+
+    def savingsledger(self, payload: dict[str, Any] | None = None) -> dict[str, Any]:
+        """By-day / by-week accounting of 1F free workers substituting for 2F
+        paid managers. Only real recorded tokens; rehearsal counts 0."""
+        self._ensure_runtime_keys()
+        events = self.state.get("savings_ledger", [])
+
+        def is_free(e: dict[str, Any]) -> bool:
+            return e.get("floor") == "worker" and not e.get("paid")
+
+        free = [e for e in events if is_free(e)]
+        paid = [e for e in events if not is_free(e)]
+        by_day: dict[str, dict[str, int]] = {}
+        by_week: dict[str, dict[str, int]] = {}
+        for e in events:
+            d = e.get("date", "")
+            if not d:
+                continue
+            tok = int(e.get("tokens") or 0)
+            fr = is_free(e)
+            for key, bucket_map in ((d, by_day), (self._week_key(d), by_week)):
+                b = bucket_map.setdefault(key, {"free_calls": 0, "free_tokens": 0, "paid_calls": 0, "paid_tokens": 0})
+                if fr:
+                    b["free_calls"] += 1
+                    b["free_tokens"] += tok
+                else:
+                    b["paid_calls"] += 1
+                    b["paid_tokens"] += tok
+        return {
+            "free_calls": len(free),
+            "free_tokens": sum(int(e.get("tokens") or 0) for e in free),
+            "paid_calls": len(paid),
+            "paid_tokens": sum(int(e.get("tokens") or 0) for e in paid),
+            "by_day": [{"date": k, **by_day[k]} for k in sorted(by_day)],
+            "by_week": [{"week": k, **by_week[k]} for k in sorted(by_week)],
+            "note": "只统计真实记录的 Token；干跑计 0。免费员工(1F)替付费经理(2F)执行的真实调用次数与 Token。",
+        }
+
+    @staticmethod
+    def _week_key(day: str) -> str:
+        try:
+            iso = date.fromisoformat(day).isocalendar()
+            return f"{iso[0]}-W{iso[1]:02d}"
+        except ValueError:
+            return day
+
+    def _plan_with_manager(self, manager: dict[str, Any], goal: str, workspace_dir: str) -> list[dict[str, Any]] | None:
+        """Ask a real 2F manager model for a structured subtask DAG. Returns
+        None when no usable model / parse fails, so the caller falls back to
+        rule split and labels it honestly."""
+        if manager.get("access_kind") not in ("api", "cli"):
+            return None
+        try:
+            safe_ws = self._validate_safe_workspace(workspace_dir or ".")
+            prompt = (
+                "你是 2 楼经理，负责把下面的需求拆成可并行/有依赖的子单 DAG。"
+                "只输出一个 JSON 数组，不要解释、不要贴全文。每个元素形如 "
+                '{"title":"短标题","goal":"具体目标","task_kind":"small 或 code_change","depends_on":[上游子单的1-based序号]}。'
+                "改代码/修复/单测的子单 task_kind 用 code_change，其余用 small。子单数量 2-6 个。\n"
+                f"需求：{goal}"
+            )
+            reply = self._build_adapter(manager, workspace_dir=safe_ws).chat(prompt, max_tokens=900)
+            tok = self._reply_tokens(reply)
+            with self._lock:
+                manager["tokens_used"] = int(manager.get("tokens_used") or 0) + tok
+            self._record_savings(manager, tok, "", "plan")
+            raw = (reply.text or "").strip()
+            start, end = raw.find("["), raw.rfind("]")
+            if start < 0 or end <= start:
+                return None
+            parsed = json.loads(raw[start:end + 1])
+            if not isinstance(parsed, list) or not parsed:
+                return None
+            specs: list[dict[str, Any]] = []
+            for item in parsed[:6]:
+                if not isinstance(item, dict):
+                    continue
+                g = (item.get("goal") or item.get("title") or "").strip()
+                if not g:
+                    continue
+                kind = "code_change" if str(item.get("task_kind", "")).lower() == "code_change" else "small"
+                specs.append({
+                    "title": (item.get("title") or g)[:36],
+                    "goal": g, "task_kind": kind,
+                    "skill_slug": "cheap-code-jobs" if kind == "code_change" else "",
+                    "depends_on": item.get("depends_on") or [],
+                })
+            return specs or None
+        except Exception:  # noqa: BLE001 - honest fallback to rule split
+            return None
+
+    def autopublish(self, payload: dict[str, Any]) -> dict[str, Any]:
+        """One-click publish: split (real manager DAG if a model is available,
+        else rule split + honest label) -> set mode -> dispatch to free workers
+        (distinct-vendor round-robin, tired workers excluded). Optionally chains
+        autorun so the whole loop runs unattended."""
+        text = (payload.get("text") or payload.get("goal") or payload.get("title") or "").strip()
+        if not text:
+            raise ValueError("发布内容不能为空（一句话或一张工单）。")
+        mode = (payload.get("mode") or "split").strip().lower()
+        if mode not in ("solo", "roundtable", "critic", "pipeline", "split", "swarm"):
+            mode = "split"
+        workspace_dir = (payload.get("workspace_dir") or "").strip()
+        chief = self._chief_agent()
+        manager_id = payload.get("manager_id") or ""
+        if manager_id:
+            manager = self._find_agent(manager_id)
+        else:
+            ready_mgrs = [a for a in self.state["agents"]
+                          if a.get("floor") == "manager" and a.get("status") == "ready"
+                          and a.get("access_kind") in ("api", "cli")]
+            manager = ready_mgrs[0] if ready_mgrs else chief
+        if manager.get("floor") not in ("manager", "chief", "chairman"):
+            manager = chief
+
+        specs = None
+        plan_source = "rule"
+        if payload.get("live_plan") or payload.get("live"):
+            specs = self._plan_with_manager(manager, text, workspace_dir)
+            if specs:
+                plan_source = "model"
+
+        title = (payload.get("title") or text.splitlines()[0])[:40]
+        if mode in ("swarm", "roundtable"):
+            # These modes have their own structure (2 drafts / manager debate),
+            # not a step split. Create one task; the mode runner builds the rest.
+            parent = self.createtask({
+                "title": title, "goal": text, "manager_id": manager["id"], "mode": mode,
+                "task_kind": "small", "input_text": text,
+                "output_format": "只输出【结论】+【改动文件】+【测试结果】，不贴全文对话。",
+                "acceptance": payload.get("acceptance") or "结果完整、不编造数据、符合格式要求。",
+                "idempotency_key": payload.get("idempotency_key") or "",
+                "force_new": payload.get("force_new", False),
+            })
+            subs: list[dict[str, Any]] = []
+            plan_source = "mode"
+            label = "撒网竞选：两名免费员工各做初稿、总管择优" if mode == "swarm" else "圆桌讨论：多位经理各提意见、总管汇总"
+            sub_line = "（本模式不拆步骤子单）"
+            replay = False
+        else:
+            created = self.createbigtask({
+                "title": title, "goal": text,
+                "subtasks": specs if specs else None,
+                "raw_steps": "" if specs else text,
+                "mode": mode, "manager_id": manager["id"],
+                "idempotency_key": payload.get("idempotency_key") or "",
+                "force_new": payload.get("force_new", False),
+            })
+            parent = created["parent"]
+            subs = created["subtasks"]
+            replay = created.get("idempotent_replay", False)
+            label = ("真模型经理规划 DAG" if plan_source == "model"
+                     else "本次是规则拆单，未用真模型规划")
+            sub_line = f"已拆 {len(subs)} 张子单，按免费员工跨厂商轮换派发。"
+        with self._lock:
+            parent["plan_source"] = plan_source
+        self._append_group_msg(
+            sender_id=manager["id"], sender_name=manager["name"], sender_role="manager",
+            kind="publish_card", task_id=parent["id"],
+            text=(f"🚀 **一键发布** `{parent['id']}` · 模式 **{mode}** · {label}\n"
+                  f"• 需求：{text[:120]}\n• {sub_line}"),
+        )
+        self.save()
+        result: dict[str, Any] = {
+            "parent": parent, "subtasks": subs,
+            "plan_source": plan_source, "mode": mode, "idempotent_replay": replay,
+        }
+        if payload.get("run"):
+            result["autorun"] = self.autorun({
+                "parent_task_id": parent["id"], "live": bool(payload.get("live", False)),
+                "workspace_dir": workspace_dir, "discuss": payload.get("discuss", True),
+            })
+        return result
+
+    def autorun(self, payload: dict[str, Any]) -> dict[str, Any]:
+        """Unattended pipeline driver. Pushes a published task through
+        execute -> report -> review -> discuss -> aggregate -> deliver using the
+        existing engines. Stops honestly at any step that lacks a real model or
+        trips a breaker; never fabricates progress."""
+        parent = self._find_task(payload.get("parent_task_id") or payload.get("task_id") or payload.get("id"))
+        live = bool(payload.get("live", False))
+        workspace_dir = (payload.get("workspace_dir") or "").strip()
+        discuss = bool(payload.get("discuss", True))
+        steps: list[dict[str, Any]] = []
+        stopped_reason = ""
+
+        def step(name: str, status: str, detail: str = "", **extra: Any) -> None:
+            steps.append({"step": name, "status": status, "detail": detail, **extra})
+
+        is_parent = bool(parent.get("is_parent") and parent.get("subtask_ids"))
+        subtasks = ([self._find_task(sid) for sid in parent["subtask_ids"]
+                     if any(t["id"] == sid for t in self.state["tasks"])] if is_parent else [parent])
+
+        # Specialized single-task modes delegate to their own runners.
+        mode = (parent.get("mode") or "split").strip().lower()
+        if not is_parent and mode == "swarm":
+            r = self.runswarm({"task_id": parent["id"], "live": live, "workspace_dir": workspace_dir})
+            if r.get("dry_run"):
+                step("execute", "dry_run", "撒网干跑：两份初稿已路由，未真调择优")
+                return {"parent_id": parent["id"], "live": live, "delivered": False, "stopped_reason": "", "steps": steps}
+            if r.get("stopped"):
+                step("execute", "stopped", f"撒网停下：{r.get('reason')}")
+                return {"parent_id": parent["id"], "live": live, "delivered": False, "stopped_reason": r.get("reason"), "steps": steps}
+            step("execute", "ok", f"{len(r.get('drafts', []))} 份初稿，总管择优 {r.get('winner')}")
+            step("deliver", "ok", "撒网总交付已发 @主人验收")
+            return {"parent_id": parent["id"], "live": live, "delivered": True, "stopped_reason": "",
+                    "steps": steps, "status": "delivered", "savings": self.savingsledger()}
+        if not is_parent and mode == "roundtable":
+            r = self.runroundtable({"task_id": parent["id"], "live": live, "workspace_dir": workspace_dir})
+            if r.get("dry_run"):
+                step("discuss", "dry_run", "圆桌干跑：已建讨论串，未真模型发言")
+                return {"parent_id": parent["id"], "live": live, "delivered": False, "stopped_reason": "", "steps": steps}
+            if r.get("stopped"):
+                step("discuss", "stopped", f"圆桌停下：{r.get('reason')}")
+                return {"parent_id": parent["id"], "live": live, "delivered": False, "stopped_reason": r.get("reason"), "steps": steps}
+            step("discuss", "ok", f"{r.get('opinions')} 条真模型意见，采纳 {r.get('adopted') or '综合'}")
+            delivered = self.deliverfinalresult({"task_id": parent["id"], "summary": f"💬 **圆桌裁决交付**：{r.get('resolution')}"})
+            step("deliver", "ok", "圆桌裁决已发 @主人验收")
+            return {"parent_id": parent["id"], "live": live, "delivered": True, "stopped_reason": "",
+                    "steps": steps, "status": delivered.get("status"), "savings": self.savingsledger()}
+
+        # 1) Execute (workers auto-report conclusions to private chat).
+        if is_parent:
+            batch = self.runbigtasksubtasks({"parent_task_id": parent["id"], "live": live, "workspace_dir": workspace_dir})
+            failed = [r for r in batch["results"] if r.get("ok") is False]
+            pending = [r for r in batch["results"] if r.get("skipped")]
+            ex = batch["executed_count"]
+            status = "ok" if ex and not failed and not pending else ("partial" if ex else "stopped")
+            detail = f"执行 {ex} 张子单"
+            if failed:
+                detail += f"；{len(failed)} 张真调失败"
+            if pending:
+                detail += f"；{len(pending)} 张等待网页/桌面通道自动回执或上游依赖"
+            step("execute", status, detail, executed=ex, failed=len(failed), pending=len(pending))
+        else:
+            try:
+                res = self.runadaptertask({"task_id": parent["id"], "live": live, "workspace_dir": workspace_dir})
+                step("execute", "ok", f"{res['worker']} 已汇报结论", worker=res["worker"])
+            except Exception as exc:  # noqa: BLE001
+                step("execute", "stopped", str(exc))
+                return {"parent_id": parent["id"], "live": live, "delivered": False,
+                        "stopped_reason": "execute_failed", "steps": steps}
+
+        # 2) Write -> review -> revise loop for code subtasks (reviewer != author).
+        max_rounds = int(self.state["settings"].get("max_revision_rounds", MAX_REVISION_ROUNDS))
+        for sub in subtasks:
+            if not sub.get("requires_code_review") or not sub.get("worker_reported"):
+                continue
+            if sub.get("review_status") == "approved":
+                continue
+            for _ in range(max_rounds + 1):
+                try:
+                    rev = self.runautocodereview({"task_id": sub["id"], "live": live, "workspace_dir": workspace_dir})
+                except Exception as exc:  # noqa: BLE001 - honest stop, no fake review
+                    step("review", "stopped", f"{sub['id']} 审查停下：{exc}", task_id=sub["id"])
+                    stopped_reason = stopped_reason or "review_no_model"
+                    break
+                if rev.get("review_status") == "approved":
+                    step("review", "ok", f"{sub['id']} 通过独立审查（{rev.get('reviewer')}）", task_id=sub["id"])
+                    break
+                if sub.get("circuit_breaker"):
+                    step("review", "breaker", f"{sub['id']} 打回超限熔断，停下交主人", task_id=sub["id"])
+                    stopped_reason = stopped_reason or "revision_limit"
+                    break
+                # rejected but under ceiling -> worker revises, then re-review
+                try:
+                    self.runadaptertask({"task_id": sub["id"], "live": live, "workspace_dir": workspace_dir})
+                except Exception as exc:  # noqa: BLE001
+                    step("review", "stopped", f"{sub['id']} 返工执行失败：{exc}", task_id=sub["id"])
+                    stopped_reason = stopped_reason or "revise_failed"
+                    break
+
+        # 3) Manager discussion one round before aggregation (real models only).
+        if discuss and is_parent:
+            rt = self.runroundtable({"task_id": parent["id"], "live": live, "workspace_dir": workspace_dir, "as_step": True})
+            if rt.get("dry_run"):
+                step("discuss", "dry_run", "圆桌干跑：已建讨论串，未真模型发言")
+            elif rt.get("stopped"):
+                step("discuss", "stopped", f"经理讨论停下：{rt.get('reason')}（不伪造讨论）")
+            else:
+                step("discuss", "ok", f"{rt.get('opinions')} 条真模型意见，总管采纳 {rt.get('adopted') or '综合'}")
+
+        # 4) Aggregate + 5) Deliver (chief summarizes conclusions, @owner accept).
+        if is_parent:
+            try:
+                delivered = self.aggregatebigtask({"parent_task_id": parent["id"]})
+                step("aggregate", "ok", f"汇总 {len(subtasks)} 张子单结论")
+                step("deliver", "ok", "已发最终交付卡 @主人验收")
+            except ValueError as exc:
+                step("aggregate", "blocked", str(exc))
+                return {"parent_id": parent["id"], "live": live, "delivered": False,
+                        "stopped_reason": stopped_reason or "aggregate_blocked", "steps": steps}
+        else:
+            if parent.get("requires_code_review") and parent.get("review_status") != "approved":
+                step("deliver", "blocked", "改代码任务未过审，不能交付")
+                return {"parent_id": parent["id"], "live": live, "delivered": False,
+                        "stopped_reason": stopped_reason or "review_pending", "steps": steps}
+            delivered = self.deliverfinalresult({"task_id": parent["id"]})
+            step("deliver", "ok", "已发最终交付卡 @主人验收")
+
+        return {"parent_id": parent["id"], "live": live, "delivered": True,
+                "stopped_reason": stopped_reason, "steps": steps,
+                "status": delivered.get("status"), "savings": self.savingsledger()}
+
+    # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------
     def _validate_safe_workspace(self, raw_dir: str) -> str:
@@ -3242,12 +3627,13 @@ class OfficeStore:
 # ----------------------------------------------------------------------
 # Concurrency guard: serialize every fast state-mutating action under the
 # store's reentrant lock. Slow I/O actions (runadaptertask, runbigtasksubtasks,
-# runautocodereview, runroundtable, runswarm, checklivequota, syncprofiles,
-# collectgitdiff) are deliberately EXCLUDED so adapter.chat / the parallel
-# subtask pool never deadlock holding the lock across a network/subprocess
-# call; their state writes are protected by the locked sub-calls they make
-# (postmessage / submitcodereview / createtask / deliverfinalresult / save)
-# plus brief explicit `with self._lock:` around direct field mutations.
+# runautocodereview, runroundtable, runswarm, autopublish, autorun,
+# checklivequota, syncprofiles, collectgitdiff) are deliberately EXCLUDED so
+# adapter.chat / the parallel subtask pool never deadlock holding the lock
+# across a network/subprocess call; their state writes are protected by the
+# locked sub-calls they make (postmessage / submitcodereview / createtask /
+# deliverfinalresult / save) plus brief explicit `with self._lock:` around
+# direct field mutations.
 # ----------------------------------------------------------------------
 _LOCKED_METHODS = (
     "loadsampleteam", "createagent", "updateagent", "moveagent", "deleteagent",

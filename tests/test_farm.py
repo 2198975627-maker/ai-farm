@@ -560,6 +560,47 @@ class ScriptedAdapter:
         return Quota(kind="api", percent_remaining=50.0)
 
 
+class PipelineAdapter:
+    """Prompt-aware fake so the whole auto-orchestration loop runs deterministically."""
+    vendor = "Pipe"
+    model_id = "pipe-1"
+    access_kind = "api"
+
+    def __init__(self, fail=False):
+        self.fail = fail
+
+    def chat(self, prompt, max_tokens=1000):
+        if self.fail:
+            raise RuntimeError("no usable model")
+        if "独立代码审查员" in prompt:
+            text = "PASS"
+        elif "你是总管，汇总" in prompt:
+            text = "【结论】采纳 M1 的方案"
+        elif "参加圆桌评审" in prompt:
+            text = "【结论】支持方案A"
+        elif "挑出最好的一份" in prompt:
+            text = "【结论】采纳初稿1（更简洁）"
+        elif "拆成可并行" in prompt:
+            text = ('[{"title":"梳理","goal":"梳理清单","task_kind":"small","depends_on":[]},'
+                    '{"title":"修复","goal":"修复校验","task_kind":"code_change","depends_on":[1]}]')
+        else:
+            text = "ok"
+        return AgentReply(text=text, model="pipe-1", usage={"total_tokens": 5})
+
+    def check_quota(self):
+        return Quota(kind="api", percent_remaining=50.0)
+
+
+def _seed_pipeline_team(store):
+    store.createagent({"name": "M1", "vendor": "MV1", "model": "m1", "access_kind": "api", "paid": True,
+                       "key_env": "M1_KEY", "base_url": "https://m1.invalid/v1", "floor": "manager"})
+    store.createagent({"name": "M2", "vendor": "MV2", "model": "m2", "access_kind": "api", "paid": True,
+                       "key_env": "M2_KEY", "base_url": "https://m2.invalid/v1", "floor": "manager"})
+    for i in range(3):
+        store.createagent({"name": f"W{i}", "vendor": f"SV{i}", "model": f"w{i}", "access_kind": "api",
+                           "key_env": f"W{i}_KEY", "base_url": f"https://w{i}.invalid/v1", "floor": "worker"})
+
+
 def test_p0_concurrent_writes_no_lost_updates_and_atomic_file():
     with tempfile.TemporaryDirectory() as tmp:
         path = Path(tmp) / "office.json"
@@ -930,6 +971,108 @@ def test_p1_swarm_mode_two_drafts_chief_picks_and_honest_stop():
         t4 = store.createtask({"title": "撒网全无模型", "goal": "x", "task_kind": "small", "force_new": True})
         r4 = store.runswarm({"task_id": t4["id"], "live": True})
         assert r4["stopped"] is True and r4["reason"] == "no_real_model"
+
+
+def test_p2_autopublish_dry_pipeline_rule_label_and_zero_savings():
+    with tempfile.TemporaryDirectory() as tmp:
+        store = OfficeStore(state_path=Path(tmp) / "office.json")
+        _seed_pipeline_team(store)
+        r = store.autopublish({"text": "1. 梳理清单\n2. [代码] 修复校验\n3. 输出摘要",
+                               "mode": "split", "run": True, "live": False})
+        assert r["plan_source"] == "rule" and len(r["subtasks"]) == 3
+        ar = r["autorun"]
+        assert ar["delivered"] is True and ar["stopped_reason"] == ""
+        statuses = {s["step"]: s["status"] for s in ar["steps"]}
+        assert statuses["execute"] == "ok" and statuses["review"] == "ok"
+        assert statuses["discuss"] == "dry_run" and statuses["aggregate"] == "ok" and statuses["deliver"] == "ok"
+        # discussion sub-step must NOT overwrite the split dispatch mode
+        assert store._find_task(r["parent"]["id"])["mode"] == "split"
+        assert store._find_task(r["parent"]["id"])["status"] == "delivered"
+        # dry-run spends nothing: savings ledger counts 0
+        assert ar["savings"]["free_calls"] == 0 and ar["savings"]["free_tokens"] == 0
+        assert any(m["kind"] == "publish_card" for m in store.listgroupmessages())
+        assert any("规则拆单" in m["text"] for m in store.listgroupmessages())
+
+
+def test_p2_autopublish_model_dag_live_pipeline_and_real_savings():
+    with tempfile.TemporaryDirectory() as tmp:
+        store = OfficeStore(state_path=Path(tmp) / "office.json")
+        _seed_pipeline_team(store)
+        store._build_adapter = lambda agent, workspace_dir=".": PipelineAdapter()
+        r = store.autopublish({"text": "重构登录模块并补文档", "mode": "split",
+                               "run": True, "live": True, "live_plan": True})
+        assert r["plan_source"] == "model" and len(r["subtasks"]) == 2
+        deps = [store._find_task(t["id"])["depends_on"] for t in r["subtasks"]]
+        assert deps[0] == [] and deps[1] == [r["subtasks"][0]["id"]]  # DAG resolved to sibling id
+        ar = r["autorun"]
+        assert ar["delivered"] is True
+        statuses = {s["step"]: s["status"] for s in ar["steps"]}
+        assert statuses["review"] == "ok" and statuses["discuss"] == "ok" and statuses["deliver"] == "ok"
+        led = store.savingsledger()
+        assert led["free_calls"] >= 2 and led["free_tokens"] >= 10   # real worker tokens
+        assert led["paid_calls"] >= 3 and led["paid_tokens"] >= 15   # plan + debate + chief
+        assert led["by_day"] and led["by_week"]
+        done = store.reviewfinalresult({"task_id": r["parent"]["id"], "decision": "verified"})
+        assert done["status"] == "accepted_done"
+
+
+def test_p2_autorun_stops_honestly_without_model():
+    with tempfile.TemporaryDirectory() as tmp:
+        store = OfficeStore(state_path=Path(tmp) / "office.json")
+        _seed_pipeline_team(store)
+        store._build_adapter = lambda agent, workspace_dir=".": PipelineAdapter(fail=True)
+        r = store.autopublish({"text": "1. 甲\n2. [代码] 乙", "mode": "split", "run": True, "live": True})
+        ar = r["autorun"]
+        assert ar["delivered"] is False and ar["stopped_reason"]
+        assert store._find_task(r["parent"]["id"])["status"] != "delivered"
+        assert store.savingsledger()["free_calls"] == 0  # nothing real succeeded
+        assert any(s["status"] in ("stopped", "blocked", "partial") for s in ar["steps"])
+
+
+def test_p2_big_task_dag_dependency_waves():
+    with tempfile.TemporaryDirectory() as tmp:
+        store = OfficeStore(state_path=Path(tmp) / "office.json")
+        for i in range(2):
+            store.createagent({"name": f"DW{i}", "vendor": f"DV{i}", "model": f"d{i}", "access_kind": "api",
+                               "key_env": f"DW{i}_KEY", "base_url": f"https://dw{i}.invalid/v1", "floor": "worker"})
+        created = store.createbigtask({"title": "DAG", "subtasks": [
+            {"title": "上游A", "goal": "上游A目标", "task_kind": "small", "depends_on": []},
+            {"title": "下游B", "goal": "下游B目标", "task_kind": "small", "depends_on": [1]},
+        ]})
+        parent = created["parent"]
+        a, b = created["subtasks"]
+        assert b["depends_on"] == [a["id"]]
+        # dry-run: both waves complete
+        batch = store.runbigtasksubtasks({"parent_task_id": parent["id"], "live": False})
+        assert batch["executed_count"] == 2
+        # live: upstream fails -> downstream waits honestly (no fake success)
+        store._build_adapter = lambda agent, workspace_dir=".": ScriptedAdapter(fail=True)
+        b2 = store.createbigtask({"title": "DAG2", "subtasks": [
+            {"title": "上游A", "goal": "上游A目标", "task_kind": "small", "depends_on": []},
+            {"title": "下游B", "goal": "下游B目标", "task_kind": "small", "depends_on": [1]},
+        ], "force_new": True})
+        res = store.runbigtasksubtasks({"parent_task_id": b2["parent"]["id"], "live": True})
+        by_id = {r["task_id"]: r for r in res["results"]}
+        subs2 = b2["subtasks"]
+        assert by_id[subs2[0]["id"]].get("ok") is False
+        assert by_id[subs2[1]["id"]].get("skipped") is True
+        assert res["executed_count"] == 0
+
+
+def test_p2_swarm_and_roundtable_autopublish_modes():
+    with tempfile.TemporaryDirectory() as tmp:
+        store = OfficeStore(state_path=Path(tmp) / "office.json")
+        _seed_pipeline_team(store)
+        chief = store._find_agent("chief")
+        chief["access_kind"] = "api"; chief["base_url"] = "https://c.invalid/v1"; chief["key_env"] = "C_KEY"
+        store._build_adapter = lambda agent, workspace_dir=".": PipelineAdapter()
+        rs = store.autopublish({"text": "写一段排序", "mode": "swarm", "run": True, "live": True})
+        assert rs["mode"] == "swarm" and rs["subtasks"] == []
+        assert rs["autorun"]["delivered"] is True
+        assert store._find_task(rs["parent"]["id"])["is_parent"] is True  # swarm built 2 drafts
+        rr = store.autopublish({"text": "评审登录方案", "mode": "roundtable", "run": True, "live": True, "force_new": True})
+        assert rr["mode"] == "roundtable" and rr["autorun"]["delivered"] is True
+        assert any(m["kind"] == "discussion_closed" for m in store.listgroupmessages())
 
 
 if __name__ == "__main__":
