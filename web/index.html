@@ -8,49 +8,44 @@
   <link rel="stylesheet" href="styles.css" />
 </head>
 <body>
-  <!-- 顶部总控栏：清爽单行布局，核心指令一眼直达 -->
+  <!-- 顶部总控栏（§六瘦身）：左品牌 / 中进度条 / 右仅「派新任务 + 更多」，拆大任务为次级入口 -->
   <header class="topbar">
-    <div class="topbar-brand">
-      <div class="brand-logo" title="核心理念：边角活交免费员工，省付费经理 Token 与额度">🌾</div>
-      <div>
-        <div class="brand-title-row">
-          <h1>AI 农场办公室</h1>
-          <span id="connModeBadge" class="tag-pill tag-conn">检测后端中...</span>
-        </div>
-        <div class="brand-subtitle">边角活交免费员工 · 省付费经理 Token 与额度</div>
-      </div>
+    <div class="brand">
+      <svg class="icon icon-lg" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 21V9"/><path d="M12 9C12 6 9 3 5 3c0 4 3 6 7 6z"/><path d="M12 13c0-3 3-6 7-6 0 4-3 6-7 6z"/></svg>
+      <span>AI 农场</span>
+      <span id="connModeBadge" class="tag-pill tag-conn">检测后端中...</span>
     </div>
 
-    <!-- 居中：主视图切换 -->
     <div class="view-tabs">
-      <button class="view-tab active" id="tabBtnWorkspace" onclick="switchMainView('workspace')">💬 群聊工作台</button>
-      <button class="view-tab" id="tabBtnSkills" onclick="switchMainView('skills')">🧠 技能中心 (12)</button>
+      <button class="view-tab active" id="tabBtnWorkspace" onclick="switchMainView('workspace')"><svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg><span class="vt-text">群聊</span></button>
+      <button class="view-tab" id="tabBtnSkills" onclick="switchMainView('skills')"><svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 2l3 6 6 .9-4.5 4.3 1 6.3-5.5-3-5.5 3 1-6.3L3 8.9 9 8z"/></svg><span class="vt-text">技能</span></button>
     </div>
 
-    <!-- 右侧：实时进度指标 + 安全开关 + 主按钮 + 收纳工具箱 -->
+    <div class="top-progress" id="topProgressStats">
+      <div class="top-progress-track"><div class="top-progress-fill" id="topProgressFill" style="width:0%"></div></div>
+      <span class="top-progress-label">认领 <strong id="statClaimed">0/0</strong> · 汇报 <strong id="statReported">0/0</strong> · 交付 <strong id="statDelivered">0</strong> · 验收 <strong id="statAccepted">0</strong></span>
+      <span class="stat-chip stat-alert hidden" id="statLowQuota" title="点击查看低额度模型"></span>
+    </div>
+
     <div class="topbar-actions">
-      <div class="topbar-stats" id="topProgressStats">
-        <div class="stat-chip" title="已认领 / 总任务数">认领 <strong id="statClaimed">0/0</strong></div>
-        <div class="stat-chip" title="员工私聊已汇报">汇报 <strong id="statReported">0/0</strong></div>
-        <div class="stat-chip" title="经理已统筹交付">交付 <strong id="statDelivered">0</strong></div>
-        <div class="stat-chip stat-ok" title="董事长最终已验收">验收 <strong id="statAccepted">0</strong></div>
-        <div class="stat-chip stat-alert hidden" id="statLowQuota" title="点击查看低额度模型"></div>
-      </div>
+      <button class="btn btn-ghost" onclick="openBigTaskModal()" title="把一个大需求自动拆成多张子单跨厂商分派并汇总交付">拆大任务</button>
+      <button class="btn btn-primary" onclick="openNewTaskModal()"><svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg>派新任务</button>
+      <button class="btn btn-ghost approval-badge-btn" id="approvalBadgeBtn" onclick="toggleApprovalDrawer()" title="待人工授权的关键操作（合并/删代码/部署）">
+        <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
+        <span class="approval-badge-count hidden" id="approvalBadgeCount">0</span>
+      </button>
 
-      <button class="btn btn-safety-off" id="autoExecuteToggleBtn" onclick="handleToggleAutoExecute()" title="低风险任务自动执行开关（默认关闭；合并/删代码/部署等关键操作永远先人工授权）">🛡️ 自动执行低风险: 关</button>
-      <button class="btn btn-example" onclick="handleSeedExampleTask()" title="一键生成标准任务模板体验完整流转">🧪 示例任务</button>
-      <button class="btn btn-ghost" onclick="openBigTaskModal()" title="把一个大需求自动拆成多张子单跨厂商分派并汇总交付">🧩 拆大任务</button>
-      <button class="btn btn-primary" onclick="openNewTaskModal()">＋ 派新任务</button>
-
-      <!-- 收纳低频但重要的工具与指南（一个功能都不删） -->
+      <!-- 收纳低频工具与指南（一个功能都不删） -->
       <details class="topbar-dropdown" id="toolsDropdown">
-        <summary class="btn btn-ghost dropdown-trigger">⚙️ 工具与指南 ▾</summary>
+        <summary class="btn btn-ghost dropdown-trigger">更多 ▾</summary>
         <div class="dropdown-menu dropdown-menu-tools">
-          <button type="button" class="btn btn-ghost dropdown-item" onclick="closeTopbarDropdown('toolsDropdown'); openAutomationGuideModal()">⚡ 4种调用 / 加强自动化指南</button>
-          <button type="button" class="btn btn-ghost dropdown-item" onclick="closeTopbarDropdown('toolsDropdown'); handleLoadSampleTeam()">🎭 载入示例团队（体验分工）</button>
-          <button type="button" class="btn btn-ghost dropdown-item" onclick="closeTopbarDropdown('toolsDropdown'); handleSyncProfiles()">🔄 同步全队资料 / 额度</button>
+          <button type="button" class="btn btn-ghost dropdown-item" id="autoExecuteToggleBtn" onclick="handleToggleAutoExecute()" title="低风险任务自动执行开关（默认关闭；关键操作永远先人工授权）">自动执行低风险: 关</button>
+          <button type="button" class="btn btn-ghost dropdown-item" onclick="closeTopbarDropdown('toolsDropdown'); handleSeedExampleTask()">塞入示例任务</button>
+          <button type="button" class="btn btn-ghost dropdown-item" onclick="closeTopbarDropdown('toolsDropdown'); handleLoadSampleTeam()">载入示例团队（体验分工）</button>
+          <button type="button" class="btn btn-ghost dropdown-item" onclick="closeTopbarDropdown('toolsDropdown'); handleSyncProfiles()">同步全队资料 / 额度</button>
+          <button type="button" class="btn btn-ghost dropdown-item" onclick="closeTopbarDropdown('toolsDropdown'); openAutomationGuideModal()">调用与自动化指南</button>
           <div class="dropdown-divider"></div>
-          <button type="button" class="btn btn-ghost dropdown-item dropdown-item-danger" onclick="closeTopbarDropdown('toolsDropdown'); handleResetDemo()">↺ 重置为空白工作台</button>
+          <button type="button" class="btn btn-ghost dropdown-item dropdown-item-danger" onclick="closeTopbarDropdown('toolsDropdown'); handleResetDemo()">重置为空白工作台</button>
         </div>
       </details>
     </div>
@@ -58,9 +53,9 @@
 
   <!-- 手机端栏目切换条 (仅窄屏显示) -->
   <div class="mobile-nav">
-    <button class="m-tab active" id="mTabRoster" onclick="switchMobilePane('roster')">👥 团队</button>
-    <button class="m-tab" id="mTabChat" onclick="switchMobilePane('chat')">💬 全员群聊</button>
-    <button class="m-tab" id="mTabDetail" onclick="switchMobilePane('detail')">📋 档案/私聊</button>
+    <button class="m-tab active" id="mTabRoster" onclick="switchMobilePane('roster')">团队</button>
+    <button class="m-tab" id="mTabChat" onclick="switchMobilePane('chat')">全员群聊</button>
+    <button class="m-tab" id="mTabDetail" onclick="switchMobilePane('detail')">档案/私聊</button>
   </div>
 
   <!-- 主体：桌面三栏工作台 -->
@@ -69,18 +64,18 @@
     <aside class="left-rail mobile-pane active" id="paneRoster">
       <div class="rail-header">
         <div class="rail-title-row">
-          <span>👥 团队花名册</span>
+          <span>团队花名册</span>
           <span class="rail-count" id="rosterTotalBadge" title="1图标 = 1独立模型">0 成员</span>
         </div>
-        <input type="search" id="agentSearchInput" class="search-input" placeholder="🔍 搜索模型 / 厂商 / 特长..." oninput="renderRoster()" />
-        <div class="drag-hint">💡 拖动头像跨楼层换岗 · 悬浮或选中卡片看降级规则</div>
+        <input type="search" id="agentSearchInput" class="search-input" placeholder="搜索模型 / 厂商 / 特长..." oninput="renderRoster()" />
+        <div class="drag-hint">拖动头像跨楼层换岗 · 悬浮或选中卡片看降级规则</div>
       </div>
 
       <div class="floors-container">
         <!-- 2楼 经理层 -->
         <section class="floor-group floor-group-clean" data-floor="manager" ondragover="onFloorDragOver(event)" ondragleave="onFloorDragLeave(event)" ondrop="onFloorDrop(event, 'manager')">
           <div class="floor-header" title="强推理模型：负责拆解任务、只审 git diff/摘要、不干脏活">
-            <span>🏢 2F 经理层（动脑 · 审摘要）</span>
+            <span>2F 经理层（动脑 · 审摘要）</span>
             <span class="floor-badge" id="countManager">0</span>
           </div>
           <div class="agent-list" id="listManager"></div>
@@ -89,7 +84,7 @@
         <!-- 1楼 员工层 -->
         <section class="floor-group floor-group-clean" data-floor="worker" ondragover="onFloorDragOver(event)" ondragleave="onFloorDragLeave(event)" ondrop="onFloorDrop(event, 'worker')">
           <div class="floor-header" title="免费/低成本模型：按固定 Skill 执行具体任务">
-            <span>🛠️ 1F 员工层（免费轮换 · 动手）</span>
+            <span>1F 员工层（免费轮换 · 动手）</span>
             <span class="floor-badge" id="countWorker">0</span>
           </div>
           <div class="agent-list" id="listWorker"></div>
@@ -98,7 +93,7 @@
         <!-- 院子休息 -->
         <section class="floor-group floor-group-clean" data-floor="rest" ondragover="onFloorDragOver(event)" ondragleave="onFloorDragLeave(event)" ondrop="onFloorDrop(event, 'rest')">
           <div class="floor-header" title="今日额度耗尽、触发验证或待确认的模型">
-            <span>🌿 院子休息（耗尽 / 备用）</span>
+            <span>院子休息（耗尽 / 备用）</span>
             <span class="floor-badge" id="countRest">0</span>
           </div>
           <div class="agent-list" id="listRest"></div>
@@ -107,7 +102,7 @@
 
       <div class="rail-footer">
         <button class="btn btn-recruit-full" onclick="openRecruitModal()">
-          ➕ 招募新 AI Agent（4通道接入）
+          招募新 AI Agent（4通道接入）
         </button>
       </div>
     </aside>
@@ -118,7 +113,7 @@
         <div style="display: flex; align-items: center; justify-content: space-between; gap: 10px;">
           <div>
             <h2>🌾 全员大群聊</h2>
-            <p class="stage-sub">流转：<strong>派单 → 接单 → 进行中 → 交付 → 验收</strong> ｜ 🔒 员工私聊只传结论不刷群，两次失败才升级给经理</p>
+            <p class="stage-sub">流转：<strong>派单 → 接单 → 进行中 → 交付 → 验收</strong> ｜ 员工私聊只传结论不刷群，两次失败才升级给经理</p>
           </div>
           <!-- 独立厂商池折叠查看器（完整保留 #vendorStrip 渲染） -->
           <details class="topbar-dropdown" id="vendorDropdown" style="flex-shrink: 0;">
@@ -166,8 +161,8 @@
     <!-- 右栏：独立身份档案 + 私聊汇报窗 + 团队总览 -->
     <aside class="right-rail mobile-pane" id="paneDetail">
       <div class="right-tabs">
-        <button class="r-tab active" id="rTabProfile" onclick="switchRightTab('profile')">🪪 独立身份档案</button>
-        <button class="r-tab" id="rTabThread" onclick="switchRightTab('thread')">🔒 任务私聊汇报窗 <span id="threadTaskBadge" class="badge-dot"></span></button>
+        <button class="r-tab active" id="rTabProfile" onclick="switchRightTab('profile')">独立身份档案</button>
+        <button class="r-tab" id="rTabThread" onclick="switchRightTab('thread')">任务私聊汇报窗 <span id="threadTaskBadge" class="badge-dot"></span></button>
       </div>
 
       <!-- 面板 1：成员独立身份档案 -->
@@ -220,25 +215,30 @@
   <div class="modal-backdrop hidden" id="recruitModal">
     <div class="modal-card">
       <div class="modal-header">
-        <h3>➕ 招募新 AI Agent（一个图标 = 一个模型）</h3>
+        <h3>招募新 AI Agent（一个图标 = 一个模型）</h3>
         <button class="close-btn" onclick="closeRecruitModal()">✕</button>
       </div>
       <div class="modal-body">
+        <div class="wizard-steps" id="recWizardSteps">
+          <div class="wizard-step active" data-step="1">1 · 选通道</div>
+          <div class="wizard-step" data-step="2">2 · 填资料</div>
+          <div class="wizard-step" data-step="3">3 · 确认加入</div>
+        </div>
         <div class="path-switcher">
           <button type="button" class="path-btn active" id="pathBtnApi" onclick="switchRecruitPath('api')">
-            🔌 通道 A：API 接入
+            通道 A：API 接入
             <small>只填环境变量名，绝不收 Key 明文</small>
           </button>
           <button type="button" class="path-btn" id="pathBtnWeb" onclick="switchRecruitPath('web')">
-            🌐 通道 B：网页 / 订阅制
+            通道 B：网页 / 订阅制
             <small>点「登录一次」在厂商页面登录</small>
           </button>
           <button type="button" class="path-btn" id="pathBtnCli" onclick="switchRecruitPath('cli')">
-            ⌨️ 通道 C：CLI 命令行 Agent
+            通道 C：CLI 命令行 Agent
             <small>本地直接读写工作区并收 git diff</small>
           </button>
           <button type="button" class="path-btn" id="pathBtnDesktop" onclick="switchRecruitPath('desktop')">
-            🖥️ 通道 D：桌面应用端 Agent
+            通道 D：桌面应用端 Agent
             <small>工作空间 @工单.md 半自动交接</small>
           </button>
         </div>
@@ -376,9 +376,19 @@
             <input type="text" id="recSpecialty" placeholder="例：批量中英翻译、格式化表格、写单元测试" />
           </div>
 
+          <div class="wizard-pane" id="recStep3">
+            <div class="approval-item">
+              <div class="op-line">确认加入花名册</div>
+              <div class="meta-line" id="recConfirmSummary">请在第 2 步填写资料后回到此处确认。</div>
+            </div>
+          </div>
+          <div class="wizard-nav">
+            <button type="button" class="btn btn-ghost" id="recWizardPrev" onclick="recruitWizardGo(-1)">上一步</button>
+            <button type="button" class="btn btn-primary" id="recWizardNext" onclick="recruitWizardGo(1)">下一步</button>
+          </div>
           <div class="modal-footer">
             <button type="button" class="btn btn-ghost" onclick="closeRecruitModal()">取消</button>
-            <button type="submit" class="btn btn-primary">✅ 保存并加入花名册</button>
+            <button type="submit" class="btn btn-primary" id="recSubmitBtn">保存并加入花名册</button>
           </div>
         </form>
       </div>
@@ -394,35 +404,38 @@
       </div>
       <div class="modal-body">
         <form id="newTaskForm" onsubmit="handleCreateTaskSubmit(event)">
-          <div class="form-grid">
-            <div class="form-group">
-              <label>任务标题 *</label>
-              <input type="text" id="taskTitle" required placeholder="例：批量翻译10条商品介绍（通用示例）" />
-            </div>
-            <div class="form-group">
-              <label>统筹经理（只审 diff/摘要）*</label>
-              <select id="taskManagerSelect"></select>
-            </div>
-            <div class="form-group">
-              <label>指派 1楼员工（小任务绝不请经理）</label>
-              <select id="taskWorkerSelect"></select>
-            </div>
-            <div class="form-group">
-              <label>绑定固定技能 (Skill)</label>
-              <select id="taskSkillSelect" onchange="syncNewTaskKindFromSkill()"></select>
-            </div>
-            <div class="form-group">
-              <label>任务类型（写-审-改闭环开关）*</label>
-              <select id="taskKindSelect" onchange="toggleReviewerField()">
-                <option value="small">🟢 小活直通（免代码审查 · 省 Token）</option>
-                <option value="code_change">🟣 改代码/修Bug（开启 写-审-改 闭环）</option>
-              </select>
-            </div>
-            <div class="form-group" id="taskReviewerGroup">
-              <label>独立审查 Agent（必须与写代码员工分开）</label>
-              <select id="taskReviewerSelect"></select>
-            </div>
+          <div class="form-group">
+            <label>任务标题 *</label>
+            <input type="text" id="taskTitle" required placeholder="例：批量翻译10条商品介绍（通用示例）" />
           </div>
+          <details class="field-optional">
+            <summary>高级派单选项（统筹经理 / 员工 / 技能 / 类型 / 审查）</summary>
+            <div class="form-grid">
+              <div class="form-group">
+                <label>统筹经理（只审 diff/摘要）*</label>
+                <select id="taskManagerSelect"></select>
+              </div>
+              <div class="form-group">
+                <label>指派 1楼员工（小任务绝不请经理）</label>
+                <select id="taskWorkerSelect"></select>
+              </div>
+              <div class="form-group">
+                <label>绑定固定技能 (Skill)</label>
+                <select id="taskSkillSelect" onchange="syncNewTaskKindFromSkill()"></select>
+              </div>
+              <div class="form-group">
+                <label>任务类型（写-审-改闭环开关）*</label>
+                <select id="taskKindSelect" onchange="toggleReviewerField()">
+                  <option value="small">小活直通（免代码审查 · 省 Token）</option>
+                  <option value="code_change">改代码/修Bug（开启 写-审-改 闭环）</option>
+                </select>
+              </div>
+              <div class="form-group" id="taskReviewerGroup">
+                <label>独立审查 Agent（必须与写代码员工分开）</label>
+                <select id="taskReviewerSelect"></select>
+              </div>
+            </div>
+          </details>
           <div class="form-group">
             <label>1. 目标（一句话说清）*</label>
             <input type="text" id="taskGoal" required placeholder="例：将输入中的10条英文翻成中文，10条合1次调用" />
@@ -439,9 +452,21 @@
             <label>4. 验收标准（外加固定红线：不许自由发挥）*</label>
             <input type="text" id="taskAcceptance" required value="条数完整、无漏译、无编造数字，不许自由发挥" />
           </div>
+          <div class="form-group">
+            <label>协作模式（默认 Solo；多经理批判/圆桌/蜂群按需选）</label>
+            <input type="hidden" id="taskModeInput" value="solo" />
+            <div class="mode-selector" id="taskModeSelector">
+              <div class="mode-option active" data-mode="solo" onclick="selectTaskMode('solo')"><span class="mode-name">Solo 单干</span><span class="mode-desc">一员工执行，经理审</span></div>
+              <div class="mode-option" data-mode="critic" onclick="selectTaskMode('critic')"><span class="mode-name">Critic 批判</span><span class="mode-desc">写-审-改闭环</span></div>
+              <div class="mode-option" data-mode="roundtable" onclick="selectTaskMode('roundtable')"><span class="mode-name">Roundtable 圆桌</span><span class="mode-desc">多经理各抒己见</span></div>
+              <div class="mode-option" data-mode="pipeline" onclick="selectTaskMode('pipeline')"><span class="mode-name">Pipeline 流水线</span><span class="mode-desc">多步串行交接</span></div>
+              <div class="mode-option" data-mode="split" onclick="selectTaskMode('split')"><span class="mode-name">Split 拆单</span><span class="mode-desc">大需求拆子单并行</span></div>
+              <div class="mode-option" data-mode="swarm" onclick="selectTaskMode('swarm')"><span class="mode-name">Swarm 蜂群</span><span class="mode-desc">多员工并行抢单</span></div>
+            </div>
+          </div>
           <div class="modal-footer">
             <button type="button" class="btn btn-ghost" onclick="closeNewTaskModal()">取消</button>
-            <button type="submit" class="btn btn-primary">📣 发到全员大群聊</button>
+            <button type="submit" class="btn btn-primary">发到全员大群聊</button>
           </div>
         </form>
       </div>
@@ -523,6 +548,16 @@
       </div>
     </div>
   </div>
+
+  <!-- 审批抽屉（§六：审批条改为右上角徽章 + 抽屉；含超时与一键回滚） -->
+  <div class="approval-drawer-backdrop hidden" id="approvalDrawerBackdrop" onclick="toggleApprovalDrawer(false)"></div>
+  <aside class="approval-drawer" id="approvalDrawer" aria-label="待人工授权">
+    <div class="approval-drawer-header">
+      <span>待人工授权</span>
+      <button class="close-btn" onclick="toggleApprovalDrawer(false)" aria-label="关闭">✕</button>
+    </div>
+    <div class="approval-drawer-body" id="approvalDrawerBody"></div>
+  </aside>
 
   <div id="toastContainer" class="toast-container"></div>
 

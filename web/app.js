@@ -9,6 +9,10 @@ let APP_STATE = {
   taskMessages: {},
   hudFlights: [],
   pendingApprovals: [],
+  discussions: [],
+  savingsLedger: { free_calls: 0, free_tokens: 0, paid_calls: 0, paid_tokens: 0, by_day: [], by_week: [] },
+  courierLog: [],
+  busMessages: [],
   settings: { auto_execute_low_risk: false },
   skills: [],
   equippedBy: {},
@@ -62,15 +66,16 @@ async function initOffice() {
     if (resp.ok) {
       const data = await resp.json();
       APP_STATE.backendOnline = true;
-      document.getElementById("connModeBadge").textContent = "🟢 Python 后端已连接 (4通道接口 + AgentAdapter)";
+      document.getElementById("connModeBadge").textContent = "Python 后端已连接 (4通道接口 + AgentAdapter)";
       applySnapshot(data);
+      applyShotParams();
       return;
     }
   } catch (_) {
     // 离线文件模式
   }
   APP_STATE.backendOnline = false;
-  document.getElementById("connModeBadge").textContent = "🔵 本地演示模式 (运行 python -m ai_farm office 可连后端)";
+  document.getElementById("connModeBadge").textContent = "本地演示模式 (运行 python -m ai_farm office 可连后端)";
   APP_STATE.agents = JSON.parse(JSON.stringify(SEED_AGENTS));
   APP_STATE.skills = JSON.parse(JSON.stringify(SEED_SKILLS));
   APP_STATE.groupMessages = [
@@ -84,6 +89,7 @@ async function initOffice() {
     }
   ];
   renderAll();
+  applyShotParams();
 }
 
 function applySnapshot(snap) {
@@ -102,6 +108,18 @@ function applySnapshot(snap) {
   }
   if (snap.pending_approvals) {
     APP_STATE.pendingApprovals = snap.pending_approvals;
+  }
+  if (snap.discussions) {
+    APP_STATE.discussions = snap.discussions;
+  }
+  if (snap.savings_ledger) {
+    APP_STATE.savingsLedger = snap.savings_ledger;
+  }
+  if (snap.courier_log) {
+    APP_STATE.courierLog = snap.courier_log;
+  }
+  if (snap.bus_messages) {
+    APP_STATE.busMessages = snap.bus_messages;
   }
   if (snap.settings) {
     APP_STATE.settings = snap.settings;
@@ -136,6 +154,174 @@ async function callOfficeAction(action, payload = {}) {
   }
   showToast("💡 当前为纯静态预览，请运行 python -m ai_farm office 使用完整后端接口");
   return null;
+}
+
+// =========================================================================
+// UI 重做 helpers（§六）：线性 SVG 图标 / 去 emoji / 模式选择 / 审批抽屉 / 招募向导
+// =========================================================================
+const ICON_PATHS = {
+  plus: '<path d="M12 5v14M5 12h14"/>',
+  check: '<path d="M20 6L9 17l-5-5"/>',
+  x: '<path d="M18 6L6 18M6 6l12 12"/>',
+  lock: '<rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/>',
+  box: '<path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"/><path d="M3.27 6.96L12 12l8.73-5.04M12 22V12"/>',
+  send: '<path d="M22 2L11 13M22 2l-7 20-4-9-9-4 20-7z"/>',
+  shield: '<path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/>',
+  refresh: '<path d="M23 4v6h-6M1 20v-6h6"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/>',
+  users: '<path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87M16 3.13a4 4 0 0 1 0 7.75"/>',
+  chat: '<path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/>',
+  star: '<path d="M12 2l3 6 6 .9-4.5 4.3 1 6.3-5.5-3-5.5 3 1-6.3L3 8.9 9 8z"/>',
+  alert: '<path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><path d="M12 9v4M12 17h.01"/>',
+  eye: '<path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/>',
+  undo: '<path d="M3 7v6h6"/><path d="M21 17a9 9 0 0 0-15-6.7L3 13"/>',
+  search: '<circle cx="11" cy="11" r="8"/><path d="M21 21l-4.35-4.35"/>',
+};
+function icon(name, cls = "") {
+  return `<svg class="icon ${cls}" viewBox="0 0 24 24" aria-hidden="true">${ICON_PATHS[name] || ""}</svg>`;
+}
+const EMOJI_RE = /[\u{1F000}-\u{1FAFF}\u{2600}-\u{26FF}\u{2700}-\u{2714}\u{2716}-\u{27BF}\u{2B00}-\u{2BFF}\u{2300}-\u{23FF}\u{FE0F}\u{200D}\u{2190}-\u{21FF}]/gu;
+function stripEmoji(str) {
+  return String(str == null ? "" : str).replace(EMOJI_RE, "").replace(/\s{2,}/g, " ").trim();
+}
+const HEX_TOKEN_MAP = [
+  [/#(?:38bdf8|3b82f6|a5b4fc|22d3ee|60a5fa|818cf8)\b/gi, "var(--accent)"],
+  [/#(?:94a3b8|64748b|71717a|a1a1aa)\b/gi, "var(--text-muted)"],
+  [/#(?:f87171|ef4444|fca5a5)\b/gi, "var(--danger)"],
+  [/#(?:10b981|22c55e|86efac|4ade80)\b/gi, "var(--quota-green)"],
+  [/#(?:f59e0b|fbbf24|eab308|facc15)\b/gi, "var(--quota-yellow)"],
+  [/#(?:0f172a|1e293b)\b/gi, "var(--bg-card-elevated)"],
+  [/#(?:334155|475569)\b/gi, "var(--border-strong)"],
+];
+function neutralizeHTML(html) {
+  let out = String(html == null ? "" : html).replace(EMOJI_RE, "");
+  for (const [re, tok] of HEX_TOKEN_MAP) out = out.replace(re, tok);
+  return out;
+}
+function neutralizePanels() {
+  ["agentProfileContent", "taskThreadContent", "skillsGrid", "floorSkillOverview", "judgeResultSection"].forEach(id => {
+    const el = document.getElementById(id);
+    if (el) el.innerHTML = neutralizeHTML(el.innerHTML);
+  });
+}
+function neutralizeStaticChrome() {
+  document.querySelectorAll(".modal-card, .skills-top-card, .stage-header, .chat-composer, .security-banner, .login-once-box").forEach(el => {
+    el.innerHTML = neutralizeHTML(el.innerHTML);
+  });
+}
+// 只读截图/演示入口：?view=skills / ?modal=recruit|newtask|approval（不改变任何数据）
+function applyShotParams() {
+  neutralizeStaticChrome();
+  const p = new URLSearchParams(location.search);
+  if (p.get("view") === "skills") switchMainView("skills");
+  const pane = p.get("pane");
+  if (pane === "chat" || pane === "detail" || pane === "roster") switchMobilePane(pane);
+  const modal = p.get("modal");
+  if (modal === "recruit") openRecruitModal();
+  else if (modal === "newtask") openNewTaskModal();
+  else if (modal === "approval") toggleApprovalDrawer(true);
+}
+
+function selectTaskMode(mode) {
+  const input = document.getElementById("taskModeInput");
+  if (input) input.value = mode;
+  document.querySelectorAll("#taskModeSelector .mode-option").forEach(el => {
+    el.classList.toggle("active", el.dataset.mode === mode);
+  });
+  const kind = document.getElementById("taskKindSelect");
+  if (kind && mode === "critic") { kind.value = "code_change"; toggleReviewerField(); }
+}
+
+function toggleApprovalDrawer(force) {
+  const drawer = document.getElementById("approvalDrawer");
+  const backdrop = document.getElementById("approvalDrawerBackdrop");
+  if (!drawer) return;
+  const open = typeof force === "boolean" ? force : !drawer.classList.contains("open");
+  drawer.classList.toggle("open", open);
+  if (backdrop) backdrop.classList.toggle("hidden", !open);
+  if (open) renderApprovalDrawerBody();
+}
+
+function renderApprovalDrawerBody() {
+  const body = document.getElementById("approvalDrawerBody");
+  if (!body) return;
+  const all = APP_STATE.pendingApprovals || [];
+  const pending = all.filter(a => a.status === "pending");
+  const executed = all.filter(a => a.status === "executed" && a.rollback_available && a.backup_ref);
+  let html = "";
+  if (pending.length === 0 && executed.length === 0) {
+    html = `<div class="meta-line" style="color:var(--text-muted);">暂无待授权或可回滚的关键操作。合并 / 删代码 / 部署默认先问主人。</div>`;
+  }
+  html += pending.map(item => `
+    <div class="approval-item ${item.risk_level === 'critical' ? 'critical' : ''}">
+      <div class="op-line">${item.risk_level === 'critical' ? '关键操作待人工授权' : '待确认操作'} · <code>${escapeHTML(item.op_type)}</code></div>
+      <div class="meta-line">${escapeHTML(item.title || '')} → <code>${escapeHTML(item.target || '')}</code></div>
+      <div class="meta-line">发起：${escapeHTML(item.requested_by_name || '')}</div>
+      ${item.expires_at ? `<div class="timeout-line">超时自动退回（不默认放行）：${escapeHTML(item.expires_at)}</div>` : ''}
+      <div class="card-actions-bar">
+        <button class="btn btn-success" onclick="handleResolveApproval('${escapeHTML(item.id)}', 'allow_once')">${icon('check')}允许一次</button>
+        ${item.risk_level !== 'critical' ? `<button class="btn btn-ghost" onclick="handleResolveApproval('${escapeHTML(item.id)}', 'always_allow')">总是允许低风险</button>` : ''}
+        <button class="btn btn-danger" onclick="handleResolveApproval('${escapeHTML(item.id)}', 'deny')">${icon('x')}拒绝</button>
+      </div>
+    </div>`).join("");
+  if (executed.length) {
+    html += `<div class="meta-line" style="margin-top:8px;color:var(--text-secondary);font-weight:600;">最近真实执行（可一键回滚到备份）</div>`;
+    html += executed.slice(-5).reverse().map(item => `
+      <div class="approval-item">
+        <div class="op-line"><code>${escapeHTML(item.op_type)}</code> → <code>${escapeHTML(item.target || '')}</code></div>
+        <div class="meta-line">备份：<code>${escapeHTML(item.backup_ref)}</code></div>
+        <div class="card-actions-bar">
+          <button class="btn btn-danger" onclick="handleRollbackCritical('${escapeHTML(item.backup_ref)}', '${escapeHTML(item.workspace_dir || '')}')">${icon('undo')}一键回滚</button>
+        </div>
+      </div>`).join("");
+  }
+  body.innerHTML = html;
+}
+
+async function handleRollbackCritical(backupRef, workspaceDir) {
+  if (!window.confirm(`确认把仓库回滚到备份 ${backupRef}？这是破坏性操作（git reset --hard），仅恢复到受控执行器创建的备份。`)) return;
+  try {
+    await callOfficeAction("rollbackcriticalop", { backup_ref: backupRef, workspace_dir: workspaceDir || undefined, confirm: true });
+    showToast("已回滚到备份 " + backupRef);
+    renderApprovalDrawerBody();
+  } catch (_) { /* toast 已提示 */ }
+}
+
+function recruitWizardGo(delta) {
+  const modal = document.getElementById("recruitModal");
+  if (!modal) return;
+  let step = (APP_STATE.recruitStep || 1) + delta;
+  step = Math.max(1, Math.min(3, step));
+  APP_STATE.recruitStep = step;
+  const pathSwitcher = modal.querySelector(".path-switcher");
+  const form = document.getElementById("recruitForm");
+  const fieldEls = form ? form.querySelectorAll(".form-grid, .channel-box") : [];
+  const specialty = document.getElementById("recSpecialty");
+  const specialtyGroup = specialty ? specialty.closest(".form-group") : null;
+  const confirm = document.getElementById("recStep3");
+  const submit = document.getElementById("recSubmitBtn");
+  const prev = document.getElementById("recWizardPrev");
+  const next = document.getElementById("recWizardNext");
+  if (pathSwitcher) pathSwitcher.style.display = step === 1 ? "" : "none";
+  fieldEls.forEach(el => { el.style.display = step === 2 ? "" : "none"; });
+  if (specialtyGroup) specialtyGroup.style.display = step === 2 ? "" : "none";
+  if (confirm) confirm.classList.toggle("active", step === 3);
+  if (submit) submit.style.display = step === 3 ? "" : "none";
+  if (prev) prev.style.visibility = step === 1 ? "hidden" : "visible";
+  if (next) next.style.display = step === 3 ? "none" : "";
+  modal.querySelectorAll("#recWizardSteps .wizard-step").forEach(el => {
+    const s = Number(el.dataset.step);
+    el.classList.toggle("active", s === step);
+    el.classList.toggle("done", s < step);
+  });
+  if (step === 3) {
+    const name = (document.getElementById("recName") || {}).value || "(未填名字)";
+    const vendor = (document.getElementById("recVendor") || {}).value || "(未填厂商)";
+    const model = (document.getElementById("recModel") || {}).value || "";
+    const path = (document.getElementById("recPathInput") || {}).value || "api";
+    const floor = (document.getElementById("recFloor") || {}).value || "worker";
+    const summary = document.getElementById("recConfirmSummary");
+    if (summary) summary.innerHTML = `名字：<strong>${escapeHTML(name)}</strong><br>厂商：${escapeHTML(vendor)} · 模型：${escapeHTML(model)}<br>通道：${escapeHTML(path)} · 楼层：${escapeHTML(floor)}<br><span style="color:var(--text-muted);">API Key 永不落盘，只存环境变量名。</span>`;
+  }
 }
 
 // =========================================================================
@@ -176,39 +362,53 @@ function renderAll() {
   renderSelectedTaskThread();
   renderTeamOverview();
   renderSkillCenter();
+  neutralizePanels();
 }
 
 function renderTopBar() {
-  // 自动执行低风险开关（默认关闭）
+  // 自动执行低风险开关（默认关闭；现收纳在「更多」菜单内）
   const autoBtn = document.getElementById("autoExecuteToggleBtn");
   if (autoBtn) {
     const autoOn = Boolean(APP_STATE.settings && APP_STATE.settings.auto_execute_low_risk);
-    autoBtn.textContent = autoOn ? "⚡ 自动执行低风险: 开" : "🛡️ 自动执行低风险: 关";
-    autoBtn.className = "btn " + (autoOn ? "btn-safety-on" : "btn-safety-off");
+    autoBtn.textContent = autoOn ? "自动执行低风险: 开" : "自动执行低风险: 关";
+    autoBtn.className = "btn btn-ghost dropdown-item " + (autoOn ? "btn-safety-on" : "btn-safety-off");
   }
 
   // 厂商条
   const vendors = [...new Set(APP_STATE.agents.map(a => `${a.vendor}`))];
   const strip = document.getElementById("vendorStrip");
-  strip.innerHTML = `<span style="font-size:10px;color:#94a3b8;">独立厂商池 (${vendors.length}家，各走各号)：</span>` +
+  if (strip) strip.innerHTML = `<span style="font-size:10px;color:var(--text-muted);">独立厂商池 (${vendors.length}家，各走各号)：</span>` +
     vendors.map(v => `<span class="vendor-chip">${escapeHTML(v)}</span>`).join("");
 
-  // 顶部任务统计
+  // 顶部进度条 + 统计
   const s = APP_STATE.taskSummary;
   document.getElementById("statClaimed").textContent = `${s.claimed}/${s.total}`;
   document.getElementById("statReported").textContent = `${s.reported}/${s.total}`;
   document.getElementById("statDelivered").textContent = `${s.delivered}`;
   document.getElementById("statAccepted").textContent = `${s.accepted}`;
+  const fill = document.getElementById("topProgressFill");
+  if (fill) {
+    const pct = s.total > 0 ? Math.round((Number(s.accepted) / Number(s.total)) * 100) : 0;
+    fill.style.width = `${Math.max(0, Math.min(100, pct))}%`;
+  }
 
   // 低额度告警 (≤10%)
   const lowAgents = APP_STATE.agents.filter(a => a.quota_percent !== null && a.quota_percent !== undefined && Number(a.quota_percent) <= 10);
   const lowEl = document.getElementById("statLowQuota");
   if (lowAgents.length > 0) {
     lowEl.classList.remove("hidden");
-    lowEl.textContent = `🚨 低额度告警 (≤10%): ` + lowAgents.map(a => `${a.name} (${a.quota_percent}%)`).join(", ");
+    lowEl.textContent = `低额度告警 (≤10%): ` + lowAgents.map(a => `${a.name} (${a.quota_percent}%)`).join(", ");
     lowEl.onclick = () => selectAgent(lowAgents[0].id);
   } else {
     lowEl.classList.add("hidden");
+  }
+
+  // 审批徽章计数
+  const badge = document.getElementById("approvalBadgeCount");
+  if (badge) {
+    const n = (APP_STATE.pendingApprovals || []).filter(a => a.status === "pending").length;
+    badge.textContent = String(n);
+    badge.classList.toggle("hidden", n === 0);
   }
 }
 
@@ -230,9 +430,9 @@ function renderRoster() {
   document.getElementById("rosterTotalBadge").textContent = `${APP_STATE.agents.length} 模型/通道`;
 
   const emptyHint = {
-    manager: `<div style="font-size:11px;color:#64748b;padding:6px;">暂无经理，可招募强推理模型或拖入此层</div>`,
-    worker: `<div style="font-size:11px;color:#64748b;padding:8px;border:1px dashed #334155;border-radius:6px;">暂无 1楼员工。点左下角「➕ 招募」接入你的免费模型，或点顶部「🎭 载入示例团队」</div>`,
-    rest: `<div style="font-size:11px;color:#64748b;padding:6px;">暂无休息成员</div>`,
+    manager: `<div style="font-size:11px;color:var(--text-muted);padding:6px;">暂无经理，可招募强推理模型或拖入此层</div>`,
+    worker: `<div style="font-size:11px;color:var(--text-muted);padding:8px;border:1px dashed var(--border-strong);border-radius:6px;">暂无 1楼员工。点左下角「招募」接入你的免费模型，或点顶部「更多 → 载入示例团队」</div>`,
+    rest: `<div style="font-size:11px;color:var(--text-muted);padding:6px;">暂无休息成员</div>`,
   };
 
   ["manager", "worker", "rest"].forEach(fl => {
@@ -249,8 +449,8 @@ function renderRoster() {
   if (senderSel) {
     const prev = senderSel.value;
     const managers = APP_STATE.agents.filter(a => a.floor === "manager");
-    senderSel.innerHTML = `<option value="owner">👑 你 (董事长)</option>` +
-      managers.map(m => `<option value="${m.id}">🏢 ${escapeHTML(m.name)}</option>`).join("");
+    senderSel.innerHTML = `<option value="owner">你 (董事长)</option>` +
+      managers.map(m => `<option value="${m.id}">${escapeHTML(m.name)}</option>`).join("");
     if ([...senderSel.options].some(o => o.value === prev)) senderSel.value = prev;
   }
 
@@ -267,7 +467,7 @@ function renderRoster() {
   if (judgeSel) {
     const prevJ = judgeSel.value;
     const managers = APP_STATE.agents.filter(a => a.floor === "manager");
-    judgeSel.innerHTML = managers.map(m => `<option value="${m.id}">🧠 ${escapeHTML(m.name)}</option>`).join("") || `<option value="chief">🔵 总管 (默认裁判)</option>`;
+    judgeSel.innerHTML = managers.map(m => `<option value="${m.id}">${escapeHTML(m.name)}</option>`).join("") || `<option value="chief">总管 (默认裁判)</option>`;
     if ([...judgeSel.options].some(o => o.value === prevJ)) judgeSel.value = prevJ;
   }
 }
@@ -280,7 +480,7 @@ function renderAgentCardHTML(agent) {
   const isLow = hasPct && pct <= 10;
   const isWarn = hasPct && pct > 10 && pct <= 30;
   const fillClass = !hasPct ? "unknown" : isLow ? "low-red" : isWarn ? "quota-yellow" : "quota-green";
-  const labelText = !hasPct ? "额度未填" : isLow ? `⚠️ 剩 ${pct}%` : isWarn ? `⚡ 剩 ${pct}%` : `剩 ${pct}%`;
+  const labelText = !hasPct ? "额度未填" : `剩 ${pct}%`;
   const widthPct = !hasPct ? 100 : Math.max(4, pct);
   const tokensUsed = Number(agent.tokens_used || 0);
   const sessCount = Number(agent.session_count || 0);
@@ -289,6 +489,10 @@ function renderAgentCardHTML(agent) {
   const toolsHTML = (agent.attached_tools || []).map(t =>
     `<div class="tool-attachment-pill">${escapeHTML(t)}</div>`
   ).join("");
+
+  const loginState = agent.login_state || "";
+  const loginCls = loginState === "已登录" ? "ok" : (loginState === "会话过期" ? "expired" : "");
+  const loginBadge = loginState ? `<span class="login-badge ${loginCls}" title="登录态（不显示任何密钥明文）">${escapeHTML(loginState)}</span>` : "";
 
   return `
     <div class="agent-card ${isSelected}" draggable="true"
@@ -301,6 +505,8 @@ function renderAgentCardHTML(agent) {
           <div class="agent-name-line">
             <span class="agent-name">${escapeHTML(agent.name)}</span>
             <span class="access-badge ${agent.badge_color || 'green'}">${escapeHTML(agent.badge)}</span>
+            ${loginBadge}
+            <button type="button" class="card-expand-btn" title="展开/收起详情" onclick="event.stopPropagation(); this.closest('.agent-card').classList.toggle('expanded')">${icon('eye')}</button>
           </div>
           <div class="agent-extra-info">
             <div class="agent-subline">
@@ -389,46 +595,59 @@ function renderHudFlightStrip() {
   if (!strip) return;
   const flights = (APP_STATE.hudFlights || []).slice(-6).reverse();
   if (flights.length === 0) {
-    strip.innerHTML = `<span class="hud-flight-label">✈️ HUD 纸飞机线：</span><span style="font-size:11px;color:var(--text-muted);">等待派单或汇报飞线（谁发给谁 · 卡在哪一步）</span>`;
+    strip.innerHTML = `<span class="hud-flight-label">HUD 飞线：</span><span style="font-size:11px;color:var(--text-muted);">等待派单或汇报飞线（谁发给谁 · 卡在哪一步）</span>`;
     return;
   }
-  strip.innerHTML = `<span class="hud-flight-label">✈️ HUD 飞线 (${flights.length})：</span>` + flights.map((fl, idx) => `
-    <button type="button" class="flight-pill ${idx === 0 ? 'latest' : ''} kind-${escapeHTML(fl.kind)}"
-            onclick="${fl.task_id ? `openTaskPrivateThread('${escapeHTML(fl.task_id)}')` : `selectAgent('${escapeHTML(fl.from_id)}')`}"
-            title="${escapeHTML(fl.created_at)} · 通道：${escapeHTML(fl.channel)}">
-      <span class="flight-node">${escapeHTML(fl.from_name)}</span>
-      <span class="flight-plane">──✈</span>
-      <span class="flight-node">${escapeHTML(fl.to_name)}</span>
-      <span class="flight-meta-tag">${escapeHTML(fl.summary || fl.kind)}</span>
-    </button>
-  `).join("");
+  // 收集唯一节点（按出现顺序），横向布局画弧线节点图
+  const nodes = [];
+  const nodeIndex = (id, name) => {
+    let i = nodes.findIndex(n => n.id === id);
+    if (i < 0) { nodes.push({ id, name }); i = nodes.length - 1; }
+    return i;
+  };
+  const edges = flights.map(fl => {
+    const blocked = fl.status === "blocked" || /blocked|卡住|超时|退回/.test(fl.channel || "") || fl.kind === "bus_error";
+    return { from: nodeIndex(fl.from_id, fl.from_name), to: nodeIndex(fl.to_id, fl.to_name), fl, blocked };
+  });
+  const gap = 130, padX = 46, baseY = 78, W = padX * 2 + gap * Math.max(1, nodes.length - 1), H = 110;
+  const x = i => padX + i * gap;
+  let arcs = "";
+  edges.forEach((e, idx) => {
+    const x1 = x(e.from), x2 = x(e.to);
+    const mx = (x1 + x2) / 2, lift = 26 + (idx % 3) * 12;
+    const cy = baseY - lift;
+    const dropY = e.blocked ? baseY - 6 : cy + 6;
+    const onclick = e.fl.task_id ? `openTaskPrivateThread('${escapeHTML(e.fl.task_id)}')` : `selectAgent('${escapeHTML(e.fl.from_id)}')`;
+    const title = `${escapeHTML(e.fl.created_at || '')} · ${escapeHTML(e.fl.channel || '')} · ${escapeHTML(e.fl.summary || e.fl.kind || '')}`;
+    arcs += `
+      <g onclick="${onclick}" style="cursor:pointer">
+        <title>${title}</title>
+        <path class="arc ${e.blocked ? 'blocked' : ''}" d="M ${x1} ${baseY} Q ${mx} ${cy} ${x2} ${baseY}"/>
+        <path class="plane ${e.blocked ? 'blocked' : ''}" d="M ${mx - 5} ${dropY} l 10 3 l -10 3 l 2.5 -3 z"/>
+        <text class="node-label" x="${mx}" y="${cy - 2}" text-anchor="middle">${escapeHTML((e.fl.summary || e.fl.kind || '').slice(0, 10))}</text>
+      </g>`;
+  });
+  const nodeSvg = nodes.map((n, i) => `
+    <g onclick="selectAgent('${escapeHTML(n.id)}')" style="cursor:pointer">
+      <circle class="node-circle" cx="${x(i)}" cy="${baseY}" r="6"/>
+      <text class="node-label" x="${x(i)}" y="${baseY + 20}" text-anchor="middle">${escapeHTML((n.name || '').slice(0, 8))}</text>
+    </g>`).join("");
+  strip.innerHTML = `<span class="hud-flight-label">HUD 飞线 (${flights.length})：</span>
+    <div class="flight-svg-wrap"><svg class="flight-svg" width="${W}" height="${H}" viewBox="0 0 ${W} ${H}">${arcs}${nodeSvg}</svg></div>`;
 }
 
 function renderApprovalBanner() {
+  // §六：审批条改为右上角徽章 + 抽屉。内联 banner 隐藏，计数与抽屉内容在此更新。
   const banner = document.getElementById("approvalBanner");
-  if (!banner) return;
+  if (banner) { banner.classList.add("hidden"); banner.innerHTML = ""; }
+  const badge = document.getElementById("approvalBadgeCount");
   const pending = (APP_STATE.pendingApprovals || []).filter(a => a.status === "pending");
-  if (pending.length === 0) {
-    banner.classList.add("hidden");
-    banner.innerHTML = "";
-    return;
+  if (badge) {
+    badge.textContent = String(pending.length);
+    badge.classList.toggle("hidden", pending.length === 0);
   }
-  banner.classList.remove("hidden");
-  banner.innerHTML = pending.map(item => `
-    <div class="approval-row">
-      <div class="approval-meta">
-        <span>🛡️ <strong>${item.risk_level === 'critical' ? '关键操作待人工授权' : '待确认操作'}</strong></span>
-        <span>· <code>${escapeHTML(item.op_type)}</code></span>
-        <span>· ${escapeHTML(item.title)}</span>
-        <span style="color:var(--text-muted);">(发起: ${escapeHTML(item.requested_by_name)})</span>
-      </div>
-      <div class="approval-actions">
-        <button type="button" class="btn btn-success btn-xs" onclick="handleResolveApproval('${escapeHTML(item.id)}', 'allow_once')">✅ 允许一次</button>
-        ${item.risk_level !== 'critical' ? `<button type="button" class="btn btn-ghost btn-xs" onclick="handleResolveApproval('${escapeHTML(item.id)}', 'always_allow')">⚡ 总是允许低风险</button>` : ""}
-        <button type="button" class="btn btn-danger btn-xs" onclick="handleResolveApproval('${escapeHTML(item.id)}', 'deny')">🚫 拒绝</button>
-      </div>
-    </div>
-  `).join("");
+  const drawer = document.getElementById("approvalDrawer");
+  if (drawer && drawer.classList.contains("open")) renderApprovalDrawerBody();
 }
 
 function renderTaskStepFlow(status, task = null) {
@@ -459,11 +678,27 @@ function renderTaskStepFlow(status, task = null) {
   }).join("<span>→</span>") + (status === "rejected" ? ` <span style="color:#f87171;font-weight:700;">(↩审查打回重做)</span>` : "") + `</div>`;
 }
 
+function renderDiscussionThread(taskId) {
+  const discs = (APP_STATE.discussions || []).filter(d => d.task_id === taskId);
+  if (discs.length === 0) return "";
+  return discs.map(d => {
+    const msgs = (d.messages || []).map(m => `
+      <div class="discussion-msg"><span class="who">${escapeHTML(m.sender_name || m.sender_id || '')}</span>：${escapeHTML(stripEmoji(m.text || ''))}</div>
+    `).join("") || `<div class="discussion-msg" style="color:var(--text-muted);">暂无发言（需真实模型调用，不伪造讨论）。</div>`;
+    const status = d.status === "closed" ? `已收敛${d.adopted ? ' · 采纳：' + escapeHTML(d.adopted) : ''}` : "进行中";
+    return `<details class="discussion-thread">
+      <summary>${icon('chat')} 经理讨论 · ${escapeHTML(d.topic || '')}（${(d.messages || []).length} 条 · ${status}）</summary>
+      ${msgs}
+      ${d.circuit_breaker ? `<div class="discussion-msg" style="color:var(--quota-yellow);">熔断：${escapeHTML(d.circuit_breaker)}</div>` : ''}
+    </details>`;
+  }).join("");
+}
+
 function renderGroupChat() {
   // 顶部快速切换任务条
   const strip = document.getElementById("activeTaskStrip");
   if (APP_STATE.tasks.length === 0) {
-    strip.innerHTML = `<span style="font-size:11px;color:#64748b;">当前暂无派单，可点右上角「🧪 一键塞入通用示例任务」测试完整流程</span>`;
+    strip.innerHTML = `<span style="font-size:11px;color:var(--text-muted);">当前暂无派单，可在右上角「更多 → 塞入示例任务」测试完整流程</span>`;
   } else {
     strip.innerHTML = APP_STATE.tasks.map(t => `
       <button class="task-pill ${t.id === APP_STATE.selectedTaskId ? 'active' : ''}"
@@ -478,22 +713,24 @@ function renderGroupChat() {
     const isGao = msg.sender_id === "owner" || msg.sender_id === "gao";
     const task = msg.task_id ? APP_STATE.tasks.find(t => t.id === msg.task_id) : null;
     let actionBarHTML = "";
+    let discussionHTML = "";
 
     if (task && msg.kind === "task_card") {
+      discussionHTML = renderDiscussionThread(task.id);
       actionBarHTML = `
         <div class="card-actions-bar">
           ${renderTaskStepFlow(task.status, task)}
           ${task.status === "assigned" ? `
             <button class="btn btn-example" onclick="handleClaimTask('${task.id}', '${task.assigned_to || ''}')">
-              ✋ 员工点击领取 (${escapeHTML(task.assigned_name)})
+              员工点击领取 (${escapeHTML(task.assigned_name)})
             </button>
           ` : ""}
           <button class="btn btn-ghost" onclick="openTaskPrivateThread('${task.id}')">
-            🔒 打开私聊汇报窗 (${task.worker_reported ? '已汇报' : '待汇报'})
+            ${icon('lock')}私聊汇报窗 (${task.worker_reported ? '已汇报' : '待汇报'})
           </button>
           ${task.status !== "accepted_done" ? `
             <button class="btn btn-primary" onclick="handleDeliverFinalResult('${task.id}')">
-              📦 经理统筹交付总结果
+              ${icon('box')}经理统筹交付总结果
             </button>
           ` : ""}
         </div>
@@ -502,39 +739,41 @@ function renderGroupChat() {
       actionBarHTML = `
         <div class="card-actions-bar">
           <button class="btn btn-ghost" onclick="openTaskPrivateThread('${task.id}')">
-            🔍 经理点此审阅结论/diff
+            ${icon('eye')}经理点此审阅结论/diff
           </button>
           <button class="btn btn-primary" onclick="handleDeliverFinalResult('${task.id}')">
-            📦 经理统筹交付给 Gao
+            ${icon('box')}经理统筹交付给 Gao
           </button>
         </div>
       `;
     } else if (task && msg.kind === "big_task_card") {
+      discussionHTML = renderDiscussionThread(task.id);
       actionBarHTML = `
         <div class="card-actions-bar">
           <button class="btn btn-ghost" onclick="handleRunBigTaskSubtasks('${task.id}', false)">
-            🧪 批量干跑全部子单 (0消耗)
+            批量干跑全部子单 (0消耗)
           </button>
           <button class="btn btn-primary" onclick="handleRunBigTaskSubtasks('${task.id}', true)">
-            🚀 并行真调 API/CLI 子单
+            ${icon('send')}并行真调 API/CLI 子单
           </button>
           <button class="btn btn-ghost" onclick="handleAggregateBigTask('${task.id}')">
-            📦 汇总全部子单总交付
+            ${icon('box')}汇总全部子单总交付
           </button>
           <button class="btn btn-ghost" onclick="openTaskPrivateThread('${task.id}')">
-            🔍 查看子单进度 (${(task.subtask_ids || []).length})
+            ${icon('eye')}查看子单进度 (${(task.subtask_ids || []).length})
           </button>
         </div>
       `;
     } else if (task && msg.kind === "final_delivery_card") {
+      discussionHTML = renderDiscussionThread(task.id);
       actionBarHTML = `
         <div class="card-actions-bar">
           ${renderTaskStepFlow(task.status, task)}
           <button class="btn btn-success" onclick="handleReviewFinalResult('${task.id}', 'verified')">
-            ✅ 验收通过
+            ${icon('check')}验收通过
           </button>
           <button class="btn btn-danger" onclick="handleReviewFinalResult('${task.id}', 'rejected')">
-            ↩ 打回重做
+            ${icon('undo')}打回重做
           </button>
         </div>
       `;
@@ -543,10 +782,11 @@ function renderGroupChat() {
     return `
       <div class="chat-bubble ${isGao ? 'from-gao' : ''} kind-${msg.kind || 'chat'}">
         <div class="bubble-header">
-          <span class="bubble-sender">${escapeHTML(msg.sender_name)}</span>
+          <span class="bubble-sender">${escapeHTML(stripEmoji(msg.sender_name))}</span>
           <span>${escapeHTML(msg.created_at || '')}</span>
         </div>
-        <div class="bubble-body">${formatChatTextWithMentions(msg.text)}</div>
+        <div class="bubble-body">${formatChatTextWithMentions(stripEmoji(msg.text))}</div>
+        ${discussionHTML}
         ${actionBarHTML}
       </div>
     `;
@@ -901,6 +1141,26 @@ function renderSelectedTaskThread() {
 // =========================================================================
 // 底部：团队真实账本总览
 // =========================================================================
+function renderSavingsChart() {
+  const led = APP_STATE.savingsLedger || {};
+  const days = (led.by_day || []).slice(-7);
+  if (days.length === 0) {
+    return `<div style="font-size:11px;color:var(--text-muted);margin-top:4px;">省钱账本：暂无真实记录（干跑计 0，不编造数字）。</div>`;
+  }
+  const max = Math.max(1, ...days.map(d => Number(d.free_tokens || 0)));
+  const bars = days.map(d => {
+    const v = Number(d.free_tokens || 0);
+    const h = Math.round((v / max) * 64);
+    const label = (d.date || "").slice(5);
+    return `<div class="savings-bar" title="${escapeHTML(d.date)} · 免费替执行 ${d.free_calls || 0} 次 / ${v} Token · 付费 ${d.paid_tokens || 0} Token">
+      <span class="bar-val">${v}</span><div class="bar" style="height:${Math.max(2, h)}px"></div><span class="bar-label">${escapeHTML(label)}</span>
+    </div>`;
+  }).join("");
+  return `<div style="font-size:11px;color:var(--text-secondary);margin-top:6px;">省钱账本（近 7 日免费员工替付费经理执行的真实 Token）</div>
+    <div class="savings-chart">${bars}</div>
+    <div style="font-size:10px;color:var(--text-muted);">累计免费 ${led.free_calls || 0} 次 / ${led.free_tokens || 0} Token · 付费 ${led.paid_calls || 0} 次 / ${led.paid_tokens || 0} Token</div>`;
+}
+
 function renderTeamOverview() {
   const managers = APP_STATE.agents.filter(a => a.floor === "manager").length;
   const workers = APP_STATE.agents.filter(a => a.floor === "worker").length;
@@ -909,11 +1169,12 @@ function renderTeamOverview() {
   const el = document.getElementById("teamOverviewBox");
   el.innerHTML = `
     <div style="display:flex;justify-content:space-between;margin-bottom:3px;">
-      <strong>📊 当前农场账本总览</strong>
-      <span style="color:#38bdf8;">在岗就绪：${verifiedReady} / 总计 ${APP_STATE.agents.length}</span>
+      <strong>当前农场账本总览</strong>
+      <span style="color:var(--accent);">在岗就绪：${verifiedReady} / 总计 ${APP_STATE.agents.length}</span>
     </div>
     <div>2楼经理 <strong>${managers}</strong> · 1楼员工 <strong>${workers}</strong> · 院子休息 <strong>${rest}</strong></div>
-    <div style="color:#94a3b8;margin-top:2px;">一图标一模型/通道 · 密钥仅读环境变量 · 具体模型全部由你按需招募</div>
+    <div style="color:var(--text-muted);margin-top:2px;">一图标一模型/通道 · 密钥仅读环境变量 · 具体模型全部由你按需招募</div>
+    ${renderSavingsChart()}
   `;
 }
 
@@ -1315,6 +1576,8 @@ function openRecruitModal() {
   document.getElementById("loginOnceStatusBadge").textContent = "未点登录";
   document.getElementById("loginOnceStatusBadge").className = "login-status-pill";
   document.getElementById("recruitModal").classList.remove("hidden");
+  APP_STATE.recruitStep = 1;
+  recruitWizardGo(0);
 }
 
 function closeRecruitModal() {
@@ -1449,6 +1712,7 @@ function openNewTaskModal() {
     revSel.innerHTML = allOnline.map(a => `<option value="${a.id}">${escapeHTML(a.name)} (${escapeHTML(a.badge)})</option>`).join("");
   }
   toggleReviewerField();
+  selectTaskMode("solo");
   document.getElementById("newTaskModal").classList.remove("hidden");
 }
 
@@ -1490,12 +1754,13 @@ async function handleCreateTaskSubmit(event) {
     input_text: document.getElementById("taskInput").value.trim(),
     output_format: document.getElementById("taskFormat").value.trim(),
     acceptance: document.getElementById("taskAcceptance").value.trim(),
+    mode: (document.getElementById("taskModeInput") || {}).value || "solo",
   };
   const task = await callOfficeAction("createtask", payload);
   closeNewTaskModal();
   if (task) {
     APP_STATE.selectedTaskId = task.id;
-    showToast(`📌 已在大群发布任务：${task.title}`);
+    showToast(`已在大群发布任务：${task.title}`);
   }
 }
 
