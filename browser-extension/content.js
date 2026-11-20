@@ -31,10 +31,20 @@
     }
     // Direct fetch fallback when loaded via /bridge.js or bookmarklet
     try {
-      const action = type === "GET_TASK_PROMPT" ? "gettaskprompt" : "postmessage";
+      const action =
+        type === "GET_TASK_PROMPT" ? "gettaskprompt" :
+        type === "COURIER_STATUS" ? "courierstatus" : "postmessage";
       const bodyPayload =
         type === "GET_TASK_PROMPT"
           ? { task_id: payload.taskId || "" }
+          : type === "COURIER_STATUS"
+          ? {
+              task_id: payload.taskId || "",
+              agent_id: payload.agentId || "",
+              status: payload.status,
+              detail: payload.detail || "",
+              url: payload.url || window.location.href,
+            }
           : {
               task_id: payload.taskId,
               sender_id: payload.workerId || "",
@@ -53,6 +63,46 @@
       return { ok: true, result: data.result };
     } catch (err) {
       return { ok: false, error: err.message || String(err) };
+    }
+  }
+
+  function detectCaptcha() {
+    const captchaSelectors = [
+      'iframe[src*="captcha"]', 'iframe[src*="recaptcha"]', 'iframe[src*="hcaptcha"]',
+      'iframe[title*="captcha" i]', 'iframe[title*="验证"]',
+      '.g-recaptcha', '.h-captcha', '#cf-chl-running', '#challenge-running',
+      '[class*="captcha"]', '[id*="captcha"]', '[class*="verify-wrap"]',
+    ];
+    for (const sel of captchaSelectors) {
+      const el = document.querySelector(sel);
+      if (el && !el.closest("#ai-farm-floating-bridge")) {
+        const rect = el.getBoundingClientRect();
+        if (rect.width > 0 && rect.height > 0) return "检测到验证码 / 风控组件";
+      }
+    }
+    const bodyText = (document.body?.innerText || "").slice(0, 4000);
+    const riskPhrases = [
+      "请完成安全验证", "人机验证", "拖动滑块", "访问验证", "异常流量",
+      "verify you are human", "unusual traffic", "are you a robot",
+      "complete the security check", "press and hold",
+    ];
+    for (const phrase of riskPhrases) {
+      if (bodyText.toLowerCase().includes(phrase.toLowerCase())) return `页面提示：${phrase}`;
+    }
+    return "";
+  }
+
+  async function reportCourier(status, detail) {
+    try {
+      await callOfficeBridge("COURIER_STATUS", {
+        taskId: (currentTask && currentTask.task_id) || parseTaskIdFromUrl() || "",
+        agentId: (currentTask && currentTask.assigned_to) || "",
+        status,
+        detail: detail || "",
+        url: window.location.href,
+      });
+    } catch (_) {
+      /* self-check reporting must never break the page */
     }
   }
 
@@ -206,46 +256,93 @@
 
   function handleAutoFillAndSend(autoSend = true) {
     if (!currentTask || !currentTask.prompt) {
-      setStatus("尚未加载到工单，请先点「🔄 同步工单」", true);
+      setStatus("尚未加载到工单，请先点「同步工单」", true);
+      return;
+    }
+    const captcha = detectCaptcha();
+    if (captcha) {
+      setStatus(`卡住了：${captcha}，等主人处理（不自动发送）`, true);
+      reportCourier("captcha", captcha);
       return;
     }
     const inputEl = findChatInputElement();
     if (!inputEl) {
-      setStatus("未找到聊天输入框（请确认已登录当前网站）", true);
+      setStatus("选择器失效：未找到聊天输入框（网页可能改版或未登录）", true);
+      reportCourier("selector_failed", "未找到聊天输入框，可能网页改版或未登录");
       return;
     }
     fillPromptIntoElement(inputEl, currentTask.prompt);
     if (autoSend) {
       setTimeout(() => {
-        triggerSend(inputEl);
-        setStatus(`✅ 已自动填入并触发发送：${currentTask.task_id}`);
+        const sent = triggerSend(inputEl);
+        if (sent) {
+          setStatus(`已自动填入并触发发送：${currentTask.task_id}`);
+          reportCourier("ok", "已自动填入并触发发送");
+        } else {
+          setStatus("选择器失效：找不到发送按钮，无法自动发送", true);
+          reportCourier("send_failed", "找不到可用的发送按钮");
+        }
       }, 350);
     } else {
-      setStatus(`📥 已填入输入框：${currentTask.task_id}（请按回车发送）`);
+      setStatus(`已填入输入框：${currentTask.task_id}（请按回车发送）`);
     }
   }
 
   async function handleSendReplyToOffice() {
     if (!currentTask) {
-      setStatus("尚未绑定工单，请先点「🔄 同步工单」", true);
+      setStatus("尚未绑定工单，请先点「同步工单」", true);
       return;
     }
-    const text = extractLatestReplyText();
+    const captcha = detectCaptcha();
+    if (captcha) {
+      setStatus(`卡住了：${captcha}，等主人处理`, true);
+      reportCourier("captcha", captcha);
+      return;
+    }
+    let text = extractLatestReplyText();
     if (!text) {
-      setStatus("未检测到回复内容（也可鼠标选中回复文字后再点此按钮）", true);
+      // retry once after a short delay (one-shot, not polling)
+      setStatus("未检测到回复，自动重试一次...");
+      reportCourier("retry", "首次未抓到回复，重试一次");
+      await new Promise((r) => setTimeout(r, 1200));
+      text = extractLatestReplyText();
+    }
+    if (!text) {
+      setStatus("重试后仍抓不到回复（选择器可能失效），已上报，等主人处理或换员工", true);
+      reportCourier("stuck", "重试一次后仍未检测到回复内容，可能网页改版");
       return;
     }
-    setStatus("⏳ 正在交回农场私聊窗...");
+    setStatus("正在交回农场私聊窗...");
     const resp = await callOfficeBridge("SUBMIT_WORKER_REPORT", {
       taskId: currentTask.task_id,
       workerId: currentTask.assigned_to || "",
       text,
     });
     if (resp && resp.ok) {
-      setStatus(`🎉 已交回农场私聊窗 (${text.length} 字，大群已留 🔒 提示)！`);
+      setStatus(`已交回农场私聊窗 (${text.length} 字，大群已留提示)！`);
+      reportCourier("delivered", `已交回结论 ${text.length} 字`);
     } else {
-      setStatus(`❌ 交回失败: ${(resp && resp.error) || "请确认 127.0.0.1:8765 已启动"}`, true);
+      setStatus(`交回失败: ${(resp && resp.error) || "请确认 127.0.0.1:8765 已启动"}`, true);
+      reportCourier("send_failed", `交回办公室失败：${(resp && resp.error) || "office unreachable"}`);
     }
+  }
+
+  function runSelfCheck() {
+    const captcha = detectCaptcha();
+    if (captcha) {
+      setStatus(`自检：${captcha} — 已上报，等主人处理`, true);
+      reportCourier("captcha", captcha);
+      return;
+    }
+    const inputEl = findChatInputElement();
+    if (!inputEl) {
+      setStatus("自检：选择器失效（找不到输入框），已上报", true);
+      reportCourier("selector_failed", "自检找不到聊天输入框");
+      return;
+    }
+    const reply = extractLatestReplyText();
+    setStatus(`自检通过：输入框正常${reply ? "，已检测到回复" : "，暂无回复"}，登录态正常`);
+    reportCourier("login_ok", "自检通过：输入框可用，无验证码");
   }
 
   async function loadTaskFromOffice(autoTrigger = false) {
@@ -290,9 +387,12 @@
     ].join(";");
 
     box.innerHTML = `
-      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px;">
-        <strong style="color:#38bdf8;font-size:12px;">🌾 AI 农场传令兵</strong>
-        <button id="ai-farm-btn-sync" style="background:#1e293b;color:#cbd5e1;border:1px solid #334155;border-radius:4px;padding:2px 6px;font-size:11px;cursor:pointer;">🔄 同步工单</button>
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px;gap:6px;">
+        <strong style="color:#38bdf8;font-size:12px;">AI 农场传令兵</strong>
+        <span style="display:flex;gap:4px;">
+          <button id="ai-farm-btn-check" style="background:#1e293b;color:#cbd5e1;border:1px solid #334155;border-radius:4px;padding:2px 6px;font-size:11px;cursor:pointer;">自检</button>
+          <button id="ai-farm-btn-sync" style="background:#1e293b;color:#cbd5e1;border:1px solid #334155;border-radius:4px;padding:2px 6px;font-size:11px;cursor:pointer;">同步工单</button>
+        </span>
       </div>
       <div id="ai-farm-bridge-task" style="font-weight:700;font-size:11px;color:#e2e8f0;margin-bottom:4px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">
         正在连接 127.0.0.1:8765...
@@ -302,17 +402,18 @@
       </div>
       <div style="display:flex;gap:6px;margin-bottom:6px;">
         <button id="ai-farm-btn-fill" style="flex:1;background:#0284c7;color:#fff;border:none;border-radius:6px;padding:6px 8px;font-size:11px;font-weight:600;cursor:pointer;">
-          📥 自动填入并发送
+          自动填入并发送
         </button>
       </div>
       <div>
         <button id="ai-farm-btn-report" style="width:100%;background:#10b981;color:#052e16;border:none;border-radius:6px;padding:6px 8px;font-size:11px;font-weight:700;cursor:pointer;">
-          📤 抓最新回复交回农场私聊窗
+          抓最新回复交回农场私聊窗
         </button>
       </div>
     `;
     document.body.appendChild(box);
 
+    document.getElementById("ai-farm-btn-check").addEventListener("click", runSelfCheck);
     document.getElementById("ai-farm-btn-sync").addEventListener("click", () => loadTaskFromOffice(false));
     document.getElementById("ai-farm-btn-fill").addEventListener("click", () => handleAutoFillAndSend(true));
     document.getElementById("ai-farm-btn-report").addEventListener("click", handleSendReplyToOffice);
@@ -320,4 +421,7 @@
 
   mountFloatingWidget();
   loadTaskFromOffice(true);
+  // one-shot self-check on load (event-driven, no polling): surface captcha /
+  // selector failure immediately so the office knows the web channel is stuck.
+  setTimeout(runSelfCheck, 1500);
 })();

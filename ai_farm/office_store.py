@@ -22,6 +22,7 @@ import json
 import os
 import re
 import shlex
+import shutil
 import subprocess
 import threading
 import time
@@ -288,6 +289,7 @@ class OfficeStore:
         self.state.setdefault("bus_messages", [])
         self.state.setdefault("discussions", {})
         self.state.setdefault("savings_ledger", [])
+        self.state.setdefault("courier_log", [])
         settings = self.state.setdefault("settings", {})
         settings.setdefault("auto_execute_low_risk", False)
         settings.setdefault("max_revision_rounds", MAX_REVISION_ROUNDS)
@@ -398,6 +400,7 @@ class OfficeStore:
         self.state["bus_messages"] = []
         self.state["discussions"] = {}
         self.state["savings_ledger"] = []
+        self.state["courier_log"] = []
         self.state["settings"] = {
             "auto_execute_low_risk": False,
             "max_revision_rounds": MAX_REVISION_ROUNDS,
@@ -1774,8 +1777,52 @@ class OfficeStore:
                 agent["local_session_ready"] = has_session
                 agent["last_synced_at"] = now
                 synced.append({"id": agent["id"], "mode": "web_or_desktop", "session": has_session})
+            login = self._agent_login_state(agent)
+            agent["login_state"] = login["state"]
+            agent["login_detail"] = login["detail"]
+            agent["login_channel"] = login["channel"]
         self.save()
         return {"synced_at": now, "count": len(synced), "details": synced}
+
+    def _agent_login_state(self, agent: dict[str, Any]) -> dict[str, Any]:
+        """Honest, visible login state per channel (已登录 / 未登录 / 会话过期).
+
+        API: env-var name configured (Key never stored). CLI: executable on PATH.
+        Web/subscription/desktop: local session marker, with the courier's
+        self-check as the authoritative source for expiry. We never claim a
+        verified login we cannot observe.
+        """
+        kind = (agent.get("access_kind") or "").lower()
+        health = agent.get("courier_health") or {}
+        if health.get("status") == "login_expired":
+            return {"state": "会话过期", "channel": kind,
+                    "detail": health.get("detail") or "传令兵报告登录态失效，请在厂商页面重新登录一次"}
+        if kind == "api":
+            key_env = agent.get("key_env") or ""
+            if key_env and os.environ.get(key_env, "").strip():
+                return {"state": "已登录", "channel": "api",
+                        "detail": f"环境变量 {key_env} 已配置（Key 不落盘，只存变量名）"}
+            return {"state": "未登录", "channel": "api",
+                    "detail": f"环境变量 {key_env or '(未填)'} 未设置；招募时只填变量名，不填明文 Key"}
+        if kind == "cli":
+            exe = agent.get("executable") or "codex"
+            found = shutil.which(exe)
+            if found:
+                return {"state": "已登录", "channel": "cli", "detail": f"CLI 已安装：{exe}"}
+            return {"state": "未登录", "channel": "cli", "detail": f"CLI 未安装或不在 PATH：{exe}（本机装好一次即可）"}
+        if kind in ("web", "subscription", "desktop"):
+            slug = agent.get("adapter_slug") or agent["id"]
+            has_session = (session_dir(slug) / "session_meta.json").exists() or (session_dir(agent["id"]) / "session_meta.json").exists()
+            if health.get("status") in ("ok", "login_ok", "delivered"):
+                return {"state": "已登录", "channel": kind, "detail": "传令兵自检确认登录态正常"}
+            if has_session:
+                return {"state": "已登录", "channel": kind,
+                        "detail": "浏览器/桌面会话已建立（cookies 由浏览器保管，本项目不存密码）；实际登录态以传令兵自检为准"}
+            return {"state": "未登录", "channel": kind,
+                    "detail": "尚未在厂商页面登录；请打开登录页登录一次（不在本项目里存密码）"}
+        if kind == "chief":
+            return {"state": "已登录", "channel": "chief", "detail": "总管统筹位（绑定可用模型后生效）"}
+        return {"state": "未登录", "channel": kind, "detail": "未知通道，未登录"}
 
     def exporttaskmd(self, payload: dict[str, Any]) -> dict[str, Any]:
         task = self._find_task(payload.get("task_id") or payload.get("id"))
@@ -1816,11 +1863,15 @@ class OfficeStore:
             f"- 【结论】1-2句总结\n"
             f"- 【改动文件】路径列表或 无\n"
             f"- 【测试结果】通过/失败明细\n\n"
-            f"## 6. 红线\n{task['rule_footer']}\n"
+            f"## 6. 红线\n{task['rule_footer']}\n\n"
+            f"## 7. 回执写回（桌面端 / 文件信箱）\n"
+            f"完成后把结论-only 汇报写回 `tasks/outbox/{task['id']}.md`（只写【结论】【改动文件】【测试结果】，不贴整段对话）。"
+            f"办公室会用「检测桌面回执」一键自动收取，无需手动搬运。\n"
         )
         file_path.write_text(md_body, encoding="utf-8")
-        trigger_text = f"@{rel_path} 严格按此工单要求执行（如有 0.00x 限时免费模型请优先切换），完成后只回【结论】【改动文件】【测试结果】。"
-        return {"rel_path": rel_path, "file_path": str(file_path), "trigger_text": trigger_text}
+        trigger_text = f"@{rel_path} 严格按此工单要求执行（如有 0.00x 限时免费模型请优先切换），完成后只回【结论】【改动文件】【测试结果】，并写回 tasks/outbox/{task['id']}.md。"
+        return {"rel_path": rel_path, "file_path": str(file_path), "trigger_text": trigger_text,
+                "outbox_rel": f"tasks/outbox/{task['id']}.md"}
 
     def gettaskprompt(self, payload: dict[str, Any] | None = None) -> dict[str, Any]:
         """Return the formatted worker prompt for a task (used by browser-extension bridge)."""
@@ -1860,6 +1911,120 @@ class OfficeStore:
             "status": task["status"],
             "prompt": prompt,
         }
+
+    def courierstatus(self, payload: dict[str, Any]) -> dict[str, Any]:
+        """Receive a self-check report from the browser courier (web channel).
+
+        The extension reports selector failure / CAPTCHA / stuck / login expiry
+        instead of failing silently. Blockers are announced in the group as
+        "卡住了，等主人处理" and never faked as success. This is an HTTP office
+        action (the courier channel), NOT an MCP bus member — web workers stay
+        out of the bus per the red line.
+        """
+        self._ensure_runtime_keys()
+        status = (payload.get("status") or "").strip().lower()
+        allowed = {"ok", "login_ok", "login_expired", "selector_failed", "captcha",
+                   "stuck", "retry", "delivered", "send_failed"}
+        if status not in allowed:
+            raise ValueError(f"未知的传令兵状态: {status}")
+        task_id = (payload.get("task_id") or "").strip()
+        agent_id = (payload.get("agent_id") or "").strip()
+        detail = (payload.get("detail") or "").strip()
+        url = (payload.get("url") or "").strip()
+
+        agent = None
+        if agent_id:
+            try:
+                agent = self._find_agent(agent_id)
+            except KeyError:
+                agent = None
+        if agent is None and task_id:
+            try:
+                t = self._find_task(task_id)
+                if t.get("assigned_to"):
+                    agent = self._find_agent(t["assigned_to"])
+            except KeyError:
+                agent = None
+
+        health = {"status": status, "detail": detail, "url": url, "task_id": task_id, "ts": _now_iso()}
+        log = self.state.setdefault("courier_log", [])
+        entry = dict(health)
+        if agent is not None:
+            entry["agent_id"] = agent["id"]
+            entry["agent_name"] = agent["name"]
+        log.append(entry)
+        if len(log) > 200:
+            del log[:-200]
+        if agent is not None:
+            agent["courier_health"] = health
+            if status == "login_expired":
+                agent["login_state"] = "会话过期"
+            elif status in ("ok", "login_ok", "delivered"):
+                agent["login_state"] = "已登录"
+
+        blockers = {"selector_failed", "captcha", "stuck", "send_failed", "login_expired"}
+        if status in blockers:
+            label = {
+                "selector_failed": "选择器失效（网页可能改版）",
+                "captcha": "遇到验证码 / 风控",
+                "stuck": "卡住（重试后仍抓不到回复）",
+                "send_failed": "自动发送失败",
+                "login_expired": "登录态过期",
+            }[status]
+            who = agent["name"] if agent else (task_id or "网页员工")
+            self._append_group_msg(
+                sender_id="courier", sender_name="传令兵自检", sender_role="chief",
+                kind="courier_alert", task_id=task_id or None,
+                text=(
+                    f"🩺 **网页通道卡住了，等主人处理**：{who} — {label}。{detail}"
+                    f" 不伪造成功；请主人在厂商页面处理（重新登录 / 过验证码 / 检查改版），或换同类免费员工。"
+                ),
+            )
+            self._record_flight(
+                from_id="courier", from_name="传令兵自检", to_id="owner", to_name="你 (待处理)",
+                kind="courier", task_id=task_id, summary=f"{status}: {who}",
+                channel="网页传令兵", status="blocked",
+            )
+        self.save()
+        return {"recorded": True, "status": status, "blocked": status in blockers,
+                "agent_id": agent["id"] if agent else ""}
+
+    def checkdesktopreceipt(self, payload: dict[str, Any]) -> dict[str, Any]:
+        """Auto-detect a desktop worker's @task.md mailbox receipt and ingest it.
+
+        exporttaskmd writes the work order to tasks/inbox/<id>.md; the desktop
+        agent (agent-desktop silent feed, or the owner) writes the conclusion to
+        tasks/outbox/<id>.md. This explicitly-triggered check (no polling) reads
+        the receipt and delivers it through the same conclusion-only postmessage
+        path. Missing/empty receipts wait honestly; a full-conversation paste is
+        rejected, never faked.
+        """
+        self._ensure_runtime_keys()
+        task = self._find_task(payload.get("task_id") or payload.get("id"))
+        custom_ws = (payload.get("workspace_dir") or "").strip()
+        if custom_ws:
+            base = Path(self._validate_safe_workspace(custom_ws))
+            outbox = base / "tasks" / "outbox"
+        else:
+            base = Path(__file__).resolve().parents[1]
+            outbox = base / "ai-team" / "tasks" / "outbox"
+        candidates = [outbox / f"{task['id']}.md", outbox / f"{task['id']}.reply.md", outbox / f"{task['id']}.txt"]
+        found = next((p for p in candidates if p.exists()), None)
+        if found is None:
+            return {"found": False, "waiting": True, "task_id": task["id"], "outbox": str(outbox),
+                    "detail": "尚未检测到桌面端回执文件；工单已在信箱，等待桌面端写回结论（不伪造）。"}
+        text = found.read_text(encoding="utf-8", errors="replace").strip()
+        if not text:
+            return {"found": True, "empty": True, "waiting": True, "task_id": task["id"],
+                    "receipt_path": str(found), "detail": "回执文件为空，等待桌面端写入结论。"}
+        try:
+            res = self.postmessage({"task_id": task["id"], "sender_id": task.get("assigned_to") or "",
+                                    "text": text, "is_delivery": True})
+        except ValueError as exc:
+            return {"found": True, "delivered": False, "task_id": task["id"],
+                    "receipt_path": str(found), "error": str(exc)}
+        return {"found": True, "delivered": True, "task_id": task["id"],
+                "receipt_path": str(found), "result": res}
 
     def collectgitdiff(self, payload: dict[str, Any] | None = None) -> dict[str, Any]:
         """Collect concise git status + diff summary from workspace for manager QA (zero tokens)."""
@@ -3704,16 +3869,41 @@ class OfficeStore:
         # 1) Execute (workers auto-report conclusions to private chat).
         if is_parent:
             batch = self.runbigtasksubtasks({"parent_task_id": parent["id"], "live": live, "workspace_dir": workspace_dir})
+            # P3.2: auto-collect desktop mailbox receipts for channel-pending
+            # subtasks (no polling — one explicit pass per run) so the owner
+            # never has to watch the folder. Web receipts arrive asynchronously
+            # via the courier and are picked up by the worker_reported flag.
+            collected = 0
+            if live:
+                for sub in subtasks:
+                    if sub.get("worker_reported"):
+                        continue
+                    worker = None
+                    if sub.get("assigned_to"):
+                        try:
+                            worker = self._find_agent(sub["assigned_to"])
+                        except KeyError:
+                            worker = None
+                    if worker and worker.get("access_kind") == "desktop":
+                        try:
+                            rc = self.checkdesktopreceipt({"task_id": sub["id"], "workspace_dir": workspace_dir})
+                            if rc.get("delivered"):
+                                collected += 1
+                        except Exception:  # noqa: BLE001 - honest wait, no fake receipt
+                            pass
             failed = [r for r in batch["results"] if r.get("ok") is False]
-            pending = [r for r in batch["results"] if r.get("skipped")]
-            ex = batch["executed_count"]
+            pending = [r for r in batch["results"]
+                       if r.get("skipped") and not self._find_task(r["task_id"]).get("worker_reported")]
+            ex = batch["executed_count"] + collected
             status = "ok" if ex and not failed and not pending else ("partial" if ex else "stopped")
             detail = f"执行 {ex} 张子单"
+            if collected:
+                detail += f"（含自动收取桌面回执 {collected} 张）"
             if failed:
                 detail += f"；{len(failed)} 张真调失败"
             if pending:
                 detail += f"；{len(pending)} 张等待网页/桌面通道自动回执或上游依赖"
-            step("execute", status, detail, executed=ex, failed=len(failed), pending=len(pending))
+            step("execute", status, detail, executed=ex, failed=len(failed), pending=len(pending), collected=collected)
         else:
             try:
                 res = self.runadaptertask({"task_id": parent["id"], "live": live, "workspace_dir": workspace_dir})
@@ -3956,6 +4146,7 @@ _LOCKED_METHODS = (
     "reassigntask", "deletetask", "deliverfinalresult", "reviewfinalresult",
     "createskill", "updateskill", "deleteskill", "setagentskill",
     "applyskillassignments", "exporttaskmd", "gettaskprompt", "toggleautoexecute",
+    "courierstatus", "checkdesktopreceipt",
     "requestapproval", "resolveapproval", "listapprovals", "setapprovaltimeout",
     "createbigtask", "aggregatebigtask",
     "bussend", "busflush", "businbox", "busledger", "listbusmessages",

@@ -88,6 +88,7 @@ class OfficeHTTPHandler(BaseHTTPRequestHandler):
                 "bus_messages": self.store.listbusmessages(),
                 "discussions": self.store.listdiscussions(),
                 "savings_ledger": self.store.savingsledger(),
+                "courier_log": self.store.state.get("courier_log", []),
                 "settings": self.store.getsettings(),
             }, origin=origin)
             return
@@ -161,6 +162,7 @@ class OfficeHTTPHandler(BaseHTTPRequestHandler):
                     "bus_messages": self.store.listbusmessages(),
                     "discussions": self.store.listdiscussions(),
                     "savings_ledger": self.store.savingsledger(),
+                    "courier_log": self.store.state.get("courier_log", []),
                     "settings": self.store.getsettings(),
                 },
             }, origin=origin)

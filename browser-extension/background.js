@@ -36,4 +36,17 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
       .catch((err) => sendResponse({ ok: false, error: err.message }));
     return true; // async response
   }
+
+  if (msg.type === "COURIER_STATUS") {
+    callOfficeApi("courierstatus", {
+      task_id: msg.taskId || "",
+      agent_id: msg.agentId || "",
+      status: msg.status,
+      detail: msg.detail || "",
+      url: msg.url || "",
+    })
+      .then((res) => sendResponse({ ok: true, result: res }))
+      .catch((err) => sendResponse({ ok: false, error: err.message }));
+    return true; // async response
+  }
 });

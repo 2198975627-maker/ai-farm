@@ -1244,6 +1244,126 @@ def test_p4_approval_timeout_returns_not_auto_allow():
         assert req2["expires_at"] == ""
 
 
+def test_p3_courier_self_check_reports_blockers_and_login_state():
+    with tempfile.TemporaryDirectory() as tmp:
+        store = OfficeStore(state_path=Path(tmp) / "office.json")
+        w = store.createagent({"name": "Kimi 网页", "vendor": "Kimi", "model": "kimi-web",
+                               "access_kind": "web", "floor": "worker", "login_url": "https://kimi.com/",
+                               "adapter_slug": "kimi-web"})
+        t = store.createtask({"title": "网页活", "goal": "x", "task_kind": "small", "assigned_to": w["id"]})
+
+        r1 = store.courierstatus({"task_id": t["id"], "status": "selector_failed", "detail": "找不到输入框"})
+        assert r1["blocked"] is True and r1["agent_id"] == w["id"]
+        assert store._find_agent(w["id"])["courier_health"]["status"] == "selector_failed"
+        assert any(m["kind"] == "courier_alert" and "卡住了" in m["text"] for m in store.listgroupmessages())
+
+        store.courierstatus({"task_id": t["id"], "status": "captcha", "detail": "人机验证"})
+        assert any("验证码" in m["text"] for m in store.listgroupmessages() if m["kind"] == "courier_alert")
+
+        store.courierstatus({"task_id": t["id"], "status": "login_expired", "detail": "会话失效"})
+        assert store._find_agent(w["id"])["login_state"] == "会话过期"
+
+        ok = store.courierstatus({"task_id": t["id"], "status": "login_ok", "detail": "自检通过"})
+        assert ok["blocked"] is False and store._find_agent(w["id"])["login_state"] == "已登录"
+
+        d = store.courierstatus({"task_id": t["id"], "status": "delivered", "detail": "已交回"})
+        assert d["blocked"] is False
+        assert len(store.state["courier_log"]) == 5
+
+        try:
+            store.courierstatus({"status": "bogus"})
+            raise AssertionError("unknown courier status must be rejected")
+        except ValueError:
+            pass
+
+
+def test_p3_desktop_receipt_auto_detect_and_conclusion_only():
+    with tempfile.TemporaryDirectory() as tmp:
+        store = OfficeStore(state_path=Path(tmp) / "office.json")
+        ws = Path(tmp) / "ws"
+        w = store.createagent({"name": "豆包桌面", "vendor": "豆包PC", "model": "doubao-desktop",
+                               "access_kind": "desktop", "floor": "worker"})
+        t = store.createtask({"title": "桌面活", "goal": "整理清单", "task_kind": "small", "assigned_to": w["id"]})
+        exp = store.exporttaskmd({"task_id": t["id"], "workspace_dir": str(ws)})
+        assert (ws / "tasks" / "inbox" / f"{t['id']}.md").exists()
+        assert exp["outbox_rel"] == f"tasks/outbox/{t['id']}.md"
+
+        # no receipt yet -> wait honestly
+        miss = store.checkdesktopreceipt({"task_id": t["id"], "workspace_dir": str(ws)})
+        assert miss["found"] is False and miss["waiting"] is True
+
+        outbox = ws / "tasks" / "outbox"
+        outbox.mkdir(parents=True, exist_ok=True)
+        receipt = outbox / f"{t['id']}.md"
+        receipt.write_text("", encoding="utf-8")
+        empty = store.checkdesktopreceipt({"task_id": t["id"], "workspace_dir": str(ws)})
+        assert empty["found"] is True and empty["empty"] is True and empty["waiting"] is True
+
+        receipt.write_text("【结论】清单已整理完成\n【改动文件】无\n【测试结果】通过", encoding="utf-8")
+        got = store.checkdesktopreceipt({"task_id": t["id"], "workspace_dir": str(ws)})
+        assert got["found"] is True and got["delivered"] is True
+        assert store._find_task(t["id"])["worker_reported"] is True
+
+        # a full-conversation paste in the receipt is rejected, never faked
+        t2 = store.createtask({"title": "桌面活2", "goal": "y", "task_kind": "small", "assigned_to": w["id"], "force_new": True})
+        store.exporttaskmd({"task_id": t2["id"], "workspace_dir": str(ws)})
+        (outbox / f"{t2['id']}.md").write_text("user: 你好\nassistant: 你好\nuser: 帮我\nassistant: 好的", encoding="utf-8")
+        bad = store.checkdesktopreceipt({"task_id": t2["id"], "workspace_dir": str(ws)})
+        assert bad["found"] is True and bad["delivered"] is False and "结论-only" in bad["error"]
+
+
+def test_p3_syncprofiles_login_state_visible():
+    import os
+    with tempfile.TemporaryDirectory() as tmp:
+        store = OfficeStore(state_path=Path(tmp) / "office.json")
+        unset = store.createagent({"name": "未配置API", "vendor": "VUnset", "model": "m1", "access_kind": "api",
+                                   "floor": "worker", "key_env": "FARM_TEST_UNSET_KEY", "base_url": "https://u.invalid/v1",
+                                   "adapter_slug": "test-not-registered"})
+        os.environ.pop("FARM_TEST_UNSET_KEY", None)
+        os.environ["FARM_TEST_SET_KEY"] = "dummy-value-not-a-real-key"
+        try:
+            setagent = store.createagent({"name": "已配置API", "vendor": "VSet", "model": "m2", "access_kind": "api",
+                                          "floor": "worker", "key_env": "FARM_TEST_SET_KEY", "base_url": "https://s.invalid/v1",
+                                          "adapter_slug": "test-not-registered"})
+            web = store.createagent({"name": "未登录网页", "vendor": "VWeb", "model": "m3", "access_kind": "web",
+                                     "floor": "worker", "login_url": "https://example.com/", "adapter_slug": "test-web"})
+            cli = store.createagent({"name": "未安装CLI", "vendor": "VCli", "model": "m4", "access_kind": "cli",
+                                     "floor": "worker", "executable": "definitely-not-installed-xyz"})
+            store.syncprofiles()
+            assert store._find_agent(unset["id"])["login_state"] == "未登录"
+            assert store._find_agent(setagent["id"])["login_state"] == "已登录"
+            assert store._find_agent(web["id"])["login_state"] == "未登录"
+            assert store._find_agent(cli["id"])["login_state"] == "未登录"
+            # detail must never leak a plaintext key — only the env-var name
+            assert "FARM_TEST_SET_KEY" in store._find_agent(setagent["id"])["login_detail"]
+            assert "dummy-value" not in store._find_agent(setagent["id"])["login_detail"]
+        finally:
+            os.environ.pop("FARM_TEST_SET_KEY", None)
+
+
+def test_p3_autorun_auto_collects_desktop_receipt():
+    with tempfile.TemporaryDirectory() as tmp:
+        store = OfficeStore(state_path=Path(tmp) / "office.json")
+        ws = Path(tmp) / "ws"
+        w = store.createagent({"name": "桌面员工", "vendor": "WorkBuddy", "model": "wb-1",
+                               "access_kind": "desktop", "floor": "worker"})
+        store._build_adapter = lambda agent, workspace_dir=".": ScriptedAdapter("ok", tokens=5)
+        big = store.createbigtask({"title": "桌面大任务", "subtasks": [
+            {"title": "桌面子单", "goal": "整理", "task_kind": "small", "assigned_to": w["id"]},
+        ]})
+        sub = big["subtasks"][0]
+        store.exporttaskmd({"task_id": sub["id"], "workspace_dir": str(ws)})
+        outbox = ws / "tasks" / "outbox"
+        outbox.mkdir(parents=True, exist_ok=True)
+        (outbox / f"{sub['id']}.md").write_text("【结论】整理完成\n【改动文件】无\n【测试结果】通过", encoding="utf-8")
+
+        ar = store.autorun({"parent_task_id": big["parent"]["id"], "live": True, "workspace_dir": str(ws)})
+        ex_step = next(s for s in ar["steps"] if s["step"] == "execute")
+        assert ex_step["collected"] == 1 and ex_step["pending"] == 0 and ex_step["status"] == "ok"
+        assert store._find_task(sub["id"])["worker_reported"] is True
+        assert ar["delivered"] is True
+
+
 if __name__ == "__main__":
     for name in sorted(dir()):
         if name.startswith("test_"):
