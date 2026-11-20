@@ -1,5 +1,6 @@
 """Dry-run tests only — no network, no keys, no spend."""
 import json
+import subprocess
 import sys
 import tempfile
 import threading
@@ -1073,6 +1074,174 @@ def test_p2_swarm_and_roundtable_autopublish_modes():
         rr = store.autopublish({"text": "评审登录方案", "mode": "roundtable", "run": True, "live": True, "force_new": True})
         assert rr["mode"] == "roundtable" and rr["autorun"]["delivered"] is True
         assert any(m["kind"] == "discussion_closed" for m in store.listgroupmessages())
+
+
+def _git(cwd, *args):
+    return subprocess.run(
+        ["git", "-c", "commit.gpgsign=false", *args], cwd=str(cwd),
+        capture_output=True, text=True, encoding="utf-8", errors="replace", check=True,
+    )
+
+
+def _init_temp_repo(path):
+    """A throwaway git repo — NEVER the real ai-farm repo. Destructive rollback
+    logic is exercised only here."""
+    path.mkdir(parents=True, exist_ok=True)
+    _git(path, "init", "-q")
+    _git(path, "config", "user.email", "farm@test.local")
+    _git(path, "config", "user.name", "Farm Test")
+    _git(path, "checkout", "-q", "-b", "main")
+    (path / "file.txt").write_text("base\n", encoding="utf-8")
+    _git(path, "add", "file.txt")
+    _git(path, "commit", "-q", "-m", "base commit")
+    return path
+
+
+def test_p4_controlled_merge_backup_and_one_click_rollback():
+    with tempfile.TemporaryDirectory() as tmp:
+        repo = _init_temp_repo(Path(tmp) / "repo")
+        store = OfficeStore(state_path=Path(tmp) / "office.json")
+        # feature branch ahead of main
+        _git(repo, "checkout", "-q", "-b", "feature")
+        (repo / "file.txt").write_text("feature change\n", encoding="utf-8")
+        _git(repo, "add", "file.txt")
+        _git(repo, "commit", "-q", "-m", "feature work")
+        _git(repo, "checkout", "-q", "main")
+
+        # dry-run preview must be zero-side-effect (no backup branch, HEAD unchanged)
+        head0 = _git(repo, "rev-parse", "HEAD").stdout.strip()
+        store.executecriticalop({"op_type": "merge", "target": "feature", "dry_run": True, "workspace_dir": str(repo)})
+        apr = store.listapprovals()[-1]
+        store.resolveapproval({"approval_id": apr["id"], "decision": "allow_once"})
+        prev = store.executecriticalop({"op_type": "merge", "target": "feature", "dry_run": True, "workspace_dir": str(repo)})
+        assert prev["executed"] is True and prev["real_executed"] is False and prev["backup_ref"] is None
+        assert _git(repo, "rev-parse", "HEAD").stdout.strip() == head0
+        assert "backup/" not in _git(repo, "branch").stdout
+
+        # real merge: fresh approval, backup branch created, content merged
+        store.executecriticalop({"op_type": "merge", "target": "feature", "dry_run": True, "workspace_dir": str(repo)})
+        apr2 = store.listapprovals()[-1]
+        store.resolveapproval({"approval_id": apr2["id"], "decision": "allow_once"})
+        real = store.executecriticalop({"op_type": "merge", "target": "feature", "dry_run": False, "workspace_dir": str(repo)})
+        assert real["real_executed"] is True and real["rollback_available"] is True
+        assert real["backup_ref"].startswith("backup/merge-")
+        assert (repo / "file.txt").read_text(encoding="utf-8") == "feature change\n"
+
+        # one-click owner rollback restores pre-merge state
+        rb = store.rollbackcriticalop({"confirm": True, "backup_ref": real["backup_ref"], "workspace_dir": str(repo)})
+        assert rb["rolled_back"] is True and rb["head_after"] == head0
+        assert (repo / "file.txt").read_text(encoding="utf-8") == "base\n"
+
+
+def test_p4_controlled_delete_code_backup_and_rollback():
+    with tempfile.TemporaryDirectory() as tmp:
+        repo = _init_temp_repo(Path(tmp) / "repo")
+        (repo / "del.txt").write_text("to remove\n", encoding="utf-8")
+        _git(repo, "add", "del.txt")
+        _git(repo, "commit", "-q", "-m", "add del.txt")
+        store = OfficeStore(state_path=Path(tmp) / "office.json")
+
+        store.executecriticalop({"op_type": "delete_code", "target": "cleanup", "dry_run": True, "workspace_dir": str(repo)})
+        apr = store.listapprovals()[-1]
+        store.resolveapproval({"approval_id": apr["id"], "decision": "allow_once"})
+        real = store.executecriticalop({"op_type": "delete_code", "target": "cleanup", "dry_run": False,
+                                        "files": ["del.txt"], "workspace_dir": str(repo)})
+        assert real["real_executed"] is True and real["backup_ref"].startswith("backup/delete-")
+        assert not (repo / "del.txt").exists()
+
+        rb = store.rollbackcriticalop({"confirm": True, "backup_ref": real["backup_ref"], "workspace_dir": str(repo)})
+        assert rb["rolled_back"] is True and (repo / "del.txt").exists()
+
+        # path escape is blocked
+        store.executecriticalop({"op_type": "delete_code", "target": "escape", "dry_run": True, "workspace_dir": str(repo)})
+        apr2 = store.listapprovals()[-1]
+        store.resolveapproval({"approval_id": apr2["id"], "decision": "allow_once"})
+        bad = store.executecriticalop({"op_type": "delete_code", "target": "escape", "dry_run": False,
+                                       "files": ["../outside.txt"], "workspace_dir": str(repo)})
+        assert bad["real_executed"] is False and "越界" in bad["error"]
+
+
+def test_p4_deploy_record_only_unless_command_configured():
+    with tempfile.TemporaryDirectory() as tmp:
+        repo = _init_temp_repo(Path(tmp) / "repo")
+        store = OfficeStore(state_path=Path(tmp) / "office.json")
+        # no deploy command -> honest record-only, never pretends to deploy
+        store.executecriticalop({"op_type": "deploy", "target": "prod", "dry_run": True, "workspace_dir": str(repo)})
+        apr = store.listapprovals()[-1]
+        store.resolveapproval({"approval_id": apr["id"], "decision": "allow_once"})
+        rec = store.executecriticalop({"op_type": "deploy", "target": "prod", "dry_run": False, "workspace_dir": str(repo)})
+        assert rec["record_only"] is True and rec["real_executed"] is False and rec["executed"] is True
+
+        # explicit owner-configured command -> real execution
+        store.executecriticalop({"op_type": "deploy", "target": "prod2", "dry_run": True, "workspace_dir": str(repo)})
+        apr2 = store.listapprovals()[-1]
+        store.resolveapproval({"approval_id": apr2["id"], "decision": "allow_once"})
+        real = store.executecriticalop({"op_type": "deploy", "target": "prod2", "dry_run": False,
+                                        "command": [sys.executable, "-c", "print('deployed-ok')"], "workspace_dir": str(repo)})
+        assert real["real_executed"] is True and "deployed-ok" in real["detail"]
+
+
+def test_p4_executor_safe_return_on_non_git_and_dirty_tree():
+    with tempfile.TemporaryDirectory() as tmp:
+        store = OfficeStore(state_path=Path(tmp) / "office.json")
+        non_git = Path(tmp) / "plain"
+        non_git.mkdir()
+        store.executecriticalop({"op_type": "merge", "target": "feature", "dry_run": True, "workspace_dir": str(non_git)})
+        apr = store.listapprovals()[-1]
+        store.resolveapproval({"approval_id": apr["id"], "decision": "allow_once"})
+        res = store.executecriticalop({"op_type": "merge", "target": "feature", "dry_run": False, "workspace_dir": str(non_git)})
+        assert res["executed"] is False and res["real_executed"] is False and "不是 Git 仓库" in res["error"]
+
+        repo = _init_temp_repo(Path(tmp) / "repo")
+        (repo / "file.txt").write_text("uncommitted\n", encoding="utf-8")  # dirty tree
+        store.executecriticalop({"op_type": "merge", "target": "feature", "dry_run": True, "workspace_dir": str(repo)})
+        apr2 = store.listapprovals()[-1]
+        store.resolveapproval({"approval_id": apr2["id"], "decision": "allow_once"})
+        dirty = store.executecriticalop({"op_type": "merge", "target": "feature", "dry_run": False, "workspace_dir": str(repo)})
+        assert dirty["real_executed"] is False and "未提交改动" in dirty["error"]
+
+
+def test_p4_rollback_requires_confirm_and_backup_namespace():
+    with tempfile.TemporaryDirectory() as tmp:
+        repo = _init_temp_repo(Path(tmp) / "repo")
+        store = OfficeStore(state_path=Path(tmp) / "office.json")
+        try:
+            store.rollbackcriticalop({"backup_ref": "backup/merge-x", "workspace_dir": str(repo)})
+            raise AssertionError("rollback must require explicit confirm=True")
+        except ValueError:
+            pass
+        try:
+            store.rollbackcriticalop({"confirm": True, "backup_ref": "main", "workspace_dir": str(repo)})
+            raise AssertionError("rollback must refuse non-backup refs")
+        except ValueError:
+            pass
+
+
+def test_p4_approval_timeout_returns_not_auto_allow():
+    with tempfile.TemporaryDirectory() as tmp:
+        store = OfficeStore(state_path=Path(tmp) / "office.json")
+        store.setapprovaltimeout({"seconds": 1800})
+        req = store.requestapproval({"op_type": "merge", "target": "main", "requested_by": "chief"})
+        assert req["status"] == "pending" and req["expires_at"]
+        # simulate the owner never answering: force expiry into the past (no polling/sleep)
+        req["expires_at"] = "2000-01-01 00:00:00"
+        store.save()
+        listed = store.listapprovals()
+        target = next(a for a in listed if a["id"] == req["id"])
+        assert target["status"] == "expired"  # returned, NOT auto-approved
+        # an expired approval can never be consumed by the executor
+        res = store.executecriticalop({"op_type": "merge", "target": "main", "dry_run": True})
+        assert res["executed"] is False and res["requires_approval"] is True
+        # resolving an expired request is rejected
+        try:
+            store.resolveapproval({"approval_id": req["id"], "decision": "allow_once"})
+            raise AssertionError("expired approval must not be resolvable")
+        except ValueError:
+            pass
+        # timeout=0 disables expiry
+        store.setapprovaltimeout({"seconds": 0})
+        req2 = store.requestapproval({"op_type": "deploy", "target": "p", "requested_by": "chief"})
+        assert req2["expires_at"] == ""
 
 
 if __name__ == "__main__":

@@ -21,6 +21,7 @@ import hashlib
 import json
 import os
 import re
+import shlex
 import subprocess
 import threading
 import time
@@ -57,6 +58,7 @@ def _locked(fn):
 MAX_REVISION_ROUNDS = 3      # write -> review -> revise reject ceiling
 MAX_DISCUSSION_ROUNDS = 3    # manager roundtable debate ceiling
 MAX_CHAIN_PASS = 10          # cross-agent连续投递 ceiling (HUD default)
+APPROVAL_TIMEOUT_SECONDS = 1800  # owner未批超时原样退回（不默认放行，学 HUD fail-open）
 
 
 def _default_agents() -> list[dict[str, Any]]:
@@ -292,6 +294,7 @@ class OfficeStore:
         settings.setdefault("max_discussion_rounds", MAX_DISCUSSION_ROUNDS)
         settings.setdefault("max_chain_pass", MAX_CHAIN_PASS)
         settings.setdefault("discussion_rounds", 1)
+        settings.setdefault("approval_timeout_seconds", APPROVAL_TIMEOUT_SECONDS)
         for a in self.state.get("agents", []):
             a.setdefault("tokens_used", 0)
             a.setdefault("session_count", 0)
@@ -401,6 +404,7 @@ class OfficeStore:
             "max_discussion_rounds": MAX_DISCUSSION_ROUNDS,
             "max_chain_pass": MAX_CHAIN_PASS,
             "discussion_rounds": 1,
+            "approval_timeout_seconds": APPROVAL_TIMEOUT_SECONDS,
         }
         self.state["example_cursor"] = 0
         self.state["group_messages"] = [
@@ -1937,8 +1941,78 @@ class OfficeStore:
         return list(self.state.get("hud_flights", []))
 
     def listapprovals(self, payload: dict[str, Any] | None = None) -> list[dict[str, Any]]:
-        self._ensure_runtime_keys()
+        self._expire_approvals()
         return list(self.state.get("pending_approvals", []))
+
+    def _expire_approvals(self) -> list[dict[str, Any]]:
+        """Lazily return timed-out pending approvals to the owner (no polling).
+
+        Learned from Agent HUD's fail-open gate: an approval the owner never
+        answered must NOT silently auto-allow. On read we mark overdue pending
+        requests ``expired`` and announce the return in the group; an expired
+        request can never be consumed by executecriticalop. No background timer
+        or polling loop is added (red line: 不要加定时轮询).
+        """
+        with self._lock:
+            self._ensure_runtime_keys()
+            timeout = int(self.state["settings"].get("approval_timeout_seconds", APPROVAL_TIMEOUT_SECONDS))
+            if timeout <= 0:
+                return []
+            now_epoch = time.time()
+            expired: list[dict[str, Any]] = []
+            for item in self.state["pending_approvals"]:
+                if item.get("status") != "pending":
+                    continue
+                exp = item.get("expires_at") or ""
+                if not exp:
+                    continue
+                try:
+                    exp_epoch = time.mktime(time.strptime(exp, "%Y-%m-%d %H:%M:%S"))
+                except (ValueError, OverflowError):
+                    continue
+                if exp_epoch <= now_epoch:
+                    item["status"] = "expired"
+                    item["expired_at"] = _now_iso()
+                    expired.append(item)
+            for item in expired:
+                self._append_group_msg(
+                    sender_id="owner",
+                    sender_name="门禁 (超时退回)",
+                    sender_role="chairman",
+                    kind="system_notice",
+                    task_id=item.get("task_id") or None,
+                    text=(
+                        f"⏳ **授权超时，已原样退回（未执行）**：{item['title']}（`{item['op_type']}`）。"
+                        f" 超过 {timeout} 秒未批复，按安全默认不放行；如仍需执行请重新发起授权。"
+                    ),
+                )
+                self._record_flight(
+                    from_id="owner",
+                    from_name="门禁 (超时退回)",
+                    to_id=item.get("requested_by") or "chief",
+                    to_name=item.get("requested_by_name") or "总管",
+                    kind="approval",
+                    task_id=item.get("task_id") or "",
+                    summary=f"超时退回: {item['op_type']}",
+                    channel="审批超时(不默认放行)",
+                )
+            if expired:
+                self.save()
+            return expired
+
+    def setapprovaltimeout(self, payload: dict[str, Any]) -> dict[str, Any]:
+        """Owner-configurable approval timeout (seconds). 0 disables expiry."""
+        self._ensure_runtime_keys()
+        raw = payload.get("seconds", payload.get("timeout_seconds", APPROVAL_TIMEOUT_SECONDS))
+        try:
+            seconds = int(raw)
+        except (TypeError, ValueError):
+            raise ValueError("审批超时秒数必须是整数。")
+        if seconds < 0:
+            raise ValueError("审批超时秒数不能为负数（0 表示永不超时）。")
+        self.state["settings"]["approval_timeout_seconds"] = seconds
+        self.save()
+        return {"approval_timeout_seconds": seconds}
 
     def requestapproval(self, payload: dict[str, Any]) -> dict[str, Any]:
         """Queue an explicit human authorization request (always asks for critical ops)."""
@@ -1964,6 +2038,12 @@ class OfficeStore:
         title = (payload.get("title") or f"{op_labels.get(op_type, op_type)} → {target}").strip()
 
         auto_low = bool(self.state["settings"].get("auto_execute_low_risk", False))
+        timeout = int(payload.get("timeout_seconds") or self.state["settings"].get("approval_timeout_seconds", APPROVAL_TIMEOUT_SECONDS))
+        created_epoch = time.time()
+        expires_at = (
+            time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(created_epoch + timeout))
+            if timeout > 0 else ""
+        )
         apr_id = f"apr-{int(time.time() * 1000) % 1000000}-{len(self.state['pending_approvals']) + 1}"
         entry = {
             "id": apr_id,
@@ -1976,6 +2056,8 @@ class OfficeStore:
             "risk_level": risk_level,
             "status": "auto_approved" if (not is_critical and auto_low) else "pending",
             "created_at": _now_iso(),
+            "timeout_seconds": timeout,
+            "expires_at": expires_at,
         }
         self.state["pending_approvals"].append(entry)
         if not is_critical and auto_low:
@@ -2019,7 +2101,7 @@ class OfficeStore:
         return entry
 
     def resolveapproval(self, payload: dict[str, Any]) -> dict[str, Any]:
-        self._ensure_runtime_keys()
+        self._expire_approvals()
         apr_id = (payload.get("approval_id") or payload.get("id") or "").strip()
         decision = (payload.get("decision") or "allow_once").strip().lower()
         if decision not in ("allow_once", "always_allow", "deny"):
@@ -2031,6 +2113,8 @@ class OfficeStore:
                 break
         if target_item is None:
             raise KeyError(f"找不到授权请求: {apr_id}")
+        if target_item.get("status") == "expired":
+            raise ValueError("该授权已超时原样退回（未执行），请重新发起授权后再批复。")
 
         if target_item["risk_level"] == "critical" and decision == "always_allow":
             raise ValueError("合并、删代码、部署属于关键操作，禁止设置「总是允许」，每次必须人工点「允许一次」或「拒绝」。")
@@ -2069,21 +2153,30 @@ class OfficeStore:
         return target_item
 
     def executecriticalop(self, payload: dict[str, Any]) -> dict[str, Any]:
-        """Gate merge / delete_code / deploy behind a single-use human approval."""
-        self._ensure_runtime_keys()
+        """Gate merge / delete_code / deploy behind a single-use human approval.
+
+        dry_run=True (default) is a zero-side-effect preview. dry_run=False runs
+        a REAL controlled executor: it first creates a Git backup branch at HEAD
+        so the owner can one-click rollback, then performs the operation. We
+        label every outcome honestly (real / record-only / preview / safe-return)
+        and never pretend an op ran when it did not. Subprocess I/O runs OUTSIDE
+        the store lock; state writes use brief explicit locks + locked sub-calls.
+        """
+        self._expire_approvals()
         op_type = (payload.get("op_type") or "merge").strip().lower()
         target = (payload.get("target") or "main").strip()
         task_id = (payload.get("task_id") or "").strip()
         approval_id = (payload.get("approval_id") or "").strip()
         dry_run = bool(payload.get("dry_run", True))
 
-        matched = None
-        for item in reversed(self.state["pending_approvals"]):
-            if approval_id and item["id"] != approval_id:
-                continue
-            if item["op_type"] == op_type and item["target"] == target and item["status"] == "approved_once":
-                matched = item
-                break
+        with self._lock:
+            matched = None
+            for item in reversed(self.state["pending_approvals"]):
+                if approval_id and item["id"] != approval_id:
+                    continue
+                if item["op_type"] == op_type and item["target"] == target and item["status"] == "approved_once":
+                    matched = item
+                    break
 
         if matched is None:
             req = self.requestapproval({
@@ -2095,19 +2188,239 @@ class OfficeStore:
             })
             return {"executed": False, "requires_approval": True, "approval": req}
 
-        # Consume one-time approval immediately so next run asks again
-        matched["status"] = "executed"
-        matched["executed_at"] = _now_iso()
-        self._append_group_msg(
-            sender_id="chief",
-            sender_name=self._chief_agent()["name"],
-            sender_role="chief",
-            kind="system_notice",
-            task_id=task_id or None,
-            text=f"⚙️ 已凭人工单次授权执行 `{op_type}` → `{target}`（{'干跑演练' if dry_run else '实操'}完成，该次授权已消耗）。",
-        )
+        # Consume the single-use approval immediately so the next run asks again.
+        with self._lock:
+            matched["status"] = "executed"
+            matched["executed_at"] = _now_iso()
+
+        if dry_run:
+            result = self._preview_critical_op(op_type, target, payload)
+        else:
+            result = self._run_controlled_git_op(op_type, target, payload)
+
+        chief_name = self._chief_agent()["name"]
+        if result.get("real_executed"):
+            note = (
+                f"⚙️ **已凭人工单次授权真实执行** `{op_type}` → `{target}`。"
+                f" 已自动创建 Git 备份 `{result.get('backup_ref')}`，可在授权抽屉一键回滚。该次授权已消耗。"
+            )
+            flight_summary = f"{op_type}:实操"
+        elif result.get("record_only"):
+            note = f"📝 **授权已记录，但未真实执行** `{op_type}` → `{target}`：{result.get('detail')}。该次授权已消耗。"
+            flight_summary = f"{op_type}:仅记录"
+        elif dry_run:
+            note = (
+                f"🧪 **干跑演练（零副作用）** `{op_type}` → `{target}`：{result.get('detail')}"
+                f" 未触碰仓库；如需实操请取消干跑并重新授权。该次授权已消耗。"
+            )
+            flight_summary = f"{op_type}:干跑"
+        else:
+            note = (
+                f"⛔ **执行未成功（已安全退回）** `{op_type}` → `{target}`：{result.get('error') or result.get('detail')}"
+                f" 仓库未被破坏；如需重试请重新授权。该次授权已消耗。"
+            )
+            flight_summary = f"{op_type}:退回"
+        with self._lock:
+            self._append_group_msg(
+                sender_id="chief", sender_name=chief_name, sender_role="chief",
+                kind="system_notice", task_id=task_id or None, text=note,
+            )
+            self._record_flight(
+                from_id="chief", from_name=chief_name, to_id="owner", to_name="你 (董事长)",
+                kind="approval", task_id=task_id, summary=flight_summary, channel="受控执行器",
+            )
         self.save()
-        return {"executed": True, "dry_run": dry_run, "op_type": op_type, "target": target, "approval_id": matched["id"]}
+        return {
+            "executed": bool(result.get("executed")),
+            "dry_run": dry_run,
+            "real_executed": bool(result.get("real_executed")),
+            "record_only": bool(result.get("record_only")),
+            "op_type": op_type,
+            "target": target,
+            "approval_id": matched["id"],
+            "backup_ref": result.get("backup_ref"),
+            "rollback_available": bool(result.get("rollback_available")),
+            "detail": result.get("detail", ""),
+            "error": result.get("error", ""),
+            "workspace_dir": result.get("workspace_dir", ""),
+        }
+
+    def _git_run(self, ws: str, args: list[str], timeout: int = 30):
+        return subprocess.run(
+            ["git", *args], cwd=ws, capture_output=True, text=True,
+            encoding="utf-8", errors="replace", timeout=timeout, check=False,
+        )
+
+    def _make_git_backup(self, ws: str, op_label: str) -> str | None:
+        ref = f"backup/{op_label}-{time.strftime('%Y%m%d-%H%M%S')}-{int(time.time() * 1000) % 1000}"
+        proc = self._git_run(ws, ["branch", ref, "HEAD"])
+        return ref if proc.returncode == 0 else None
+
+    def _delete_git_backup(self, ws: str, ref: str | None) -> None:
+        if ref and ref.startswith("backup/"):
+            self._git_run(ws, ["branch", "-D", ref])
+
+    def _preview_critical_op(self, op_type: str, target: str, payload: dict[str, Any]) -> dict[str, Any]:
+        ws = self._validate_safe_workspace(payload.get("workspace_dir") or ".")
+        if op_type == "merge":
+            detail = f"将在 `{ws}` 把 `{target}` 合并进当前分支（git merge --no-ff），执行前自动建备份分支。"
+        elif op_type == "delete_code":
+            files = payload.get("files") or []
+            detail = f"将在 `{ws}` 删除 {len(files)} 个受版本控制的文件（git rm + commit），执行前自动建备份分支。"
+        elif op_type == "deploy":
+            cmd = payload.get("command") or self.state["settings"].get("deploy_command")
+            detail = f"将运行已配置的部署命令：{cmd}" if cmd else "未配置部署命令：仅记录授权，不执行实际部署。"
+        else:
+            detail = f"操作 `{op_type}` 预览。"
+        return {"executed": True, "real_executed": False, "record_only": False,
+                "detail": detail, "workspace_dir": ws, "backup_ref": None, "rollback_available": False}
+
+    def _run_controlled_git_op(self, op_type: str, target: str, payload: dict[str, Any]) -> dict[str, Any]:
+        ws = self._validate_safe_workspace(payload.get("workspace_dir") or ".")
+
+        if op_type == "deploy":
+            cmd = payload.get("command") or self.state["settings"].get("deploy_command")
+            if not cmd:
+                return {"executed": True, "real_executed": False, "record_only": True,
+                        "detail": "未配置部署命令（deploy_command）。仅记录授权，未执行实际部署。",
+                        "workspace_dir": ws, "backup_ref": None, "rollback_available": False}
+            args = list(cmd) if isinstance(cmd, (list, tuple)) else shlex.split(str(cmd))
+            if not args:
+                return {"executed": True, "real_executed": False, "record_only": True,
+                        "detail": "部署命令为空，仅记录授权。", "workspace_dir": ws,
+                        "backup_ref": None, "rollback_available": False}
+            backup_ref = self._make_git_backup(ws, "deploy")
+            try:
+                proc = subprocess.run(
+                    [str(a) for a in args], cwd=ws, capture_output=True, text=True,
+                    encoding="utf-8", errors="replace", timeout=120, check=False, shell=False,
+                )
+            except (OSError, subprocess.TimeoutExpired) as exc:
+                return {"executed": False, "real_executed": False,
+                        "error": f"部署命令执行失败：{exc}", "workspace_dir": ws,
+                        "backup_ref": backup_ref, "rollback_available": bool(backup_ref)}
+            out = ((proc.stdout or "") + (proc.stderr or "")).strip()
+            if proc.returncode != 0:
+                return {"executed": False, "real_executed": False,
+                        "error": f"部署命令返回非零（{proc.returncode}）：{out[:400]}", "workspace_dir": ws,
+                        "backup_ref": backup_ref, "rollback_available": bool(backup_ref)}
+            return {"executed": True, "real_executed": True,
+                    "detail": f"部署命令已执行：{' '.join(str(a) for a in args)}\n{out[:400]}",
+                    "workspace_dir": ws, "backup_ref": backup_ref, "rollback_available": bool(backup_ref)}
+
+        if op_type not in ("merge", "delete_code"):
+            return {"executed": False, "real_executed": False,
+                    "error": f"不支持的受控操作类型：{op_type}", "workspace_dir": ws}
+
+        inside = self._git_run(ws, ["rev-parse", "--is-inside-work-tree"])
+        if inside.returncode != 0 or (inside.stdout or "").strip() != "true":
+            return {"executed": False, "real_executed": False,
+                    "error": f"`{ws}` 不是 Git 仓库，无法安全执行 {op_type}（不伪造执行）。", "workspace_dir": ws}
+        dirty = self._git_run(ws, ["status", "-s"])
+        if (dirty.stdout or "").strip():
+            return {"executed": False, "real_executed": False,
+                    "error": "工作区有未提交改动。为避免丢失你的工作，受控执行器要求干净工作区；请先提交或清理后重试（不自动 stash）。",
+                    "workspace_dir": ws}
+
+        if op_type == "merge":
+            verify = self._git_run(ws, ["rev-parse", "--verify", "--quiet", target + "^{commit}"])
+            if verify.returncode != 0:
+                return {"executed": False, "real_executed": False,
+                        "error": f"找不到要合并的来源分支/引用：{target}", "workspace_dir": ws}
+            backup_ref = self._make_git_backup(ws, "merge")
+            if not backup_ref:
+                return {"executed": False, "real_executed": False,
+                        "error": "无法创建 Git 备份分支，已放弃执行（安全第一）。", "workspace_dir": ws}
+            head_before = (self._git_run(ws, ["rev-parse", "HEAD"]).stdout or "").strip()
+            merge = self._git_run(ws, ["merge", "--no-ff", target, "-m", f"ai-farm controlled merge: {target}"], timeout=60)
+            if merge.returncode != 0:
+                self._git_run(ws, ["merge", "--abort"])
+                self._delete_git_backup(ws, backup_ref)
+                return {"executed": False, "real_executed": False,
+                        "error": f"合并失败/冲突，已自动 abort 并清理备份，仓库恢复原状：{((merge.stdout or '') + (merge.stderr or '')).strip()[:300]}",
+                        "workspace_dir": ws, "backup_ref": None, "rollback_available": False}
+            head_after = (self._git_run(ws, ["rev-parse", "HEAD"]).stdout or "").strip()
+            return {"executed": True, "real_executed": True,
+                    "detail": f"已把 `{target}` 合并进当前分支（--no-ff）。HEAD {head_before[:8]} → {head_after[:8]}。",
+                    "workspace_dir": ws, "backup_ref": backup_ref, "rollback_available": True,
+                    "head_before": head_before, "head_after": head_after}
+
+        files = payload.get("files") or []
+        if isinstance(files, str):
+            files = [files]
+        files = [str(f).strip() for f in files if str(f).strip()]
+        if not files:
+            return {"executed": False, "real_executed": False,
+                    "error": "delete_code 需要 files 列表（要删除的受版本控制文件）。", "workspace_dir": ws}
+        base = Path(ws).resolve()
+        safe_files: list[str] = []
+        for f in files:
+            p = (base / f).resolve()
+            if base != p and base not in p.parents:
+                return {"executed": False, "real_executed": False,
+                        "error": f"安全拦截：删除路径越界 `{f}`。", "workspace_dir": ws}
+            safe_files.append(str(p.relative_to(base)).replace("\\", "/"))
+        backup_ref = self._make_git_backup(ws, "delete")
+        if not backup_ref:
+            return {"executed": False, "real_executed": False,
+                    "error": "无法创建 Git 备份分支，已放弃执行（安全第一）。", "workspace_dir": ws}
+        rm = self._git_run(ws, ["rm", "-r", "--", *safe_files], timeout=60)
+        if rm.returncode != 0:
+            self._delete_git_backup(ws, backup_ref)
+            return {"executed": False, "real_executed": False,
+                    "error": f"git rm 失败（文件可能未被版本控制）：{((rm.stdout or '') + (rm.stderr or '')).strip()[:300]}",
+                    "workspace_dir": ws, "backup_ref": None, "rollback_available": False}
+        commit = self._git_run(ws, ["commit", "-m", f"ai-farm controlled delete: {', '.join(safe_files)[:120]}"], timeout=60)
+        if commit.returncode != 0:
+            self._git_run(ws, ["reset", "--hard", backup_ref])
+            self._delete_git_backup(ws, backup_ref)
+            return {"executed": False, "real_executed": False,
+                    "error": f"删除提交失败，已回滚到备份：{((commit.stdout or '') + (commit.stderr or '')).strip()[:300]}",
+                    "workspace_dir": ws, "backup_ref": None, "rollback_available": False}
+        return {"executed": True, "real_executed": True,
+                "detail": f"已删除并提交 {len(safe_files)} 个文件：{', '.join(safe_files)[:200]}。可凭备份分支一键恢复。",
+                "workspace_dir": ws, "backup_ref": backup_ref, "rollback_available": True,
+                "deleted_files": safe_files}
+
+    def rollbackcriticalop(self, payload: dict[str, Any]) -> dict[str, Any]:
+        """Owner-triggered one-click rollback to a backup ref we created.
+
+        Destructive (git reset --hard) but ONLY restores to a ``backup/...`` ref
+        the controlled executor created, and ONLY on an explicit owner action
+        with confirm=True. Never resets to arbitrary refs. Subprocess I/O runs
+        outside the store lock; state writes use a brief explicit lock.
+        """
+        if not payload.get("confirm"):
+            raise ValueError("回滚是破坏性操作，必须显式 confirm=True（主人一键确认）。")
+        ref = (payload.get("backup_ref") or "").strip()
+        if not ref.startswith("backup/"):
+            raise ValueError("只允许回滚到受控执行器创建的 backup/ 备份分支，禁止重置到任意引用。")
+        ws = self._validate_safe_workspace(payload.get("workspace_dir") or ".")
+        inside = self._git_run(ws, ["rev-parse", "--is-inside-work-tree"])
+        if inside.returncode != 0 or (inside.stdout or "").strip() != "true":
+            raise RuntimeError(f"`{ws}` 不是 Git 仓库，无法回滚。")
+        verify = self._git_run(ws, ["rev-parse", "--verify", "--quiet", ref + "^{commit}"])
+        if verify.returncode != 0:
+            raise ValueError(f"备份分支不存在或已被清理：{ref}")
+        head_before = (self._git_run(ws, ["rev-parse", "HEAD"]).stdout or "").strip()
+        reset = self._git_run(ws, ["reset", "--hard", ref], timeout=60)
+        if reset.returncode != 0:
+            raise RuntimeError(f"回滚失败：{((reset.stdout or '') + (reset.stderr or '')).strip()[:300]}")
+        head_after = (self._git_run(ws, ["rev-parse", "HEAD"]).stdout or "").strip()
+        with self._lock:
+            self._append_group_msg(
+                sender_id="owner", sender_name="你 (董事长)", sender_role="chairman",
+                kind="system_notice", task_id=(payload.get("task_id") or None),
+                text=f"↩️ **主人一键回滚**：仓库已恢复到备份 `{ref}`（HEAD {head_before[:8]} → {head_after[:8]}）。",
+            )
+            self._record_flight(
+                from_id="owner", from_name="你 (董事长)", to_id="chief", to_name=self._chief_agent()["name"],
+                kind="approval", task_id=payload.get("task_id") or "",
+                summary=f"回滚到 {ref}", channel="受控执行器回滚",
+            )
+        self.save()
+        return {"rolled_back": True, "backup_ref": ref, "workspace_dir": ws,
+                "head_before": head_before, "head_after": head_after}
 
     # ------------------------------------------------------------------
     # Action 33–36: Big Task Split / Batch Subtasks / Aggregate / Auto Diff Review
@@ -3628,12 +3941,13 @@ class OfficeStore:
 # Concurrency guard: serialize every fast state-mutating action under the
 # store's reentrant lock. Slow I/O actions (runadaptertask, runbigtasksubtasks,
 # runautocodereview, runroundtable, runswarm, autopublish, autorun,
-# checklivequota, syncprofiles, collectgitdiff) are deliberately EXCLUDED so
-# adapter.chat / the parallel subtask pool never deadlock holding the lock
+# checklivequota, syncprofiles, collectgitdiff, executecriticalop,
+# rollbackcriticalop) are deliberately EXCLUDED so adapter.chat / the parallel
+# subtask pool / controlled git subprocesses never deadlock holding the lock
 # across a network/subprocess call; their state writes are protected by the
 # locked sub-calls they make (postmessage / submitcodereview / createtask /
-# deliverfinalresult / save) plus brief explicit `with self._lock:` around
-# direct field mutations.
+# deliverfinalresult / requestapproval / save) plus brief explicit
+# `with self._lock:` around direct field mutations.
 # ----------------------------------------------------------------------
 _LOCKED_METHODS = (
     "loadsampleteam", "createagent", "updateagent", "moveagent", "deleteagent",
@@ -3642,8 +3956,8 @@ _LOCKED_METHODS = (
     "reassigntask", "deletetask", "deliverfinalresult", "reviewfinalresult",
     "createskill", "updateskill", "deleteskill", "setagentskill",
     "applyskillassignments", "exporttaskmd", "gettaskprompt", "toggleautoexecute",
-    "requestapproval", "resolveapproval", "executecriticalop", "createbigtask",
-    "aggregatebigtask",
+    "requestapproval", "resolveapproval", "listapprovals", "setapprovaltimeout",
+    "createbigtask", "aggregatebigtask",
     "bussend", "busflush", "businbox", "busledger", "listbusmessages",
     "startdiscussion", "postdiscussionmessage", "resolvediscussion",
     "listdiscussion", "listdiscussions", "sendconclusion",
