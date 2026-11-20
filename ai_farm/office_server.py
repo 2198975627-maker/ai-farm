@@ -85,6 +85,8 @@ class OfficeHTTPHandler(BaseHTTPRequestHandler):
                 "skills": self.store.listskills(),
                 "hud_flights": self.store.listhudflights(),
                 "pending_approvals": self.store.listapprovals(),
+                "bus_messages": self.store.listbusmessages(),
+                "discussions": self.store.listdiscussions(),
                 "settings": self.store.getsettings(),
             }, origin=origin)
             return
@@ -155,6 +157,8 @@ class OfficeHTTPHandler(BaseHTTPRequestHandler):
                     "skills": self.store.listskills(),
                     "hud_flights": self.store.listhudflights(),
                     "pending_approvals": self.store.listapprovals(),
+                    "bus_messages": self.store.listbusmessages(),
+                    "discussions": self.store.listdiscussions(),
                     "settings": self.store.getsettings(),
                 },
             }, origin=origin)

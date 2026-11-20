@@ -14,6 +14,7 @@ from ai_farm.adapters.cli_agent import CLIAdapter
 from ai_farm.adapters.registry import get_adapter, register, registered_slugs
 from ai_farm.cli import _append_agent_to_yaml, _build_adapter_for_agent, filter_live_executable_agents
 from ai_farm.dispatcher import Task, dispatch
+from ai_farm.mcp_relay import CoreBackend, FarmMCPRelay, MCP_ELIGIBLE_ACCESS, TOOLS
 from ai_farm.office_server import create_server
 from ai_farm.office_store import OfficeStore
 from ai_farm.quota import quota_band, quota_label, quota_state
@@ -539,6 +540,26 @@ class CountingAdapter:
         return Quota(kind="api", percent_remaining=50.0)
 
 
+class ScriptedAdapter:
+    """Returns a fixed reply (or raises) so mode runners can be tested deterministically."""
+    vendor = "Scripted"
+    model_id = "scripted-1"
+    access_kind = "api"
+
+    def __init__(self, text="ok", tokens=5, fail=False):
+        self.text = text
+        self.tokens = tokens
+        self.fail = fail
+
+    def chat(self, prompt, max_tokens=1000):
+        if self.fail:
+            raise RuntimeError("scripted failure: no usable model")
+        return AgentReply(text=self.text, model="scripted-1", usage={"total_tokens": self.tokens})
+
+    def check_quota(self):
+        return Quota(kind="api", percent_remaining=50.0)
+
+
 def test_p0_concurrent_writes_no_lost_updates_and_atomic_file():
     with tempfile.TemporaryDirectory() as tmp:
         path = Path(tmp) / "office.json"
@@ -652,6 +673,263 @@ def test_p0_revision_circuit_breaker():
             raise AssertionError("breaker-tripped task must still block delivery")
         except ValueError:
             pass
+
+
+def test_p1_bus_conclusion_only_queue_web_exclusion_and_chain_breaker():
+    with tempfile.TemporaryDirectory() as tmp:
+        store = OfficeStore(state_path=Path(tmp) / "office.json")
+        a = store.createagent({"name": "Bus A", "vendor": "BusVA", "model": "ba",
+                               "access_kind": "api", "key_env": "BA_KEY",
+                               "base_url": "https://ba.invalid/v1", "floor": "worker"})
+        b = store.createagent({"name": "Bus B", "vendor": "BusVB", "model": "bb",
+                               "access_kind": "cli", "executable": "codex", "floor": "worker"})
+        web = store.createagent({"name": "Bus Web", "vendor": "BusVW", "model": "bw",
+                                 "access_kind": "web", "login_url": "https://example.com/", "floor": "worker"})
+
+        e1 = store.bussend({"from_id": "chief", "to_id": a["id"], "text": "【结论】已完成翻译", "kind": "conclusion"})
+        assert e1["status"] == "delivered" and e1["pass"] == 1
+        try:
+            store.bussend({"from_id": "chief", "to_id": a["id"],
+                           "text": "User: hi\nAssistant: ok\nUser: again\nAssistant: dump"})
+            raise AssertionError("bus must reject full conversation dump")
+        except ValueError:
+            pass
+        try:
+            store.bussend({"from_id": "chief", "to_id": web["id"], "text": "【结论】x"})
+            raise AssertionError("web worker must not be a bus recipient (red line)")
+        except ValueError:
+            pass
+
+        t = store.createtask({"title": "占用A", "assigned_to": a["id"], "task_kind": "small"})
+        store.claimtask({"task_id": t["id"], "worker_id": a["id"]})
+        e2 = store.bussend({"from_id": "chief", "to_id": a["id"], "text": "【结论】排队消息", "kind": "conclusion"})
+        assert e2["status"] == "queued"
+        assert store.busflush({"agent_id": a["id"]})["still_busy"] is True
+        store.deliverfinalresult({"task_id": t["id"]})
+        flush = store.busflush({"agent_id": a["id"]})
+        assert flush["delivered"] >= 1 and flush["still_busy"] is False
+
+        store.state["settings"]["max_chain_pass"] = 2
+        store.bussend({"from_id": "chief", "to_id": b["id"], "text": "【结论】1", "chain_id": "cX"})
+        store.bussend({"from_id": "chief", "to_id": b["id"], "text": "【结论】2", "chain_id": "cX"})
+        e_blocked = store.bussend({"from_id": "chief", "to_id": b["id"], "text": "【结论】3", "chain_id": "cX"})
+        assert e_blocked["status"] == "blocked" and e_blocked["block_reason"] == "chain_pass_limit"
+        assert any(m["kind"] == "circuit_breaker" for m in store.listgroupmessages())
+        led = store.busledger()
+        assert led["total_messages"] >= 5 and led["blocked"] >= 1
+
+
+def test_p1_discussion_rounds_breaker_and_resolve():
+    with tempfile.TemporaryDirectory() as tmp:
+        store = OfficeStore(state_path=Path(tmp) / "office.json")
+        m1 = store.createagent({"name": "Mgr One", "vendor": "MV1", "model": "m1",
+                                "access_kind": "api", "paid": True, "key_env": "M1_KEY",
+                                "base_url": "https://m1.invalid/v1", "floor": "manager"})
+        m2 = store.createagent({"name": "Mgr Two", "vendor": "MV2", "model": "m2",
+                                "access_kind": "cli", "paid": True, "executable": "codex", "floor": "manager"})
+        web = store.createagent({"name": "Web Mgr", "vendor": "MVW", "model": "mw",
+                                 "access_kind": "web", "login_url": "https://example.com/", "floor": "manager"})
+        try:
+            store.startdiscussion({"topic": "x", "participants": [m1["id"], web["id"]]})
+            raise AssertionError("web manager must be excluded from discussion bus")
+        except ValueError:
+            pass
+
+        store.state["settings"]["max_discussion_rounds"] = 1
+        disc = store.startdiscussion({"task_id": "T-disc", "topic": "方案评审", "participants": [m1["id"], m2["id"]]})
+        assert disc["status"] == "open" and len(disc["participants"]) == 2
+        store.postdiscussionmessage({"discussion_id": "T-disc", "from_id": m1["id"], "text": "【结论】建议采用方案A", "stance": "support"})
+        store.postdiscussionmessage({"discussion_id": "T-disc", "from_id": m2["id"], "text": "【结论】反对：方案A有并发风险", "stance": "oppose"})
+        blocked = store.postdiscussionmessage({"discussion_id": "T-disc", "from_id": m1["id"], "text": "【结论】再议", "stance": "revise"})
+        assert blocked.get("blocked") is True and blocked["circuit_breaker"] == "discussion_limit"
+        d = store.listdiscussion({"discussion_id": "T-disc"})
+        assert d["status"] == "deadlock" and len(d["messages"]) == 2
+        assert any(m["kind"] == "circuit_breaker" for m in store.listgroupmessages())
+        assert any(m["kind"] == "discussion" and m["chain_id"] == "T-disc" for m in store.listbusmessages())
+        try:
+            store.postdiscussionmessage({"discussion_id": "T-disc", "from_id": m2["id"], "text": "【结论】x"})
+            raise AssertionError("deadlocked discussion must reject further speech")
+        except ValueError:
+            pass
+
+        store.state["settings"]["max_discussion_rounds"] = 3
+        store.startdiscussion({"task_id": "T-disc2", "topic": "二轮", "participants": [m1["id"], m2["id"]]})
+        store.postdiscussionmessage({"discussion_id": "T-disc2", "from_id": m1["id"], "text": "【结论】方案B", "stance": "support"})
+        closed = store.resolvediscussion({"discussion_id": "T-disc2", "resolution": "采用方案B", "adopted": m1["name"]})
+        assert closed["status"] == "closed" and closed["adopted"] == m1["name"]
+
+
+def test_p1_mcp_relay_protocol_compatible_and_core_delegated():
+    with tempfile.TemporaryDirectory() as tmp:
+        store = OfficeStore(state_path=Path(tmp) / "office.json")
+        a1 = store.createagent({"name": "API Worker", "vendor": "AV1", "model": "a1",
+                                "access_kind": "api", "key_env": "A1_KEY",
+                                "base_url": "https://a1.invalid/v1", "floor": "worker"})
+        a2 = store.createagent({"name": "CLI Worker", "vendor": "AV2", "model": "a2",
+                                "access_kind": "cli", "executable": "codex", "floor": "worker"})
+        web = store.createagent({"name": "Web Worker", "vendor": "AVW", "model": "aw",
+                                 "access_kind": "web", "login_url": "https://example.com/", "floor": "worker"})
+        m1 = store.createagent({"name": "Mgr One", "vendor": "MV1", "model": "m1",
+                                "access_kind": "api", "paid": True, "key_env": "M1_KEY",
+                                "base_url": "https://m1.invalid/v1", "floor": "manager"})
+        m2 = store.createagent({"name": "Mgr Two", "vendor": "MV2", "model": "m2",
+                                "access_kind": "cli", "paid": True, "executable": "codex", "floor": "manager"})
+        relay = FarmMCPRelay(CoreBackend(store))
+
+        def call(name, args=None, rid=1):
+            return relay.handle_request({"jsonrpc": "2.0", "id": rid, "method": "tools/call",
+                                         "params": {"name": name, "arguments": args or {}}})
+
+        def payload(resp):
+            assert "result" in resp, resp
+            assert resp["result"]["isError"] is False
+            return json.loads(resp["result"]["content"][0]["text"])
+
+        init = relay.handle_request({"jsonrpc": "2.0", "id": 0, "method": "initialize", "params": {}})
+        assert init["result"]["protocolVersion"] == "2024-11-05"
+        assert init["result"]["serverInfo"]["name"] == "ai-farm-mcp-relay"
+        assert relay.handle_request({"jsonrpc": "2.0", "method": "notifications/initialized"}) is None
+
+        listed = relay.handle_request({"jsonrpc": "2.0", "id": 0, "method": "tools/list", "params": {}})
+        names = {t["name"] for t in listed["result"]["tools"]}
+        # the original 6 private-bridge tools stay name/behavior compatible
+        assert {"farm_list_agents", "farm_list_tasks", "farm_claim_task", "farm_send_conclusion",
+                "farm_submit_code_review", "farm_request_approval"} <= names
+        assert {"farm_bus_send", "farm_bus_inbox", "farm_bus_ledger", "farm_start_discussion",
+                "farm_post_discussion", "farm_resolve_discussion"} <= names
+        assert len(TOOLS) == 12
+
+        agents = payload(call("farm_list_agents"))["agents"]
+        by_id = {a["id"]: a for a in agents}
+        assert by_id[web["id"]]["mcp_eligible"] is False
+        assert by_id[a1["id"]]["mcp_eligible"] is True
+        assert MCP_ELIGIBLE_ACCESS == {"api", "cli", "desktop", "chief"}
+
+        # relay forwards conclusion formatting to Core (it must NOT format itself)
+        sent = payload(call("farm_send_conclusion", {"sender_id": a1["id"], "to_id": a2["id"],
+                                                     "conclusion": "完成登录模块", "changed_files": ["auth.py"],
+                                                     "test_result": "3 passed", "tokens": 11}))
+        assert sent["bus"]["status"] == "delivered"
+        assert "【结论】完成登录模块" in sent["bus"]["text"]
+        assert "【改动文件】auth.py" in sent["bus"]["text"]
+        inbox = payload(call("farm_bus_inbox", {"agent_id": a2["id"]}))
+        assert any("【结论】" in m["text"] for m in inbox)
+
+        # red line: web worker is not a bus member — Core rejects, relay surfaces error
+        bad = call("farm_send_conclusion", {"sender_id": a1["id"], "to_id": web["id"], "conclusion": "x"})
+        assert "error" in bad and bad["error"]["code"] == -32000
+
+        led = payload(call("farm_bus_ledger"))
+        assert led["total_messages"] >= 1 and led["tokens"] >= 11
+        assert led["by_agent"][a1["id"]]["sent"] >= 1
+
+        # discussion tools ride the same Core bus
+        disc = payload(call("farm_start_discussion", {"task_id": "T-relay", "topic": "评审",
+                                                      "participants": [m1["id"], m2["id"]]}))
+        assert disc["status"] == "open"
+        payload(call("farm_post_discussion", {"discussion_id": "T-relay", "from_id": m1["id"],
+                                              "text": "【结论】方案A", "stance": "support"}))
+        closed = payload(call("farm_resolve_discussion", {"discussion_id": "T-relay",
+                                                          "resolution": "采用A", "adopted": m1["name"]}))
+        assert closed["status"] == "closed" and closed["adopted"] == m1["name"]
+
+        unknown = call("farm_does_not_exist")
+        assert "error" in unknown
+        bad_method = relay.handle_request({"jsonrpc": "2.0", "id": 9, "method": "nope"})
+        assert bad_method["error"]["code"] == -32601
+
+
+def test_p1_roundtable_mode_real_opinions_and_honest_stop():
+    with tempfile.TemporaryDirectory() as tmp:
+        store = OfficeStore(state_path=Path(tmp) / "office.json")
+        m1 = store.createagent({"name": "M1", "vendor": "MV1", "model": "m1", "access_kind": "api",
+                                "paid": True, "key_env": "M1_KEY", "base_url": "https://m1.invalid/v1", "floor": "manager"})
+        m2 = store.createagent({"name": "M2", "vendor": "MV2", "model": "m2", "access_kind": "api",
+                                "paid": True, "key_env": "M2_KEY", "base_url": "https://m2.invalid/v1", "floor": "manager"})
+        chief = store._find_agent("chief")
+        chief["access_kind"] = "api"; chief["base_url"] = "https://c.invalid/v1"; chief["key_env"] = "C_KEY"
+
+        # too few debaters -> honest stop, no fabricated debate
+        t0 = store.createtask({"title": "圆桌缺人", "goal": "x", "task_kind": "small"})
+        r0 = store.runroundtable({"task_id": t0["id"], "live": True, "participants": [m1["id"]]})
+        assert r0["stopped"] is True and r0["reason"] == "insufficient_managers"
+
+        task = store.createtask({"title": "圆桌方案", "goal": "设计登录模块", "task_kind": "small", "mode": "roundtable"})
+
+        def picker(agent, workspace_dir="."):
+            if agent["id"] == "chief":
+                return ScriptedAdapter("【结论】采纳 M1 的方案，注意并发", tokens=5)
+            return ScriptedAdapter("【结论】支持方案A", tokens=5)
+        store._build_adapter = picker
+        r = store.runroundtable({"task_id": task["id"], "live": True, "participants": [m1["id"], m2["id"]]})
+        assert r["mode"] == "roundtable" and r["opinions"] == 2 and r["tokens"] == 15
+        assert r["adopted"] == "M1" and r["chief_aggregated"] is True
+        assert r["discussion"]["status"] == "closed"
+        assert store._find_task(task["id"])["mode"] == "roundtable"
+        assert any(m["kind"] == "discussion" and m["chain_id"] == task["id"] for m in store.listbusmessages())
+        assert any(m["kind"] == "discussion_open" for m in store.listgroupmessages())
+        assert any(m["kind"] == "discussion_closed" for m in store.listgroupmessages())
+
+        # dry-run builds the thread but never fabricates opinions
+        t2 = store.createtask({"title": "圆桌干跑", "goal": "x", "task_kind": "small", "force_new": True})
+        r2 = store.runroundtable({"task_id": t2["id"], "live": False, "participants": [m1["id"], m2["id"]]})
+        assert r2["dry_run"] is True and r2["opinions"] == 0
+        assert store.listdiscussion({"discussion_id": t2["id"]})["messages"] == []
+
+        # live but no usable model -> stop honestly, zero fabricated opinions
+        store._build_adapter = lambda agent, workspace_dir=".": ScriptedAdapter(fail=True)
+        t3 = store.createtask({"title": "圆桌无模型", "goal": "x", "task_kind": "small", "force_new": True})
+        r3 = store.runroundtable({"task_id": t3["id"], "live": True, "participants": [m1["id"], m2["id"]]})
+        assert r3["stopped"] is True and r3["reason"] == "no_real_model" and r3["opinions"] == 0
+        assert any(m["kind"] == "mode_stopped" for m in store.listgroupmessages())
+
+
+def test_p1_swarm_mode_two_drafts_chief_picks_and_honest_stop():
+    with tempfile.TemporaryDirectory() as tmp:
+        store = OfficeStore(state_path=Path(tmp) / "office.json")
+        w1 = store.createagent({"name": "W1", "vendor": "SV1", "model": "s1", "access_kind": "api",
+                                "key_env": "W1_KEY", "base_url": "https://w1.invalid/v1", "floor": "worker"})
+        # only one free worker -> honest stop
+        t0 = store.createtask({"title": "撒网缺人", "goal": "x", "task_kind": "small"})
+        r0 = store.runswarm({"task_id": t0["id"], "live": True})
+        assert r0["stopped"] is True and r0["reason"] == "insufficient_workers"
+
+        w2 = store.createagent({"name": "W2", "vendor": "SV2", "model": "s2", "access_kind": "api",
+                                "key_env": "W2_KEY", "base_url": "https://w2.invalid/v1", "floor": "worker"})
+        chief = store._find_agent("chief")
+        chief["access_kind"] = "api"; chief["base_url"] = "https://c.invalid/v1"; chief["key_env"] = "C_KEY"
+        task = store.createtask({"title": "撒网任务", "goal": "写一段排序", "task_kind": "small", "mode": "swarm"})
+
+        def picker(agent, workspace_dir="."):
+            if agent["id"] == "chief":
+                return ScriptedAdapter("【结论】采纳初稿1（更简洁）", tokens=5)
+            return ScriptedAdapter("ok", tokens=5)
+        store._build_adapter = picker
+        r = store.runswarm({"task_id": task["id"], "live": True})
+        assert r["mode"] == "swarm" and r["winner"] == "W1" and r["tokens"] == 15
+        parent = store._find_task(task["id"])
+        assert parent["is_parent"] is True and len(parent["subtask_ids"]) == 2
+        assert parent["status"] == "delivered" and r["winner_task"] == parent["subtask_ids"][0]
+        assert any(m["kind"] == "swarm_card" for m in store.listgroupmessages())
+
+        # dry-run routes two drafts but never fabricates a winner
+        t2 = store.createtask({"title": "撒网干跑", "goal": "x", "task_kind": "small", "force_new": True})
+        r2 = store.runswarm({"task_id": t2["id"], "live": False})
+        assert r2["dry_run"] is True and r2["winner"] == "" and len(r2["drafts"]) == 2
+
+        # workers succeed but chief has no model -> hand both drafts to owner, no fake winner
+        chief["access_kind"] = "chief"
+        store._build_adapter = lambda agent, workspace_dir=".": ScriptedAdapter("ok", tokens=5)
+        t3 = store.createtask({"title": "撒网总管无模型", "goal": "x", "task_kind": "small", "force_new": True})
+        r3 = store.runswarm({"task_id": t3["id"], "live": True})
+        assert r3["stopped"] is True and r3["reason"] == "chief_no_model" and r3["winner"] == ""
+        assert all(store._find_task(d["task_id"])["status"] == "delivered" for d in r3["drafts"] if d["ok"])
+
+        # no usable model at all -> honest stop
+        store._build_adapter = lambda agent, workspace_dir=".": ScriptedAdapter(fail=True)
+        t4 = store.createtask({"title": "撒网全无模型", "goal": "x", "task_kind": "small", "force_new": True})
+        r4 = store.runswarm({"task_id": t4["id"], "live": True})
+        assert r4["stopped"] is True and r4["reason"] == "no_real_model"
 
 
 if __name__ == "__main__":

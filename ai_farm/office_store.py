@@ -40,9 +40,9 @@ def _locked(fn):
 
     Only fast (no network/subprocess I/O) mutating methods are decorated.
     Slow orchestration methods (runadaptertask / runbigtasksubtasks /
-    runautocodereview / checklivequota) deliberately stay unlocked across
-    I/O so parallel subtasks never deadlock; their state writes go through
-    locked sub-calls (postmessage / submitcodereview / save).
+    runautocodereview / runroundtable / runswarm / checklivequota) deliberately
+    stay unlocked across I/O so parallel subtasks never deadlock; their state
+    writes go through locked sub-calls (postmessage / submitcodereview / save).
     """
     @functools.wraps(fn)
     def wrapper(self, *args, **kwargs):
@@ -2431,6 +2431,12 @@ class OfficeStore:
                 f"写—审—改闭环拦截：以下改代码子单尚未通过独立审查，不能聚合总交付：{', '.join(unreviewed)}"
             )
 
+        tripped = [f"{s['id']}({s.get('circuit_breaker')})" for s in subtasks if s.get("circuit_breaker")]
+        if tripped and not payload.get("force"):
+            raise ValueError(
+                f"熔断拦截：以下子单已触发熔断（需主人/经理裁决），不能自动聚合：{', '.join(tripped)}"
+            )
+
         force = bool(payload.get("force", False))
         unreported = [
             f"{s['id']}({s['title']})"
@@ -2455,6 +2461,630 @@ class OfficeStore:
         parent["worker_reported"] = True
         parent["latest_report_summary"] = agg_summary[:320]
         return self.deliverfinalresult({"task_id": parent["id"], "summary": agg_summary})
+
+    # ------------------------------------------------------------------
+    # Octo modes (README §12). Solo / Critic / Pipeline / Split already have
+    # prototypes and only need the mode label. Roundtable + Swarm are added
+    # here. Both drive REAL model calls via _build_adapter; when no usable
+    # model exists they STOP honestly and say so in the group — they never
+    # fabricate a debate or a winner (red line §七: 不许伪造讨论).
+    # Like runadaptertask, these are slow-I/O orchestrators: adapter.chat runs
+    # lock-free, only the shared-state writes take the reentrant lock.
+    # ------------------------------------------------------------------
+    @staticmethod
+    def _reply_tokens(reply: Any) -> int:
+        usage = getattr(reply, "usage", None)
+        if not isinstance(usage, dict):
+            return 0
+        return int(usage.get("total_tokens")
+                   or (int(usage.get("prompt_tokens") or 0) + int(usage.get("completion_tokens") or 0)))
+
+    def _roundtable_debaters(self, requested: list[str], chief: dict[str, Any]) -> list[dict[str, Any]]:
+        if requested:
+            debaters: list[dict[str, Any]] = []
+            for pid in requested:
+                ag = self._resolve_bus_endpoint(pid)
+                if not self._bus_eligible(ag):
+                    raise ValueError(f"红线拦截：{ag.get('name', pid)} 是网页/订阅通道，不能进圆桌总线。")
+                if ag.get("floor") not in ("manager", "chief", "chairman"):
+                    raise ValueError(f"圆桌只接 2楼经理/总管，{ag.get('name')} 不是经理层。")
+                if not any(d["id"] == ag["id"] for d in debaters):
+                    debaters.append(ag)
+            return debaters
+        debaters = [a for a in self.state["agents"]
+                    if a.get("floor") == "manager" and a.get("status") == "ready" and self._bus_eligible(a)]
+        if len(debaters) < 2 and self._bus_eligible(chief) and not any(d["id"] == chief["id"] for d in debaters):
+            debaters.append(chief)
+        return debaters
+
+    def runroundtable(self, payload: dict[str, Any]) -> dict[str, Any]:
+        """Roundtable: >=2 managers each give one conclusion-only opinion on the
+        same proposal (real model calls), chief aggregates and adopts. Bounded
+        rounds via the discussion bus. No usable model -> stop honestly."""
+        task = self._find_task(payload.get("task_id") or payload.get("id"))
+        live = bool(payload.get("live", False))
+        workspace_dir = (payload.get("workspace_dir") or "").strip()
+        chief = self._chief_agent()
+        requested = [str(p).strip() for p in (payload.get("participants") or []) if str(p).strip()]
+        debaters = self._roundtable_debaters(requested, chief)
+        with self._lock:
+            task["mode"] = "roundtable"
+
+        if len(debaters) < 2:
+            self._append_group_msg(
+                sender_id="chief", sender_name=chief["name"], sender_role="chief",
+                kind="mode_stopped", task_id=task["id"],
+                text=(f"⏸ **圆桌模式停下** `{task['id']}`：可用经理/总管不足 2 位（当前 {len(debaters)}），"
+                      "无法开圆桌。请上线更多 API/CLI 经理后再跑，不伪造讨论。"),
+            )
+            self.save()
+            return {"mode": "roundtable", "stopped": True, "reason": "insufficient_managers",
+                    "debaters": [d["id"] for d in debaters]}
+
+        disc = self.startdiscussion({
+            "task_id": task["id"], "topic": (task.get("goal") or task["title"])[:60],
+            "participants": [d["id"] for d in debaters],
+        })
+        disc_id = disc["id"]
+
+        if not live:
+            self._append_group_msg(
+                sender_id="chief", sender_name=chief["name"], sender_role="chief",
+                kind="mode_dry_run", task_id=task["id"],
+                text=(f"🧪 **圆桌干跑（0 Token）** `{task['id']}`：已为 {len(debaters)} 位经理建好讨论串 `{disc_id}`，"
+                      "但未调用真模型发言。点「真调」让经理各提一条结论意见、总管再汇总。"),
+            )
+            self._record_flight(
+                from_id="chief", from_name=chief["name"], to_id="managers",
+                to_name=f"{len(debaters)} 位经理圆桌", kind="roundtable", task_id=task["id"],
+                summary=f"圆桌干跑 ({len(debaters)}经理)", channel="经理圆桌", status="ok",
+            )
+            self.save()
+            return {"mode": "roundtable", "dry_run": True, "discussion_id": disc_id,
+                    "debaters": [d["id"] for d in debaters], "opinions": 0, "tokens": 0}
+
+        safe_ws = self._validate_safe_workspace(workspace_dir or ".")
+        opinions: list[dict[str, Any]] = []
+        tokens_total = 0
+        for d in debaters:
+            if d.get("access_kind") not in ("api", "cli", "chief"):
+                continue
+            prompt = (
+                "你是 2 楼经理，参加圆桌评审。只就下面这个方案给一条结论性意见（支持/反对/修改建议），"
+                "不超过 120 字，不贴整段对话、不重写全文代码，开头用【结论】。\n"
+                f"方案目标：{task.get('goal') or task['title']}\n"
+                f"验收标准：{task.get('acceptance') or '（未填）'}\n"
+                f"当前产出摘要：{task.get('latest_report_summary') or '（尚无产出，请就目标本身评审）'}"
+            )
+            try:
+                reply = self._build_adapter(d, workspace_dir=safe_ws).chat(prompt, max_tokens=300)
+            except Exception as exc:  # noqa: BLE001 - skip honestly, never fabricate
+                self._append_group_msg(
+                    sender_id="chief", sender_name=chief["name"], sender_role="chief",
+                    kind="mode_stopped", task_id=task["id"],
+                    text=f"⏸ 圆桌：经理 {d['name']} 真调失败（{exc}），跳过其发言，不伪造意见。",
+                )
+                continue
+            text = (reply.text or "").strip()
+            if not text:
+                continue
+            tok = self._reply_tokens(reply)
+            with self._lock:
+                d["tokens_used"] = int(d.get("tokens_used") or 0) + tok
+            tokens_total += tok
+            stance = "oppose" if ("反对" in text or "不同意" in text) else ("revise" if ("修改" in text or "建议" in text) else "support")
+            res = self.postdiscussionmessage({
+                "discussion_id": disc_id, "from_id": d["id"], "text": text[:400],
+                "stance": stance, "tokens": tok,
+            })
+            if res.get("blocked"):
+                return {"mode": "roundtable", "stopped": True, "reason": "discussion_limit",
+                        "discussion_id": disc_id, "opinions": len(opinions), "tokens": tokens_total}
+            opinions.append({"from_id": d["id"], "from_name": d["name"], "text": text[:400], "stance": stance, "tokens": tok})
+
+        if not opinions:
+            self._append_group_msg(
+                sender_id="chief", sender_name=chief["name"], sender_role="chief",
+                kind="mode_stopped", task_id=task["id"],
+                text=(f"⏸ **圆桌停下** `{task['id']}`：没有任何经理真调成功产出意见（无可用模型/额度）。"
+                      "按红线不伪造讨论，已停下等主人处理。"),
+            )
+            self.save()
+            return {"mode": "roundtable", "stopped": True, "reason": "no_real_model",
+                    "discussion_id": disc_id, "opinions": 0, "tokens": 0}
+
+        resolution, adopted = "", ""
+        if chief.get("access_kind") in ("api", "cli"):
+            try:
+                opinions_block = "\n".join(f"- {o['from_name']}（{o['stance']}）：{o['text']}" for o in opinions)
+                agg_prompt = (
+                    "你是总管，汇总下面各位经理对同一方案的结论意见，给出最终裁决（采纳谁/综合方案），"
+                    "不超过 150 字，开头用【结论】，不贴整段对话。\n" + opinions_block
+                )
+                reply = self._build_adapter(chief, workspace_dir=safe_ws).chat(agg_prompt, max_tokens=350)
+                resolution = (reply.text or "").strip()[:400]
+                tok = self._reply_tokens(reply)
+                with self._lock:
+                    chief["tokens_used"] = int(chief.get("tokens_used") or 0) + tok
+                tokens_total += tok
+                adopted = next((o["from_name"] for o in opinions if o["from_name"] in resolution), opinions[0]["from_name"])
+            except Exception:  # noqa: BLE001 - honest handoff to owner
+                resolution, adopted = "", ""
+        if not resolution:
+            resolution = "（总管未真调汇总，请主人在讨论串里裁决采纳谁的意见）"
+        closed = self.resolvediscussion({"discussion_id": disc_id, "resolution": resolution, "adopted": adopted})
+        self._record_flight(
+            from_id="chief", from_name=chief["name"], to_id="owner", to_name="你 (董事长)",
+            kind="roundtable", task_id=task["id"], summary=f"圆桌汇总 ({len(opinions)}条意见)",
+            channel="经理圆桌", status="ok",
+        )
+        self.save()
+        return {"mode": "roundtable", "discussion_id": disc_id, "opinions": len(opinions),
+                "tokens": tokens_total, "resolution": resolution, "adopted": adopted,
+                "chief_aggregated": bool(adopted), "discussion": closed}
+
+    def runswarm(self, payload: dict[str, Any]) -> dict[str, Any]:
+        """Swarm: two distinct-vendor free workers each draft the same task,
+        chief picks the best (real model) and delivers to owner. No usable
+        model -> stop honestly, never fabricate a winner."""
+        task = self._find_task(payload.get("task_id") or payload.get("id"))
+        live = bool(payload.get("live", False))
+        workspace_dir = (payload.get("workspace_dir") or "").strip()
+        chief = self._chief_agent()
+        workers = self._distinct_vendor_workers()
+        free = [w for w in workers if not w.get("paid", False)]
+        pool = free if len(free) >= 2 else workers
+        with self._lock:
+            task["mode"] = "swarm"
+        if len(pool) < 2:
+            self._append_group_msg(
+                sender_id="chief", sender_name=chief["name"], sender_role="chief",
+                kind="mode_stopped", task_id=task["id"],
+                text=(f"⏸ **撒网竞选停下** `{task['id']}`：需要至少 2 名不同厂商的可用员工，当前 {len(pool)} 名。"
+                      "请上线更多免费员工后再跑。"),
+            )
+            self.save()
+            return {"mode": "swarm", "stopped": True, "reason": "insufficient_workers"}
+
+        chosen = pool[:2]
+        draft_ids: list[str] = []
+        for i, w in enumerate(chosen, start=1):
+            sub = self.createtask({
+                "title": f"撒网初稿 {i}：{task['title'][:24]}",
+                "manager_id": task.get("manager_id") or chief["id"],
+                "assigned_to": w["id"],
+                "goal": task.get("goal") or task["title"],
+                "input_text": task.get("input_text") or "",
+                "output_format": "只输出【结论】+【改动文件】+【测试结果】，不贴全文对话。",
+                "acceptance": task.get("acceptance") or "结果完整、不编造数据、符合格式要求。",
+                "task_kind": "small", "parent_task_id": task["id"], "force_new": True,
+            })
+            draft_ids.append(sub["id"])
+        with self._lock:
+            task["is_parent"] = True
+            task["subtask_ids"] = list(dict.fromkeys(list(task.get("subtask_ids") or []) + draft_ids))
+            task["assigned_to"] = ""
+            task["assigned_name"] = f"撒网竞选 · {len(draft_ids)} 份初稿"
+        self._append_group_msg(
+            sender_id="chief", sender_name=chief["name"], sender_role="chief",
+            kind="swarm_card", task_id=task["id"],
+            text=(f"🐝 **撒网竞选启动** `{task['id']}`：{chosen[0]['name']} 与 {chosen[1]['name']} 各做一份初稿，"
+                  "总管真调择优后交主人。"),
+        )
+
+        safe_ws = self._validate_safe_workspace(workspace_dir or ".")
+        drafts: list[dict[str, Any]] = []
+        for sid in draft_ids:
+            sub = self._find_task(sid)
+            if live:
+                try:
+                    res = self.runadaptertask({"task_id": sid, "live": True, "workspace_dir": safe_ws})
+                    drafts.append({"task_id": sid, "worker": res["worker"], "summary": sub.get("latest_report_summary", ""), "ok": True})
+                except Exception as exc:  # noqa: BLE001
+                    drafts.append({"task_id": sid, "worker": sub.get("assigned_name", ""), "summary": "", "ok": False, "error": str(exc)})
+            else:
+                self.runadaptertask({"task_id": sid, "live": False, "workspace_dir": safe_ws})
+                drafts.append({"task_id": sid, "worker": sub.get("assigned_name", ""), "summary": sub.get("latest_report_summary", ""), "ok": True, "dry_run": True})
+        ok_drafts = [d for d in drafts if d["ok"] and d["summary"]]
+        self._record_flight(
+            from_id=chief["id"], from_name=chief["name"], to_id="workers",
+            to_name=f"{len(draft_ids)} 份撒网初稿", kind="swarm", task_id=task["id"],
+            summary=f"撒网 {len(ok_drafts)}/{len(draft_ids)} 份初稿", channel="撒网竞选", status="ok",
+        )
+
+        if not live:
+            self._append_group_msg(
+                sender_id="chief", sender_name=chief["name"], sender_role="chief",
+                kind="mode_dry_run", task_id=task["id"],
+                text=(f"🧪 **撒网干跑（0 Token）** `{task['id']}`：两份初稿已路由，未真调择优。"
+                      "点「真调」让员工各做一份、总管挑最好的交主人。"),
+            )
+            self.save()
+            return {"mode": "swarm", "dry_run": True, "drafts": drafts, "winner": "", "tokens": 0}
+
+        worker_tokens = 0
+        for sid in draft_ids:
+            for u in self._find_task(sid).get("usage_log", []):
+                worker_tokens += int((u.get("usage") or {}).get("total_tokens")
+                                     or (int((u.get("usage") or {}).get("prompt_tokens") or 0)
+                                         + int((u.get("usage") or {}).get("completion_tokens") or 0)))
+        if not ok_drafts:
+            self._append_group_msg(
+                sender_id="chief", sender_name=chief["name"], sender_role="chief",
+                kind="mode_stopped", task_id=task["id"],
+                text=(f"⏸ **撒网停下** `{task['id']}`：两份初稿均未真调成功（无可用模型/额度）。"
+                      "按红线不伪造，已停下等主人处理。"),
+            )
+            self.save()
+            return {"mode": "swarm", "stopped": True, "reason": "no_real_model", "drafts": drafts, "tokens": worker_tokens}
+
+        winner, winner_task, rationale = "", "", ""
+        chief_tokens = 0
+        if chief.get("access_kind") in ("api", "cli"):
+            try:
+                block = "\n".join(f"初稿{idx + 1}（{d['worker']}）：{d['summary'][:200]}" for idx, d in enumerate(ok_drafts))
+                pick_prompt = (
+                    "你是总管，下面是对同一任务的多份初稿结论。挑出最好的一份，只回一行："
+                    "【结论】采纳初稿N（理由不超过60字）。不贴全文。\n" + block
+                )
+                reply = self._build_adapter(chief, workspace_dir=safe_ws).chat(pick_prompt, max_tokens=200)
+                rationale = (reply.text or "").strip()[:300]
+                chief_tokens = self._reply_tokens(reply)
+                with self._lock:
+                    chief["tokens_used"] = int(chief.get("tokens_used") or 0) + chief_tokens
+                m = re.search(r"初稿\s*(\d+)", rationale)
+                if m:
+                    idx = int(m.group(1)) - 1
+                    if 0 <= idx < len(ok_drafts):
+                        winner = ok_drafts[idx]["worker"]
+                        winner_task = ok_drafts[idx]["task_id"]
+            except Exception:  # noqa: BLE001 - honest handoff
+                winner, winner_task, rationale = "", "", ""
+        tokens_total = worker_tokens + chief_tokens
+
+        if not winner:
+            for d in ok_drafts:
+                self.deliverfinalresult({"task_id": d["task_id"]})
+            self._append_group_msg(
+                sender_id="chief", sender_name=chief["name"], sender_role="chief",
+                kind="mode_stopped", task_id=task["id"],
+                text=(f"⏸ **撒网：总管未真调择优** `{task['id']}`（无可用总管模型）。"
+                      f"{len(ok_drafts)} 份初稿已分别交付，请主人手动挑选，不伪造赢家。"),
+            )
+            self.save()
+            return {"mode": "swarm", "stopped": True, "reason": "chief_no_model",
+                    "drafts": drafts, "winner": "", "tokens": tokens_total}
+
+        win_sub = self._find_task(winner_task)
+        summary = (
+            f"🐝 **撒网竞选总交付**（总管真调择优）：\n"
+            f"• 采纳：**{winner}** 的初稿 `{winner_task}`\n"
+            f"• 裁决：{rationale}\n"
+            f"• 成果摘要：\n{win_sub.get('latest_report_summary', '')}"
+        )
+        for d in ok_drafts:
+            self.deliverfinalresult({"task_id": d["task_id"]})
+        with self._lock:
+            task["worker_reported"] = True
+            task["latest_report_summary"] = summary[:320]
+        delivered = self.deliverfinalresult({"task_id": task["id"], "summary": summary})
+        self.save()
+        return {"mode": "swarm", "drafts": drafts, "winner": winner, "winner_task": winner_task,
+                "rationale": rationale, "tokens": tokens_total, "delivery": delivered}
+
+    # ------------------------------------------------------------------
+    # Action 37–46: In-office Message Bus (MCP Relay form) + Manager
+    # Discussion Threads. Learned from Agent HUD: "a message, not the
+    # conversation"; queue until the recipient is idle; bounded chain/pass
+    # so two models never burn quota arguing forever. Web/subscription
+    # workers are NOT bus members (red line) — they use the browser courier.
+    # The relay only moves envelopes; all state/ledger math lives here in Core.
+    # ------------------------------------------------------------------
+    def _bus_eligible(self, agent: dict[str, Any]) -> bool:
+        return (agent.get("access_kind") or "").lower() in ("api", "cli", "desktop", "chief")
+
+    def _resolve_bus_endpoint(self, agent_id: str) -> dict[str, Any]:
+        if agent_id in ("owner", "gao"):
+            return {"id": "owner", "name": "你 (董事长)", "access_kind": "chief", "floor": "chairman"}
+        return self._find_agent(agent_id)
+
+    def _agent_busy(self, agent_id: str) -> bool:
+        try:
+            ag = self._find_agent(agent_id)
+        except KeyError:
+            return False
+        if ag.get("status") in ("busy", "exhausted") or ag.get("floor") == "rest":
+            return True
+        for t in self.state["tasks"]:
+            if t.get("assigned_to") == agent_id and t.get("status") in ("accepted", "working", "in_review"):
+                return True
+        return False
+
+    def listbusmessages(self, payload: dict[str, Any] | None = None) -> list[dict[str, Any]]:
+        self._ensure_runtime_keys()
+        return list(self.state.get("bus_messages", []))
+
+    def bussend(self, payload: dict[str, Any]) -> dict[str, Any]:
+        """Move ONE conclusion-only message between two bus-eligible agents.
+
+        Queues when the recipient is busy (never interrupts a running task);
+        blocks when the chain/pass ceiling is exceeded; rejects web workers.
+        """
+        self._ensure_runtime_keys()
+        from_id = (payload.get("from_id") or payload.get("sender_id") or "").strip()
+        to_id = (payload.get("to_id") or payload.get("recipient_id") or "").strip()
+        if not from_id or not to_id:
+            raise ValueError("总线消息必须指明 from_id 与 to_id。")
+        text = (payload.get("text") or payload.get("conclusion") or "").strip()
+        if not text:
+            raise ValueError("总线消息内容不能为空（只传结论，不传整段对话）。")
+        self._reject_full_conversation_paste(text)
+
+        sender = self._resolve_bus_endpoint(from_id)
+        recipient = self._resolve_bus_endpoint(to_id)
+        if not self._bus_eligible(sender):
+            raise ValueError(f"红线拦截：{sender.get('name', from_id)} 属于网页/订阅通道，不能作为总线发送方。")
+        if not self._bus_eligible(recipient):
+            raise ValueError(
+                f"红线拦截：{recipient.get('name', to_id)} 属于网页/订阅通道，不进 MCP 总线。"
+                "网页免费员工请走传令兵浏览器扩展自动填表+抓回，不许包装成总线客户端。"
+            )
+
+        kind = (payload.get("kind") or "conclusion").strip().lower()
+        task_id = (payload.get("task_id") or "").strip()
+        chain_id = (payload.get("chain_id") or task_id or f"chain-{int(time.time() * 1000)}").strip()
+        prior = [m for m in self.state["bus_messages"] if m.get("chain_id") == chain_id]
+        pass_no = len(prior) + 1
+        max_pass = int(self.state["settings"].get("max_chain_pass", MAX_CHAIN_PASS))
+        tokens = int(payload.get("tokens") or 0)
+
+        env = {
+            "id": f"bus-{int(time.time() * 1000)}-{len(self.state['bus_messages']) + 1}",
+            "chain_id": chain_id, "pass": pass_no,
+            "from_id": sender["id"], "from_name": sender["name"],
+            "to_id": recipient["id"], "to_name": recipient["name"],
+            "task_id": task_id, "kind": kind, "text": text,
+            "tokens": tokens, "channel": self._channel_label(recipient),
+            "status": "delivered", "block_reason": "",
+            "created_at": _now_iso(), "delivered_at": "",
+        }
+
+        if pass_no > max_pass:
+            env["status"] = "blocked"
+            env["block_reason"] = "chain_pass_limit"
+            self.state["bus_messages"].append(env)
+            self._append_group_msg(
+                sender_id=sender["id"], sender_name=sender["name"],
+                sender_role=sender.get("floor", "chief"), kind="circuit_breaker",
+                task_id=task_id or None,
+                text=(f"⛔ **跨 agent 连续传递熔断**（chain `{chain_id}` 已达 {max_pass} 次上限）\n"
+                      f"• {sender['name']} → {recipient['name']} 的第 {pass_no} 次投递被拦截。\n"
+                      f"• 自动停下，等主人介入，不再继续烧额度互传。"),
+            )
+            self._record_flight(
+                from_id=sender["id"], from_name=sender["name"],
+                to_id=recipient["id"], to_name=recipient["name"],
+                kind="circuit_breaker", task_id=task_id,
+                summary=f"传递超限熔断 ({max_pass})", channel=env["channel"], status="blocked",
+            )
+            self.save()
+            return env
+
+        if self._agent_busy(recipient["id"]) and not payload.get("interrupt"):
+            env["status"] = "queued"
+        else:
+            env["delivered_at"] = _now_iso()
+        self.state["bus_messages"].append(env)
+        if env["status"] == "delivered" and kind in ("conclusion", "handoff", "review"):
+            self._append_group_msg(
+                sender_id=sender["id"], sender_name=sender["name"],
+                sender_role=sender.get("floor", "chief"), kind="bus_card",
+                task_id=task_id or None,
+                text=f"✉ **总线投递** {sender['name']} → @{recipient['name']}（{kind} · pass {pass_no}）\n{text[:300]}",
+            )
+        self._record_flight(
+            from_id=sender["id"], from_name=sender["name"],
+            to_id=recipient["id"], to_name=recipient["name"],
+            kind="bus_" + kind, task_id=task_id,
+            summary=f"{kind} pass{pass_no}" + (" (排队)" if env["status"] == "queued" else ""),
+            channel=env["channel"], status="queued" if env["status"] == "queued" else "ok",
+        )
+        self.save()
+        return env
+
+    def businbox(self, payload: dict[str, Any]) -> list[dict[str, Any]]:
+        self._ensure_runtime_keys()
+        agent_id = (payload.get("agent_id") or payload.get("to_id") or "").strip()
+        include_blocked = bool(payload.get("include_blocked", False))
+        return [
+            m for m in self.state["bus_messages"]
+            if m.get("to_id") == agent_id and (include_blocked or m.get("status") != "blocked")
+        ]
+
+    def sendconclusion(self, payload: dict[str, Any]) -> dict[str, Any]:
+        """Core-side conclusion delivery (the MCP relay forwards here; it never
+        formats or parses chat itself). Format + bus delivery + optional report."""
+        sender_id = (payload.get("sender_id") or payload.get("from_id") or "").strip()
+        to_id = (payload.get("to_id") or "").strip()
+        if sender_id and sender_id == to_id:
+            raise ValueError("总线发送方与接收方不能是同一个 Agent。")
+        conclusion = (payload.get("conclusion") or "").strip()
+        text = format_conclusion_report(
+            conclusion, payload.get("changed_files"),
+            payload.get("test_result") or "未运行测试", payload.get("diff_summary") or "",
+        )
+        task_id = (payload.get("task_id") or "").strip()
+        env = self.bussend({
+            "from_id": sender_id, "to_id": to_id, "text": text,
+            "kind": "conclusion", "task_id": task_id, "tokens": int(payload.get("tokens") or 0),
+        })
+        report = None
+        if task_id:
+            report = self.postmessage({
+                "task_id": task_id, "sender_id": sender_id, "conclusion": conclusion,
+                "changed_files": payload.get("changed_files"),
+                "test_result": payload.get("test_result") or "未运行测试",
+                "diff_summary": payload.get("diff_summary") or "", "is_delivery": True,
+            })
+        return {"bus": env, "report": report}
+
+    def busflush(self, payload: dict[str, Any]) -> dict[str, Any]:
+        """Deliver queued messages to an agent once it goes idle (no interrupt)."""
+        self._ensure_runtime_keys()
+        agent_id = (payload.get("agent_id") or "").strip()
+        if self._agent_busy(agent_id):
+            return {"agent_id": agent_id, "delivered": 0, "still_busy": True}
+        delivered = 0
+        for m in self.state["bus_messages"]:
+            if m.get("to_id") == agent_id and m.get("status") == "queued":
+                m["status"] = "delivered"
+                m["delivered_at"] = _now_iso()
+                delivered += 1
+        if delivered:
+            self.save()
+        return {"agent_id": agent_id, "delivered": delivered, "still_busy": False}
+
+    def busledger(self, payload: dict[str, Any] | None = None) -> dict[str, Any]:
+        """Bus accounting computed in Core (the relay never re-parses chat)."""
+        self._ensure_runtime_keys()
+        msgs = self.state["bus_messages"]
+        by_kind: dict[str, int] = {}
+        by_agent: dict[str, dict[str, int]] = {}
+        tokens = blocked = queued = 0
+        for m in msgs:
+            by_kind[m["kind"]] = by_kind.get(m["kind"], 0) + 1
+            tokens += int(m.get("tokens") or 0)
+            blocked += 1 if m["status"] == "blocked" else 0
+            queued += 1 if m["status"] == "queued" else 0
+            s = by_agent.setdefault(m["from_id"], {"sent": 0, "received": 0, "tokens": 0})
+            s["sent"] += 1
+            s["tokens"] += int(m.get("tokens") or 0)
+            by_agent.setdefault(m["to_id"], {"sent": 0, "received": 0, "tokens": 0})["received"] += 1
+        return {
+            "total_messages": len(msgs), "by_kind": by_kind, "tokens": tokens,
+            "blocked": blocked, "queued": queued, "by_agent": by_agent,
+        }
+
+    # ------------------------------------------------------------------
+    # Manager discussion threads (Roundtable surface). Conclusion-only,
+    # pass-counted via the bus, bounded rounds -> deadlock escalates to owner.
+    # ------------------------------------------------------------------
+    def listdiscussions(self, payload: dict[str, Any] | None = None) -> list[dict[str, Any]]:
+        self._ensure_runtime_keys()
+        return list(self.state.get("discussions", {}).values())
+
+    def listdiscussion(self, payload: dict[str, Any]) -> dict[str, Any]:
+        self._ensure_runtime_keys()
+        disc_id = (payload.get("discussion_id") or payload.get("task_id") or payload.get("id") or "").strip()
+        disc = self.state["discussions"].get(disc_id)
+        if disc is None:
+            raise KeyError(f"找不到讨论串: {disc_id}")
+        return disc
+
+    def startdiscussion(self, payload: dict[str, Any]) -> dict[str, Any]:
+        self._ensure_runtime_keys()
+        task_id = (payload.get("task_id") or "").strip()
+        topic = (payload.get("topic") or "经理圆桌讨论").strip()
+        participants = []
+        for pid in (payload.get("participants") or []):
+            ag = self._resolve_bus_endpoint(pid)
+            if not self._bus_eligible(ag):
+                raise ValueError(f"红线拦截：{ag.get('name', pid)} 是网页/订阅通道，不能进经理讨论总线。")
+            if ag.get("floor") not in ("manager", "chief", "chairman"):
+                raise ValueError(f"经理讨论串只接 2楼经理/总管，{ag.get('name')} 不是经理层。")
+            if not any(p["id"] == ag["id"] for p in participants):
+                participants.append({"id": ag["id"], "name": ag["name"]})
+        if len(participants) < 2:
+            raise ValueError("圆桌讨论至少需要 2 位经理/总管参与。")
+        disc_id = task_id or f"disc-{int(time.time() * 1000)}"
+        disc = {
+            "id": disc_id, "task_id": task_id, "topic": topic,
+            "participants": participants, "messages": [],
+            "round_limit": int(self.state["settings"].get("max_discussion_rounds", MAX_DISCUSSION_ROUNDS)),
+            "status": "open", "resolution": "", "adopted": "",
+            "circuit_breaker": "", "created_at": _now_iso(),
+        }
+        self.state["discussions"][disc_id] = disc
+        names = "、".join(p["name"] for p in participants)
+        self._append_group_msg(
+            sender_id="chief", sender_name=self._chief_agent()["name"], sender_role="chief",
+            kind="discussion_open", task_id=task_id or None,
+            text=f"💬 **经理讨论串开启** `{disc_id}` · {topic}\n参与：{names}（只传结论/观点，计 pass，超 {disc['round_limit']} 轮自动熔断交主人）。",
+        )
+        self.save()
+        return disc
+
+    def postdiscussionmessage(self, payload: dict[str, Any]) -> dict[str, Any]:
+        self._ensure_runtime_keys()
+        disc_id = (payload.get("discussion_id") or payload.get("task_id") or "").strip()
+        disc = self.state["discussions"].get(disc_id)
+        if disc is None:
+            raise KeyError(f"找不到讨论串: {disc_id}")
+        if disc["status"] != "open":
+            raise ValueError(f"讨论串已 {disc['status']}，不能再发言（熔断或已裁决）。")
+        ag = self._resolve_bus_endpoint((payload.get("from_id") or "").strip())
+        if not any(p["id"] == ag["id"] for p in disc["participants"]):
+            raise ValueError("只有本讨论串的参与经理才能发言。")
+        text = (payload.get("text") or payload.get("conclusion") or "").strip()
+        if not text:
+            raise ValueError("讨论发言不能为空（只传结论/观点，不贴整段对话）。")
+        self._reject_full_conversation_paste(text)
+        stance = (payload.get("stance") or "comment").strip().lower()
+        n = max(1, len(disc["participants"]))
+        round_no = len(disc["messages"]) // n + 1
+        if round_no > disc["round_limit"]:
+            disc["status"] = "deadlock"
+            disc["circuit_breaker"] = "discussion_limit"
+            opposes = [m for m in disc["messages"] if m.get("stance") == "oppose"]
+            disagreements = "\n".join(f"  • {m['from_name']}: {m['text'][:120]}" for m in opposes) or "  （无明确反对，但已达轮数上限）"
+            breaker_text = (
+                f"⛔ **经理讨论熔断（已达 {disc['round_limit']} 轮上限）** 讨论 `{disc_id}`\n"
+                f"• 自动停下，分歧点汇总交主人裁决：\n{disagreements}"
+            )
+            self._append_group_msg(
+                sender_id="chief", sender_name=self._chief_agent()["name"], sender_role="chief",
+                kind="circuit_breaker", task_id=disc["task_id"] or None, text=breaker_text,
+            )
+            self._record_flight(
+                from_id=ag["id"], from_name=ag["name"], to_id="owner", to_name="你 (董事长)",
+                kind="circuit_breaker", task_id=disc["task_id"],
+                summary=f"讨论超限熔断 ({disc['round_limit']}轮)", channel="经理圆桌", status="blocked",
+            )
+            self.save()
+            return {"blocked": True, "circuit_breaker": "discussion_limit", "discussion": disc}
+        msg = {
+            "id": f"dmsg-{int(time.time() * 1000)}-{len(disc['messages']) + 1}",
+            "from_id": ag["id"], "from_name": ag["name"],
+            "text": text, "stance": stance, "round": round_no, "created_at": _now_iso(),
+        }
+        disc["messages"].append(msg)
+        for p in disc["participants"]:
+            if p["id"] != ag["id"]:
+                self.bussend({
+                    "from_id": ag["id"], "to_id": p["id"], "text": text,
+                    "kind": "discussion", "task_id": disc["task_id"],
+                    "chain_id": disc_id, "tokens": int(payload.get("tokens") or 0),
+                })
+        self.save()
+        return msg
+
+    def resolvediscussion(self, payload: dict[str, Any]) -> dict[str, Any]:
+        self._ensure_runtime_keys()
+        disc_id = (payload.get("discussion_id") or payload.get("task_id") or "").strip()
+        disc = self.state["discussions"].get(disc_id)
+        if disc is None:
+            raise KeyError(f"找不到讨论串: {disc_id}")
+        disc["resolution"] = (payload.get("resolution") or "").strip()
+        disc["adopted"] = (payload.get("adopted") or "").strip()
+        disc["status"] = "closed"
+        self._append_group_msg(
+            sender_id="chief", sender_name=self._chief_agent()["name"], sender_role="chief",
+            kind="discussion_closed", task_id=disc["task_id"] or None,
+            text=(f"✅ **经理讨论已裁决** `{disc_id}` · 采纳：**{disc['adopted'] or '综合意见'}**\n"
+                  f"• 结论：{disc['resolution'] or '（见讨论串）'}"),
+        )
+        self.save()
+        return disc
 
     # ------------------------------------------------------------------
     # Internal helpers
@@ -2573,6 +3203,7 @@ class OfficeStore:
         task_id: str = "",
         summary: str = "",
         channel: str = "",
+        status: str = "ok",
     ) -> dict[str, Any]:
         flights = self.state.setdefault("hud_flights", [])
         entry = {
@@ -2585,11 +3216,12 @@ class OfficeStore:
             "task_id": task_id,
             "summary": summary,
             "channel": channel,
+            "status": status,
             "created_at": _now_iso(),
         }
         flights.append(entry)
-        if len(flights) > 30:
-            del flights[:-30]
+        if len(flights) > 40:
+            del flights[:-40]
         return entry
 
     def dispatch_action(self, action_name: str, payload: dict[str, Any] | None = None) -> Any:
@@ -2599,6 +3231,7 @@ class OfficeStore:
             "listagents", "listgroupmessages", "listtasks", "listskills",
             "seedexampletask", "reset_to_seed", "syncprofiles", "loadsampleteam",
             "getsettings", "listhudflights", "listapprovals",
+            "listbusmessages", "busledger", "listdiscussions",
         }
         if not hasattr(self, name):
             raise ValueError(f"未知的办公室动作: {action_name}")
@@ -2609,10 +3242,12 @@ class OfficeStore:
 # ----------------------------------------------------------------------
 # Concurrency guard: serialize every fast state-mutating action under the
 # store's reentrant lock. Slow I/O actions (runadaptertask, runbigtasksubtasks,
-# runautocodereview, checklivequota, syncprofiles, collectgitdiff) are
-# deliberately EXCLUDED so the parallel subtask pool never deadlocks holding
-# the lock across a network/subprocess call; their state writes are protected
-# by the locked sub-calls they make (postmessage / submitcodereview / save).
+# runautocodereview, runroundtable, runswarm, checklivequota, syncprofiles,
+# collectgitdiff) are deliberately EXCLUDED so adapter.chat / the parallel
+# subtask pool never deadlock holding the lock across a network/subprocess
+# call; their state writes are protected by the locked sub-calls they make
+# (postmessage / submitcodereview / createtask / deliverfinalresult / save)
+# plus brief explicit `with self._lock:` around direct field mutations.
 # ----------------------------------------------------------------------
 _LOCKED_METHODS = (
     "loadsampleteam", "createagent", "updateagent", "moveagent", "deleteagent",
@@ -2623,6 +3258,9 @@ _LOCKED_METHODS = (
     "applyskillassignments", "exporttaskmd", "gettaskprompt", "toggleautoexecute",
     "requestapproval", "resolveapproval", "executecriticalop", "createbigtask",
     "aggregatebigtask",
+    "bussend", "busflush", "businbox", "busledger", "listbusmessages",
+    "startdiscussion", "postdiscussionmessage", "resolvediscussion",
+    "listdiscussion", "listdiscussions", "sendconclusion",
 )
 for _method_name in _LOCKED_METHODS:
     setattr(OfficeStore, _method_name, _locked(getattr(OfficeStore, _method_name)))
