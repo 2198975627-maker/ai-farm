@@ -509,6 +509,23 @@ function renderGroupChat() {
           </button>
         </div>
       `;
+    } else if (task && msg.kind === "big_task_card") {
+      actionBarHTML = `
+        <div class="card-actions-bar">
+          <button class="btn btn-ghost" onclick="handleRunBigTaskSubtasks('${task.id}', false)">
+            🧪 批量干跑全部子单 (0消耗)
+          </button>
+          <button class="btn btn-primary" onclick="handleRunBigTaskSubtasks('${task.id}', true)">
+            🚀 并行真调 API/CLI 子单
+          </button>
+          <button class="btn btn-ghost" onclick="handleAggregateBigTask('${task.id}')">
+            📦 汇总全部子单总交付
+          </button>
+          <button class="btn btn-ghost" onclick="openTaskPrivateThread('${task.id}')">
+            🔍 查看子单进度 (${(task.subtask_ids || []).length})
+          </button>
+        </div>
+      `;
     } else if (task && msg.kind === "final_delivery_card") {
       actionBarHTML = `
         <div class="card-actions-bar">
@@ -729,6 +746,9 @@ function renderSelectedTaskThread() {
     `<option value="${r.id}" ${r.id === task.reviewer_id ? 'selected' : ''}>${escapeHTML(r.name)} (${escapeHTML(r.badge)})</option>`
   ).join("");
   const reviewIssues = task.review_issues || [];
+  const childSubtasks = (task.subtask_ids || [])
+    .map(sid => APP_STATE.tasks.find(t => t.id === sid))
+    .filter(Boolean);
 
   container.innerHTML = `
     <div class="profile-box">
@@ -741,6 +761,25 @@ function renderSelectedTaskThread() {
           • <strong>A message, not the conversation</strong>：汇报只传【结论 / 改动文件 / 测试结果】，不传全对话记录。
         </div>
       </div>
+
+      ${task.is_parent ? `
+      <div class="identity-block">
+        <h4>🧩 大任务子单进度看板 (${childSubtasks.length} 张子单)</h4>
+        <div style="display:flex;flex-direction:column;gap:5px;margin-bottom:8px;">
+          ${childSubtasks.map(sub => `
+            <button type="button" class="btn btn-ghost" style="justify-content:space-between;width:100%;" onclick="openTaskPrivateThread('${sub.id}')">
+              <span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${escapeHTML(sub.id)} · ${escapeHTML(sub.title)}</span>
+              <span class="access-badge ${sub.review_status === 'approved' || sub.status === 'delivered' ? 'green' : sub.status === 'rejected' ? 'red' : 'orange'}">${escapeHTML(sub.requires_code_review ? (sub.review_status || sub.status) : sub.status)}</span>
+            </button>
+          `).join("")}
+        </div>
+        <div style="display:flex;gap:6px;flex-wrap:wrap;">
+          <button type="button" class="btn btn-ghost btn-xs" onclick="handleRunBigTaskSubtasks('${task.id}', false)">🧪 批量干跑子单</button>
+          <button type="button" class="btn btn-primary btn-xs" onclick="handleRunBigTaskSubtasks('${task.id}', true)">🚀 并行真调 API/CLI</button>
+          <button type="button" class="btn btn-ghost btn-xs" onclick="handleAggregateBigTask('${task.id}')">📦 汇总总交付</button>
+        </div>
+      </div>
+      ` : ""}
 
       ${task.requires_code_review ? `
       <div class="identity-block">
@@ -761,7 +800,9 @@ function renderSelectedTaskThread() {
         </div>
         <textarea id="reviewIssuesInput" rows="2" class="obsidian-input" placeholder="审查只写问题清单（每行一条：文件:行号 问题描述）；点下方「通过」则无需填问题" style="margin-bottom:6px;"></textarea>
         <div style="display:flex;gap:6px;flex-wrap:wrap;">
-          <button type="button" class="btn btn-success btn-xs" onclick="handleSubmitCodeReview('${task.id}', true, false)">✅ 审查通过 (干跑/免消耗)</button>
+          <button type="button" class="btn btn-ghost btn-xs" onclick="handleAutoCodeReview('${task.id}', false)">🤖 自动读 diff 审查 (干跑)</button>
+          <button type="button" class="btn btn-primary btn-xs" onclick="handleAutoCodeReview('${task.id}', true)">🚀 真调审查者读 diff</button>
+          <button type="button" class="btn btn-success btn-xs" onclick="handleSubmitCodeReview('${task.id}', true, false)">✅ 手动审查通过</button>
           <button type="button" class="btn btn-danger btn-xs" onclick="handleSubmitCodeReview('${task.id}', false, true)">↩ 打回重做 (问题清单)</button>
         </div>
       </div>
@@ -1083,6 +1124,69 @@ async function handleSubmitCodeReview(taskId, passed, simulateReject = false) {
   });
   await openTaskPrivateThread(taskId);
   showToast(passed ? "✅ 独立审查通过，可交付！" : "↩ 已退回问题清单给写代码员工重做！");
+}
+
+async function handleAutoCodeReview(taskId, live = false) {
+  const reviewerId = (document.getElementById("reviewAgentSelect") || {}).value || "";
+  const wsInput = document.getElementById("customWorkspaceInput");
+  const workspace_dir = wsInput ? wsInput.value.trim() : (APP_STATE.customWorkspaceDir || "");
+  const res = await callOfficeAction("runautocodereview", {
+    task_id: taskId,
+    reviewer_id: reviewerId,
+    workspace_dir,
+    live,
+  });
+  await openTaskPrivateThread(taskId);
+  if (res) {
+    showToast(`🔍 独立审查完成 (${res.mode})：${res.reviewer} → ${res.review_status}`);
+  }
+}
+
+function openBigTaskModal() {
+  const mgrSel = document.getElementById("bigTaskManagerSelect");
+  const managers = APP_STATE.agents.filter(a => a.floor === "manager");
+  if (mgrSel) {
+    mgrSel.innerHTML = managers.map(m => `<option value="${m.id}">${escapeHTML(m.name)} (${escapeHTML(m.badge)})</option>`).join("");
+  }
+  document.getElementById("bigTaskModal").classList.remove("hidden");
+}
+
+function closeBigTaskModal() {
+  document.getElementById("bigTaskModal").classList.add("hidden");
+}
+
+async function handleCreateBigTaskSubmit(event) {
+  event.preventDefault();
+  const res = await callOfficeAction("createbigtask", {
+    title: document.getElementById("bigTaskTitle").value.trim(),
+    manager_id: document.getElementById("bigTaskManagerSelect").value,
+    goal: document.getElementById("bigTaskGoal").value.trim(),
+    raw_steps: document.getElementById("bigTaskSteps").value,
+  });
+  closeBigTaskModal();
+  if (res && res.parent) {
+    APP_STATE.selectedTaskId = res.parent.id;
+    await openTaskPrivateThread(res.parent.id);
+    showToast(`🧩 大任务已拆成 ${(res.subtasks || []).length} 张子单并跨厂商分派！`);
+  }
+}
+
+async function handleRunBigTaskSubtasks(parentId, live = false) {
+  const wsInput = document.getElementById("customWorkspaceInput");
+  const workspace_dir = wsInput ? wsInput.value.trim() : (APP_STATE.customWorkspaceDir || "");
+  const res = await callOfficeAction("runbigtasksubtasks", {
+    parent_task_id: parentId,
+    live,
+    workspace_dir,
+  });
+  if (res) {
+    showToast(`⚡ 已批量执行 ${res.executed_count} 张子单 (${res.mode === 'dry_run' ? '0消耗干跑' : 'API/CLI并行真调'})`);
+  }
+}
+
+async function handleAggregateBigTask(parentId) {
+  await callOfficeAction("aggregatebigtask", { parent_task_id: parentId });
+  showToast("🏁 已汇总全部子单结论并发回大群等待董事长验收！");
 }
 
 async function handleRunAdapterTask(taskId, live = false) {

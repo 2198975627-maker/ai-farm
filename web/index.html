@@ -39,6 +39,7 @@
 
       <button class="btn btn-safety-off" id="autoExecuteToggleBtn" onclick="handleToggleAutoExecute()" title="低风险任务自动执行开关（默认关闭；合并/删代码/部署等关键操作永远先人工授权）">🛡️ 自动执行低风险: 关</button>
       <button class="btn btn-example" onclick="handleSeedExampleTask()" title="一键生成标准任务模板体验完整流转">🧪 示例任务</button>
+      <button class="btn btn-ghost" onclick="openBigTaskModal()" title="把一个大需求自动拆成多张子单跨厂商分派并汇总交付">🧩 拆大任务</button>
       <button class="btn btn-primary" onclick="openNewTaskModal()">＋ 派新任务</button>
 
       <!-- 收纳低频但重要的工具与指南（一个功能都不删） -->
@@ -441,6 +442,42 @@
           <div class="modal-footer">
             <button type="button" class="btn btn-ghost" onclick="closeNewTaskModal()">取消</button>
             <button type="submit" class="btn btn-primary">📣 发到全员大群聊</button>
+          </div>
+        </form>
+      </div>
+    </div>
+  </div>
+
+  <!-- 弹窗 2b：大任务一键拆子单（父任务 → 跨厂商多子单 → 聚合总交付） -->
+  <div class="modal-backdrop hidden" id="bigTaskModal">
+    <div class="modal-card">
+      <div class="modal-header">
+        <h3>🧩 大任务一键拆子单（跨厂商分派 · 改代码自动开写-审-改）</h3>
+        <button class="close-btn" onclick="closeBigTaskModal()">✕</button>
+      </div>
+      <div class="modal-body">
+        <form id="bigTaskForm" onsubmit="handleCreateBigTaskSubmit(event)">
+          <div class="form-grid">
+            <div class="form-group">
+              <label>大任务标题 *</label>
+              <input type="text" id="bigTaskTitle" required placeholder="例：给用户登录模块补齐校验与测试" />
+            </div>
+            <div class="form-group">
+              <label>统筹经理（只审结论与汇总）*</label>
+              <select id="bigTaskManagerSelect"></select>
+            </div>
+          </div>
+          <div class="form-group">
+            <label>总目标（一句话说清）*</label>
+            <input type="text" id="bigTaskGoal" required placeholder="例：先梳理验收清单，再修复空密码登录 Bug 并补单测，最后生成变更摘要" />
+          </div>
+          <div class="form-group">
+            <label>子单拆分清单（每行一条；写 <code>[代码]</code> 自动开写-审-改闭环；留空则自动拆 3 张标准子单）</label>
+            <textarea id="bigTaskSteps" rows="4" placeholder="1. 梳理登录接口边界用例清单&#10;2. [代码] 修复空密码校验并补 3 个单元测试&#10;3. 汇总改动结论与发布说明"></textarea>
+          </div>
+          <div class="modal-footer">
+            <button type="button" class="btn btn-ghost" onclick="closeBigTaskModal()">取消</button>
+            <button type="submit" class="btn btn-primary">🧩 一键拆单并跨厂商派发</button>
           </div>
         </form>
       </div>

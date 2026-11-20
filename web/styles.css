@@ -1030,6 +1030,11 @@ code {
   background: var(--bg-panel);
 }
 
+.chat-bubble.kind-big_task_card {
+  border-left: 3px solid var(--blue-chief);
+  background: var(--bg-panel);
+}
+
 .chat-bubble.kind-private_report_lock {
   border-left: 3px solid var(--mana-blue);
   background: var(--bg-card);

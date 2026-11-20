@@ -465,6 +465,64 @@ def test_agent_hud_4_features_and_red_lines_dry_run():
         assert re_asked["executed"] is False and re_asked["requires_approval"] is True
 
 
+def test_big_task_split_batch_review_and_aggregate_dry_run():
+    with tempfile.TemporaryDirectory() as tmp:
+        store = OfficeStore(state_path=Path(tmp) / "big_task_office.json")
+        w1 = store.createagent({
+            "name": "Worker Alpha", "vendor": "VendorA", "model": "m-a",
+            "access_kind": "api", "paid": False, "key_env": "TEST_A_KEY",
+            "base_url": "https://a.invalid/v1", "floor": "worker",
+        })
+        w2 = store.createagent({
+            "name": "Worker Beta", "vendor": "VendorB", "model": "m-b",
+            "access_kind": "cli", "paid": False, "executable": "codex", "floor": "worker",
+        })
+        w3 = store.createagent({
+            "name": "Worker Gamma", "vendor": "VendorC", "model": "m-c",
+            "access_kind": "web", "login_url": "https://example.com/", "floor": "worker",
+        })
+
+        # 1. Split one big task into 3 subtasks across distinct vendors (2 small + 1 code_change)
+        created = store.createbigtask({
+            "title": "重构登录校验并补齐文档",
+            "goal": "先出验收清单，再修复空密码校验，最后汇总变更说明",
+            "raw_steps": "1. 梳理登录接口验收清单\n2. [代码] 修复空密码校验并补 3 个单元测试\n3. 输出三档发布摘要",
+        })
+        parent = created["parent"]
+        subs = created["subtasks"]
+        assert parent["is_parent"] is True and len(subs) == 3
+        assert len({s["assigned_vendor"] for s in subs}) == 3  # distinct-vendor round-robin
+        code_sub = next(s for s in subs if s["requires_code_review"])
+        assert code_sub["reviewer_id"] != code_sub["assigned_to"]
+
+        # 2. Batch dry-run all subtasks (0 spend)
+        batch = store.runbigtasksubtasks({"parent_task_id": parent["id"], "live": False})
+        assert batch["mode"] == "dry_run" and batch["executed_count"] == 3
+
+        # 3. Aggregation must be blocked before code_change subtask passes independent review
+        try:
+            store.aggregatebigtask({"parent_task_id": parent["id"]})
+            raise AssertionError("Big task aggregation must block until code_change subtask passes review")
+        except ValueError:
+            pass
+
+        # 4. Auto code review reads local git diff (0 tokens in dry-run) and passes review
+        repo_root = str(Path(__file__).resolve().parents[1])
+        rev_res = store.runautocodereview({
+            "task_id": code_sub["id"],
+            "workspace_dir": repo_root,
+            "live": False,
+        })
+        assert rev_res["mode"] == "dry_run" and rev_res["review_status"] == "approved"
+
+        # 5. Aggregate succeeds -> parent delivered -> owner accepts -> accepted_done
+        delivered_parent = store.aggregatebigtask({"parent_task_id": parent["id"]})
+        assert delivered_parent["status"] == "delivered"
+        assert "大任务聚合总交付" in delivered_parent["final_delivery_text"]
+        done = store.reviewfinalresult({"task_id": parent["id"], "decision": "verified"})
+        assert done["status"] == "accepted_done"
+
+
 if __name__ == "__main__":
     for name in sorted(dir()):
         if name.startswith("test_"):

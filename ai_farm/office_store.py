@@ -14,6 +14,7 @@ Pure open-source framework:
 """
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
 import json
 import os
 import re
@@ -262,6 +263,9 @@ class OfficeStore:
             t.setdefault("review_status", "pending_review" if t.get("requires_code_review") else "not_needed")
             t.setdefault("review_issues", [])
             t.setdefault("revision_round", 0)
+            t.setdefault("parent_task_id", "")
+            t.setdefault("is_parent", False)
+            t.setdefault("subtask_ids", [])
 
     def _load_or_seed(self) -> None:
         if self.state_path.exists():
@@ -669,7 +673,9 @@ class OfficeStore:
                 "请将具体执行任务派给 1楼免费员工（或留空让员工在群里认领）。"
             )
 
-        task_id = f"TASK-{int(time.time() * 1000) % 1000000}"
+        base_id = f"TASK-{int(time.time() * 1000) % 1000000}"
+        existing_ids = {t["id"] for t in self.state["tasks"]}
+        task_id = base_id if base_id not in existing_ids else f"{base_id}-{len(self.state['tasks']) + 1}"
         goal = (payload.get("goal") or title).strip()
         input_text = (payload.get("input_text") or "见工单说明").strip()
         output_format = (payload.get("output_format") or "按验收标准输出结构化结果，不讲废话").strip()
@@ -719,6 +725,9 @@ class OfficeStore:
             "review_status": "pending_review" if requires_code_review else "not_needed",
             "review_issues": [],
             "revision_round": 0,
+            "parent_task_id": (payload.get("parent_task_id") or "").strip(),
+            "is_parent": bool(payload.get("is_parent", False)),
+            "subtask_ids": list(payload.get("subtask_ids") or []),
             "status": "assigned",
             "worker_reported": False,
             "latest_report_summary": "",
@@ -1921,6 +1930,337 @@ class OfficeStore:
         )
         self.save()
         return {"executed": True, "dry_run": dry_run, "op_type": op_type, "target": target, "approval_id": matched["id"]}
+
+    # ------------------------------------------------------------------
+    # Action 33–36: Big Task Split / Batch Subtasks / Aggregate / Auto Diff Review
+    # ------------------------------------------------------------------
+    def _distinct_vendor_workers(self) -> list[dict[str, Any]]:
+        """Collect ready 1F workers across distinct vendors for balanced round-robin."""
+        picked: list[dict[str, Any]] = []
+        seen: set[str] = set()
+        for a in self.state["agents"]:
+            if a.get("floor") != "worker" or a.get("status") != "ready":
+                continue
+            v = (a.get("vendor") or "").strip().lower()
+            if v and v in seen:
+                continue
+            if v:
+                seen.add(v)
+            picked.append(a)
+        return picked
+
+    def createbigtask(self, payload: dict[str, Any]) -> dict[str, Any]:
+        """Split a large goal into child subtasks across distinct-vendor free workers."""
+        title = (payload.get("title") or "").strip()
+        if not title:
+            raise ValueError("大任务标题不能为空。")
+        goal = (payload.get("goal") or title).strip()
+        chief = self._chief_agent()
+        manager_id = payload.get("manager_id") or chief["id"]
+        try:
+            manager = self._find_agent(manager_id)
+        except KeyError:
+            manager = chief
+
+        raw_subtasks = payload.get("subtasks")
+        raw_steps = (payload.get("raw_steps") or "").strip()
+        specs: list[dict[str, Any]] = []
+
+        if isinstance(raw_subtasks, list) and raw_subtasks:
+            for item in raw_subtasks:
+                if isinstance(item, dict) and (item.get("title") or item.get("goal")):
+                    specs.append(dict(item))
+        elif raw_steps:
+            for idx, ln in enumerate(raw_steps.splitlines(), start=1):
+                clean = ln.strip().lstrip("-•*0123456789.、) ").strip()
+                if not clean:
+                    continue
+                is_code = ("[代码]" in clean or "[code]" in clean.lower() or "改代码" in clean or "修复" in clean or "单测" in clean)
+                clean_title = clean.replace("[代码]", "").replace("[code]", "").replace("[CODE]", "").strip()
+                specs.append({
+                    "title": f"子单 {idx}：{clean_title[:36]}",
+                    "goal": clean_title,
+                    "task_kind": "code_change" if is_code else "small",
+                    "skill_slug": "cheap-code-jobs" if is_code else "",
+                })
+
+        if not specs:
+            specs = [
+                {
+                    "title": f"子单 1：梳理骨架与验收清单 — {title[:18]}",
+                    "goal": f"针对「{goal}」输出精简目录大纲与关键验收点（不超过300字）。",
+                    "task_kind": "small",
+                    "skill_slug": "doc-drafting-frame",
+                },
+                {
+                    "title": f"子单 2：核心代码改动与测试 — {title[:18]}",
+                    "goal": f"按大纲完成「{goal}」的核心实现与边界测试，提交结论+改动文件+测试结果。",
+                    "task_kind": "code_change",
+                    "skill_slug": "cheap-code-jobs",
+                },
+                {
+                    "title": f"子单 3：结果核对与三档摘要 — {title[:18]}",
+                    "goal": f"对照验收标准核对「{goal}」产出，生成一句话结论与要点清单。",
+                    "task_kind": "small",
+                    "skill_slug": "three-tier-summary",
+                },
+            ]
+
+        base_id = f"EPIC-{int(time.time() * 1000) % 1000000}"
+        existing_ids = {t["id"] for t in self.state["tasks"]}
+        parent_id = base_id if base_id not in existing_ids else f"{base_id}-{len(self.state['tasks']) + 1}"
+
+        parent_task: dict[str, Any] = {
+            "id": parent_id,
+            "title": f"🧩 [大任务] {title}",
+            "manager_id": manager["id"],
+            "manager_name": manager["name"],
+            "assigned_to": "",
+            "assigned_name": f"已拆 {len(specs)} 张子单",
+            "assigned_vendor": "多厂商并行",
+            "goal": goal,
+            "input_text": f"共拆解为 {len(specs)} 张子单并行推进。",
+            "output_format": "全部子单结论-only 汇总交付（未重读对话全文）",
+            "acceptance": "全部子单完成汇报，且所有改代码子单通过独立审查后聚合交付。",
+            "rule_footer": "大任务自动拆单：小活直通省额度，改代码子单必走写-审-改闭环。",
+            "skill_slug": "",
+            "task_kind": "small",
+            "requires_code_review": False,
+            "reviewer_id": "",
+            "reviewer_name": "",
+            "review_status": "not_needed",
+            "review_issues": [],
+            "revision_round": 0,
+            "parent_task_id": "",
+            "is_parent": True,
+            "subtask_ids": [],
+            "status": "working",
+            "worker_reported": False,
+            "latest_report_summary": "",
+            "final_delivery_text": "",
+            "usage_log": [],
+            "created_at": _now_iso(),
+        }
+        self.state["tasks"].append(parent_task)
+        self.state["task_messages"][parent_id] = [
+            {
+                "id": f"tmsg-{int(time.time() * 1000)}-p",
+                "task_id": parent_id,
+                "sender_id": manager["id"],
+                "sender_name": manager["name"],
+                "kind": "template_dispatch",
+                "text": f"🧩 **大任务拆解启动** `{parent_id}` · **{title}**\n• 目标：{goal}\n• 子单数量：{len(specs)} 张（按独立厂商轮换派发）",
+                "created_at": _now_iso(),
+            }
+        ]
+
+        workers = self._distinct_vendor_workers()
+        created_subtasks: list[dict[str, Any]] = []
+        for idx, spec in enumerate(specs):
+            assigned_id = spec.get("assigned_to") or (workers[idx % len(workers)]["id"] if workers else "")
+            sub = self.createtask({
+                "title": spec.get("title") or f"子单 {idx + 1}",
+                "manager_id": manager["id"],
+                "assigned_to": assigned_id,
+                "goal": spec.get("goal") or spec.get("title") or goal,
+                "input_text": spec.get("input_text") or f"所属大任务 `{parent_id}`：{goal}",
+                "output_format": spec.get("output_format") or "只输出【结论】+【改动文件】+【测试结果】，不贴全文对话。",
+                "acceptance": spec.get("acceptance") or "结果完整、不编造数据、符合格式要求。",
+                "skill_slug": spec.get("skill_slug") or "",
+                "task_kind": spec.get("task_kind") or "small",
+                "reviewer_id": spec.get("reviewer_id") or "",
+                "parent_task_id": parent_id,
+            })
+            parent_task["subtask_ids"].append(sub["id"])
+            created_subtasks.append(sub)
+
+        lines = "\n".join(
+            f"  {i + 1}. `{s['id']}` {s['title']} → **{s['assigned_name']}**"
+            + (" `[写-审-改]`" if s.get("requires_code_review") else " `[小活]`")
+            for i, s in enumerate(created_subtasks)
+        )
+        self._append_group_msg(
+            sender_id=manager["id"],
+            sender_name=manager["name"],
+            sender_role="manager",
+            kind="big_task_card",
+            task_id=parent_id,
+            text=f"🧩 **大任务一键拆单完成** `{parent_id}` · **{title}**\n已拆成 **{len(created_subtasks)} 张子单** 并跨厂商分派：\n{lines}",
+        )
+        self._record_flight(
+            from_id=manager["id"],
+            from_name=manager["name"],
+            to_id="workers",
+            to_name=f"{len(created_subtasks)} 张子单并行池",
+            kind="dispatch",
+            task_id=parent_id,
+            summary=f"大任务拆单 ({len(created_subtasks)}子单)",
+            channel="父子编排",
+        )
+        self.save()
+        return {"parent": parent_task, "subtasks": created_subtasks}
+
+    def runbigtasksubtasks(self, payload: dict[str, Any]) -> dict[str, Any]:
+        """Batch-run (dry-run or concurrent API/CLI live) all pending subtasks of a parent task."""
+        parent = self._find_task(payload.get("parent_task_id") or payload.get("task_id") or payload.get("id"))
+        if not parent.get("is_parent") or not parent.get("subtask_ids"):
+            raise ValueError("该任务不是包含子单的大任务。")
+        live = bool(payload.get("live", False))
+        workspace_dir = (payload.get("workspace_dir") or "").strip()
+
+        subtasks = [self._find_task(sid) for sid in parent["subtask_ids"] if any(t["id"] == sid for t in self.state["tasks"])]
+        results: list[dict[str, Any]] = []
+
+        if not live:
+            for sub in subtasks:
+                if sub["status"] in ("delivered", "accepted_done"):
+                    results.append({"task_id": sub["id"], "skipped": True, "reason": "已完成"})
+                    continue
+                res = self.runadaptertask({"task_id": sub["id"], "live": False, "workspace_dir": workspace_dir})
+                results.append({"task_id": sub["id"], "mode": "dry_run", "worker": res["worker"]})
+            return {"parent_id": parent["id"], "mode": "dry_run", "executed_count": len(results), "results": results}
+
+        # Live mode: run only API/CLI subtasks concurrently, guide web/desktop subtasks cleanly
+        auto_subs: list[dict[str, Any]] = []
+        for sub in subtasks:
+            if sub["status"] in ("delivered", "accepted_done"):
+                results.append({"task_id": sub["id"], "skipped": True, "reason": "已完成"})
+                continue
+            wid = sub.get("assigned_to") or ""
+            agent = self._find_agent(wid) if wid else None
+            if agent and agent.get("access_kind") in ("web", "subscription", "desktop"):
+                results.append({
+                    "task_id": sub["id"],
+                    "skipped": True,
+                    "reason": f"{agent['name']} 属于{agent['badge']}通道，请点网页/导出.md按钮执行",
+                })
+                continue
+            auto_subs.append(sub)
+
+        def _exec_one(sub_task: dict[str, Any]) -> dict[str, Any]:
+            try:
+                res = self.runadaptertask({"task_id": sub_task["id"], "live": True, "workspace_dir": workspace_dir})
+                return {"task_id": sub_task["id"], "mode": "live", "worker": res["worker"], "ok": True}
+            except Exception as exc:  # noqa: BLE001
+                return {"task_id": sub_task["id"], "mode": "live", "ok": False, "error": str(exc)}
+
+        if auto_subs:
+            with ThreadPoolExecutor(max_workers=min(4, len(auto_subs))) as pool:
+                results.extend(list(pool.map(_exec_one, auto_subs)))
+
+        return {"parent_id": parent["id"], "mode": "live", "executed_count": len(auto_subs), "results": results}
+
+    def runautocodereview(self, payload: dict[str, Any]) -> dict[str, Any]:
+        """Auto-collect local git diff (0 tokens) and run independent reviewer (dry-run or live API/CLI)."""
+        task = self._find_task(payload.get("task_id") or payload.get("id"))
+        if not task.get("requires_code_review"):
+            raise ValueError("该任务为小活，未开启写—审—改闭环。")
+        chief = self._chief_agent()
+        reviewer_id = (payload.get("reviewer_id") or task.get("reviewer_id") or "").strip()
+        reviewer = self._pick_reviewer(
+            assigned_id=task.get("assigned_to") or "",
+            manager=chief,
+            requested_id=reviewer_id,
+        )
+        live = bool(payload.get("live", False))
+        workspace_dir = (payload.get("workspace_dir") or "").strip() or "."
+        diff_info = self.collectgitdiff({"workspace_dir": workspace_dir})
+
+        if not live:
+            sim_reject = bool(payload.get("simulate_reject", False))
+            files_preview = ", ".join(diff_info.get("changed_files") or ["(工作区无改动)"])[:120]
+            issues = (
+                [f"[自动读diff干跑] 请核对改动文件 ({files_preview}) 的边界条件与单测覆盖。"]
+                if sim_reject else []
+            )
+            updated = self.submitcodereview({
+                "task_id": task["id"],
+                "reviewer_id": reviewer["id"],
+                "passed": not sim_reject,
+                "issues": issues,
+                "dry_run": True,
+            })
+            return {
+                "mode": "dry_run",
+                "reviewer": reviewer["name"],
+                "review_status": updated["review_status"],
+                "changed_files": diff_info.get("changed_files", []),
+            }
+
+        if reviewer.get("access_kind") not in ("api", "cli"):
+            raise RuntimeError(
+                f"独立审查者 {reviewer['name']}（{reviewer['badge']}）不是 API/CLI 通道，无法自动真调；"
+                "请切换 API/CLI 审查者，或用干跑/手动填入审查问题清单。"
+            )
+        safe_ws = self._validate_safe_workspace(workspace_dir)
+        adapter = self._build_adapter(reviewer, workspace_dir=safe_ws)
+        review_prompt = (
+            "你是独立代码审查员，只看下方结论摘要和 git diff --stat，不要重写全文代码。\n"
+            f"任务：{task['title']}\n"
+            f"员工结论摘要：\n{task.get('latest_report_summary') or '(尚未提交结论)'}\n"
+            f"本地改动摘要：\n{diff_info['summary']}\n"
+            "如果无阻断问题，仅回复：PASS\n"
+            "如果有问题，每行一条输出精简问题清单（格式：文件:行号 问题描述），绝不贴整文件代码。"
+        )
+        reply = adapter.chat(review_prompt, max_tokens=600)
+        raw = (reply.text or "").strip()
+        is_pass = raw.upper().startswith("PASS") or ("无阻断" in raw and len(raw) < 80)
+        issues_list = [] if is_pass else [ln.strip(" -•\t") for ln in raw.splitlines() if ln.strip()][:12]
+        updated = self.submitcodereview({
+            "task_id": task["id"],
+            "reviewer_id": reviewer["id"],
+            "passed": is_pass,
+            "issues": issues_list,
+            "dry_run": False,
+        })
+        return {
+            "mode": "live",
+            "reviewer": reviewer["name"],
+            "review_status": updated["review_status"],
+            "issues": issues_list,
+        }
+
+    def aggregatebigtask(self, payload: dict[str, Any]) -> dict[str, Any]:
+        """Aggregate all completed & reviewed child subtasks into one parent executive delivery."""
+        parent = self._find_task(payload.get("parent_task_id") or payload.get("task_id") or payload.get("id"))
+        if not parent.get("is_parent") or not parent.get("subtask_ids"):
+            raise ValueError("该任务不是大任务，请使用普通交付。")
+
+        subtasks = [self._find_task(sid) for sid in parent["subtask_ids"] if any(t["id"] == sid for t in self.state["tasks"])]
+        unreviewed = [
+            f"{s['id']}({s['title']})"
+            for s in subtasks
+            if s.get("requires_code_review") and s.get("review_status") != "approved"
+        ]
+        if unreviewed:
+            raise ValueError(
+                f"写—审—改闭环拦截：以下改代码子单尚未通过独立审查，不能聚合总交付：{', '.join(unreviewed)}"
+            )
+
+        force = bool(payload.get("force", False))
+        unreported = [
+            f"{s['id']}({s['title']})"
+            for s in subtasks
+            if not s.get("worker_reported") and s.get("status") not in ("delivered", "accepted_done")
+        ]
+        if unreported and not force:
+            raise ValueError(f"仍有子单尚未提交结论汇报，无法汇总：{', '.join(unreported)}")
+
+        bullet_lines = []
+        for idx, sub in enumerate(subtasks, start=1):
+            conc = (sub.get("latest_report_summary") or "已完成").splitlines()[0][:140]
+            rev_tag = f" · 审查✅({sub.get('reviewer_name')})" if sub.get("requires_code_review") else ""
+            bullet_lines.append(f"{idx}. `{sub['id']}` **{sub['title']}**（{sub['assigned_name']}{rev_tag}）：{conc}")
+            if sub["status"] not in ("delivered", "accepted_done"):
+                sub["status"] = "delivered"
+
+        agg_summary = (
+            f"🧩 **大任务聚合总交付**（共汇总 {len(subtasks)} 张子单结论，未重读任何对话全文）：\n"
+            + "\n".join(bullet_lines)
+        )
+        parent["worker_reported"] = True
+        parent["latest_report_summary"] = agg_summary[:320]
+        return self.deliverfinalresult({"task_id": parent["id"], "summary": agg_summary})
 
     # ------------------------------------------------------------------
     # Internal helpers
