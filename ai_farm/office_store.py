@@ -15,10 +15,13 @@ Pure open-source framework:
 from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor
+import functools
+import hashlib
 import json
 import os
 import re
 import subprocess
+import threading
 import time
 from pathlib import Path
 from typing import Any
@@ -30,6 +33,29 @@ from .skills import SKILLS, analyze_skill_assignments
 
 def _now_iso() -> str:
     return time.strftime("%Y-%m-%d %H:%M:%S")
+
+
+def _locked(fn):
+    """Serialize state read-modify-write under the store's reentrant lock.
+
+    Only fast (no network/subprocess I/O) mutating methods are decorated.
+    Slow orchestration methods (runadaptertask / runbigtasksubtasks /
+    runautocodereview / checklivequota) deliberately stay unlocked across
+    I/O so parallel subtasks never deadlock; their state writes go through
+    locked sub-calls (postmessage / submitcodereview / save).
+    """
+    @functools.wraps(fn)
+    def wrapper(self, *args, **kwargs):
+        with self._lock:
+            return fn(self, *args, **kwargs)
+    return wrapper
+
+
+# Pass / chain circuit breakers (learned from Agent HUD: a message, not the
+# conversation; bounded连续传递 so two models never burn quota arguing forever).
+MAX_REVISION_ROUNDS = 3      # write -> review -> revise reject ceiling
+MAX_DISCUSSION_ROUNDS = 3    # manager roundtable debate ceiling
+MAX_CHAIN_PASS = 10          # cross-agent连续投递 ceiling (HUD default)
 
 
 def _default_agents() -> list[dict[str, Any]]:
@@ -234,6 +260,7 @@ class OfficeStore:
 
     def __init__(self, state_path: Path | None = None):
         self.state_path = state_path or (Path.home() / ".ai-farm" / "office_state.json")
+        self._lock = threading.RLock()
         self.state: dict[str, Any] = {
             "agents": [],
             "skills": [],
@@ -242,6 +269,10 @@ class OfficeStore:
             "task_messages": {},
             "hud_flights": [],
             "pending_approvals": [],
+            "receipts": {},
+            "bus_messages": [],
+            "discussions": {},
+            "savings_ledger": [],
             "settings": {"auto_execute_low_risk": False},
             "example_cursor": 0,
         }
@@ -250,8 +281,16 @@ class OfficeStore:
     def _ensure_runtime_keys(self) -> None:
         self.state.setdefault("hud_flights", [])
         self.state.setdefault("pending_approvals", [])
+        self.state.setdefault("receipts", {})
+        self.state.setdefault("bus_messages", [])
+        self.state.setdefault("discussions", {})
+        self.state.setdefault("savings_ledger", [])
         settings = self.state.setdefault("settings", {})
         settings.setdefault("auto_execute_low_risk", False)
+        settings.setdefault("max_revision_rounds", MAX_REVISION_ROUNDS)
+        settings.setdefault("max_discussion_rounds", MAX_DISCUSSION_ROUNDS)
+        settings.setdefault("max_chain_pass", MAX_CHAIN_PASS)
+        settings.setdefault("discussion_rounds", 1)
         for a in self.state.get("agents", []):
             a.setdefault("tokens_used", 0)
             a.setdefault("session_count", 0)
@@ -266,6 +305,9 @@ class OfficeStore:
             t.setdefault("parent_task_id", "")
             t.setdefault("is_parent", False)
             t.setdefault("subtask_ids", [])
+            t.setdefault("mode", "solo")
+            t.setdefault("circuit_breaker", "")
+            t.setdefault("depends_on", [])
 
     def _load_or_seed(self) -> None:
         if self.state_path.exists():
@@ -280,12 +322,55 @@ class OfficeStore:
         self.reset_to_seed()
 
     def save(self) -> None:
-        self.state_path.parent.mkdir(parents=True, exist_ok=True)
-        self.state_path.write_text(
-            json.dumps(self.state, ensure_ascii=False, indent=2),
-            encoding="utf-8",
-        )
+        """Atomically persist state under the reentrant lock.
 
+        Write to a temp file in the same directory then os.replace() so a
+        concurrent reader (or a crash mid-write) never sees a torn JSON file.
+        """
+        with self._lock:
+            self.state_path.parent.mkdir(parents=True, exist_ok=True)
+            payload = json.dumps(self.state, ensure_ascii=False, indent=2)
+            tmp_path = self.state_path.with_name(
+                f".{self.state_path.name}.{os.getpid()}.{threading.get_ident()}.tmp"
+            )
+            try:
+                tmp_path.write_text(payload, encoding="utf-8")
+                os.replace(tmp_path, self.state_path)
+            finally:
+                if tmp_path.exists():
+                    try:
+                        tmp_path.unlink()
+                    except OSError:
+                        pass
+
+    # ------------------------------------------------------------------
+    # Idempotent request receipts (SHA-256 fingerprint + receipt record).
+    # A double-click or a network retry must NOT dispatch the same work
+    # order twice nor burn a free worker's quota twice.
+    # ------------------------------------------------------------------
+    def _request_fingerprint(self, action: str, payload: dict[str, Any]) -> str:
+        canonical = json.dumps(
+            {"action": action, "payload": payload},
+            ensure_ascii=False, sort_keys=True, default=str,
+        )
+        return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+    def _find_receipt(self, fingerprint: str) -> dict[str, Any] | None:
+        return self.state.get("receipts", {}).get(fingerprint)
+
+    def _store_receipt(self, fingerprint: str, action: str, result_ref: dict[str, Any]) -> None:
+        receipts = self.state.setdefault("receipts", {})
+        receipts[fingerprint] = {
+            "fingerprint": fingerprint,
+            "action": action,
+            "created_at": _now_iso(),
+            **result_ref,
+        }
+        if len(receipts) > 300:
+            for k in list(receipts.keys())[:len(receipts) - 300]:
+                receipts.pop(k, None)
+
+    @_locked
     def reset_to_seed(self) -> dict[str, Any]:
         self.state["agents"] = _default_agents()
         self.state["skills"] = [
@@ -305,7 +390,17 @@ class OfficeStore:
         self.state["task_messages"] = {}
         self.state["hud_flights"] = []
         self.state["pending_approvals"] = []
-        self.state["settings"] = {"auto_execute_low_risk": False}
+        self.state["receipts"] = {}
+        self.state["bus_messages"] = []
+        self.state["discussions"] = {}
+        self.state["savings_ledger"] = []
+        self.state["settings"] = {
+            "auto_execute_low_risk": False,
+            "max_revision_rounds": MAX_REVISION_ROUNDS,
+            "max_discussion_rounds": MAX_DISCUSSION_ROUNDS,
+            "max_chain_pass": MAX_CHAIN_PASS,
+            "discussion_rounds": 1,
+        }
         self.state["example_cursor"] = 0
         self.state["group_messages"] = [
             {
@@ -693,6 +788,26 @@ class OfficeStore:
             task_kind = "code_change" if skill_slug in CODE_REVIEW_SKILL_SLUGS else "small"
         requires_code_review = task_kind == "code_change"
 
+        # Idempotent work-order receipt: identical dispatch content returns the
+        # existing task instead of creating a duplicate (double-click / retry safe).
+        parent_task_id = (payload.get("parent_task_id") or "").strip()
+        fp = self._request_fingerprint("createtask", {
+            "title": title, "goal": goal, "input_text": input_text,
+            "output_format": output_format, "acceptance": acceptance,
+            "manager_id": manager["id"],
+            "assigned_to": assigned_agent["id"] if assigned_agent else "",
+            "parent_task_id": parent_task_id, "task_kind": task_kind,
+            "skill_slug": skill_slug,
+            "idempotency_key": payload.get("idempotency_key") or "",
+        })
+        if not payload.get("force_new"):
+            prior = self._find_receipt(fp)
+            if prior and prior.get("task_id"):
+                try:
+                    return self._find_task(prior["task_id"])
+                except KeyError:
+                    pass
+
         reviewer_id = ""
         reviewer_name = ""
         if requires_code_review:
@@ -725,9 +840,12 @@ class OfficeStore:
             "review_status": "pending_review" if requires_code_review else "not_needed",
             "review_issues": [],
             "revision_round": 0,
-            "parent_task_id": (payload.get("parent_task_id") or "").strip(),
+            "parent_task_id": parent_task_id,
             "is_parent": bool(payload.get("is_parent", False)),
             "subtask_ids": list(payload.get("subtask_ids") or []),
+            "mode": (payload.get("mode") or "solo").strip().lower(),
+            "circuit_breaker": "",
+            "depends_on": list(payload.get("depends_on") or []),
             "status": "assigned",
             "worker_reported": False,
             "latest_report_summary": "",
@@ -786,6 +904,7 @@ class OfficeStore:
             summary=f"派单: {title[:24]}",
             channel=self._channel_label(assigned_agent) if assigned_agent else "工作台广播",
         )
+        self._store_receipt(fp, "createtask", {"task_id": task_id})
         self.save()
         return task
 
@@ -1002,6 +1121,7 @@ class OfficeStore:
         if passed:
             task["review_status"] = "approved"
             task["review_issues"] = []
+            task["circuit_breaker"] = ""
             task["status"] = "working"
             msg_text = (
                 f"✅ **独立代码审查通过**（审查者：{reviewer['name']} · 写代码与审查已分开）\n"
@@ -1027,11 +1147,40 @@ class OfficeStore:
                 channel=self._channel_label(reviewer),
             )
         else:
+            max_rounds = int(self.state.get("settings", {}).get("max_revision_rounds", MAX_REVISION_ROUNDS))
+            current_round = int(task.get("revision_round") or 0)
             task["review_status"] = "changes_requested"
             task["review_issues"] = issues
-            task["revision_round"] = int(task.get("revision_round") or 0) + 1
-            task["status"] = "rejected"
             checklist_md = "\n".join(f"  {idx + 1}. {item}" for idx, item in enumerate(issues))
+            if current_round >= max_rounds:
+                # Pass circuit breaker: stop the write->review->revise ping-pong
+                # so two models never burn quota arguing forever. Escalate to the
+                # 2F manager / owner instead of looping again.
+                task["circuit_breaker"] = "revision_limit"
+                task["status"] = "rejected"
+                esc_name = task.get("manager_name") or "总管"
+                breaker_text = (
+                    f"⛔ **写—审—改熔断（已达 {max_rounds} 轮打回上限）** `{task['id']}`\n"
+                    f"• 审查者 {reviewer['name']} 第 {current_round + 1} 次打回被拦截，自动停下。\n"
+                    f"• 升级给 **@{esc_name}** / 主人裁决，不再继续烧额度互改。\n"
+                    f"• 遗留问题清单：\n{checklist_md}"
+                )
+                self._append_task_msg(task["id"], sender_id=reviewer["id"], sender_name=reviewer["name"], kind="circuit_breaker", text=breaker_text)
+                self._append_group_msg(
+                    sender_id=reviewer["id"], sender_name=reviewer["name"],
+                    sender_role=reviewer.get("floor", "manager"), kind="circuit_breaker",
+                    task_id=task["id"], text=breaker_text,
+                )
+                self._record_flight(
+                    from_id=reviewer["id"], from_name=reviewer["name"],
+                    to_id=task.get("manager_id") or "owner", to_name=esc_name,
+                    kind="circuit_breaker", task_id=task["id"],
+                    summary=f"打回超限熔断 ({max_rounds}轮)", channel=self._channel_label(reviewer),
+                )
+                self.save()
+                return task
+            task["revision_round"] = current_round + 1
+            task["status"] = "rejected"
             msg_text = (
                 f"↩ **独立审查打回重做（第 {task['revision_round']} 轮 · 只回问题清单，不回全文）**\n"
                 f"• 审查者：{reviewer['name']} → 退回给：{task['assigned_name']}\n"
@@ -1417,6 +1566,23 @@ class OfficeStore:
             )
         workspace_dir = self._validate_safe_workspace(payload.get("workspace_dir") or worker.get("workspace") or ".")
 
+        # Idempotent live execution: a retry / double-click of the SAME task at the
+        # SAME revision round must not call the API (burn free quota) twice.
+        live_fp = self._request_fingerprint("runadaptertask_live", {
+            "task_id": task["id"],
+            "worker_id": worker["id"],
+            "workspace_dir": workspace_dir,
+            "revision_round": int(task.get("revision_round") or 0),
+            "idempotency_key": payload.get("idempotency_key") or "",
+        })
+        prior_live = self._find_receipt(live_fp)
+        if prior_live and prior_live.get("mode") == "live":
+            return {
+                "mode": "live", "worker": prior_live.get("worker", worker["name"]),
+                "reply": prior_live.get("reply", ""), "usage": prior_live.get("usage", {}),
+                "attempts": prior_live.get("attempts", 1), "idempotent_replay": True,
+            }
+
         # Build fallback chain: current worker -> other ready API/CLI workers -> ready API/CLI managers
         worker_candidates: list[dict[str, Any]] = [worker]
         seen_vendors = {(worker.get("vendor") or "").lower()}
@@ -1477,11 +1643,6 @@ class OfficeStore:
             detail = "\n".join(attempts_log) if attempts_log else str(last_err)
             raise RuntimeError(f"员工降级与经理升级均未成功：\n{detail}")
 
-        if chosen_agent["id"] != worker["id"]:
-            task["assigned_to"] = chosen_agent["id"]
-            task["assigned_name"] = chosen_agent["name"]
-            task["assigned_vendor"] = chosen_agent["vendor"]
-
         usage_info = {
             "live": True,
             "model": reply.model,
@@ -1489,7 +1650,6 @@ class OfficeStore:
             "rate_limit_remaining": reply.rate_limit_remaining,
             "attempts": failures + 1,
         }
-        task.setdefault("usage_log", []).append(usage_info)
         # Accumulate real observed token count only (never fabricate when missing)
         tok_total = 0
         if isinstance(reply.usage, dict):
@@ -1497,21 +1657,33 @@ class OfficeStore:
                 reply.usage.get("total_tokens")
                 or (int(reply.usage.get("prompt_tokens") or 0) + int(reply.usage.get("completion_tokens") or 0))
             )
-        chosen_agent["tokens_used"] = int(chosen_agent.get("tokens_used") or 0) + tok_total
-        if reply.rate_limit_remaining:
-            chosen_agent["quota_note"] = f"上次调用响应头剩余次数：{json.dumps(reply.rate_limit_remaining, ensure_ascii=False)}"
         fallback_trace = (" | ".join(attempts_log)) if attempts_log else "直调命中"
         conc_line = (reply.text or "").strip().splitlines()[0][:200] if (reply.text or "").strip() else "已完成"
-        self.postmessage({
-            "task_id": task["id"],
-            "sender_id": chosen_agent["id"],
-            "conclusion": f"[{chosen_agent['name']} ({reply.model})] {conc_line}",
-            "changed_files": ["见本地工作区 git diff"],
-            "test_result": f"Token={tok_total} | 调度={fallback_trace}",
-            "diff_summary": (reply.text or "")[:300],
-            "is_delivery": True,
-            "usage": usage_info,
-        })
+        # Brief critical section: the network call above ran lock-free so parallel
+        # subtasks stay concurrent; only the shared-state writes are serialized.
+        with self._lock:
+            if chosen_agent["id"] != worker["id"]:
+                task["assigned_to"] = chosen_agent["id"]
+                task["assigned_name"] = chosen_agent["name"]
+                task["assigned_vendor"] = chosen_agent["vendor"]
+            task.setdefault("usage_log", []).append(usage_info)
+            chosen_agent["tokens_used"] = int(chosen_agent.get("tokens_used") or 0) + tok_total
+            if reply.rate_limit_remaining:
+                chosen_agent["quota_note"] = f"上次调用响应头剩余次数：{json.dumps(reply.rate_limit_remaining, ensure_ascii=False)}"
+            self._store_receipt(live_fp, "runadaptertask_live", {
+                "mode": "live", "worker": chosen_agent["name"], "task_id": task["id"],
+                "reply": reply.text, "usage": usage_info, "attempts": failures + 1,
+            })
+            self.postmessage({
+                "task_id": task["id"],
+                "sender_id": chosen_agent["id"],
+                "conclusion": f"[{chosen_agent['name']} ({reply.model})] {conc_line}",
+                "changed_files": ["见本地工作区 git diff"],
+                "test_result": f"Token={tok_total} | 调度={fallback_trace}",
+                "diff_summary": (reply.text or "")[:300],
+                "is_delivery": True,
+                "usage": usage_info,
+            })
         return {"mode": "live", "worker": chosen_agent["name"], "reply": reply.text, "usage": usage_info, "attempts": failures + 1}
 
     def checklivequota(self, payload: dict[str, Any]) -> dict[str, Any]:
@@ -1962,6 +2134,24 @@ class OfficeStore:
         except KeyError:
             manager = chief
 
+        big_fp = self._request_fingerprint("createbigtask", {
+            "title": title, "goal": goal,
+            "raw_steps": (payload.get("raw_steps") or "").strip(),
+            "subtasks": payload.get("subtasks") or [],
+            "manager_id": manager["id"],
+            "idempotency_key": payload.get("idempotency_key") or "",
+        })
+        if not payload.get("force_new"):
+            prior_big = self._find_receipt(big_fp)
+            if prior_big and prior_big.get("parent_id"):
+                try:
+                    par = self._find_task(prior_big["parent_id"])
+                    subs = [self._find_task(sid) for sid in par.get("subtask_ids", [])
+                            if any(t["id"] == sid for t in self.state["tasks"])]
+                    return {"parent": par, "subtasks": subs, "idempotent_replay": True}
+                except KeyError:
+                    pass
+
         raw_subtasks = payload.get("subtasks")
         raw_steps = (payload.get("raw_steps") or "").strip()
         specs: list[dict[str, Any]] = []
@@ -2034,6 +2224,9 @@ class OfficeStore:
             "parent_task_id": "",
             "is_parent": True,
             "subtask_ids": [],
+            "mode": (payload.get("mode") or "split").strip().lower(),
+            "circuit_breaker": "",
+            "depends_on": [],
             "status": "working",
             "worker_reported": False,
             "latest_report_summary": "",
@@ -2097,6 +2290,7 @@ class OfficeStore:
             summary=f"大任务拆单 ({len(created_subtasks)}子单)",
             channel="父子编排",
         )
+        self._store_receipt(big_fp, "createbigtask", {"parent_id": parent_id})
         self.save()
         return {"parent": parent_task, "subtasks": created_subtasks}
 
@@ -2410,3 +2604,26 @@ class OfficeStore:
             raise ValueError(f"未知的办公室动作: {action_name}")
         fn = getattr(self, name)
         return fn() if name in no_arg_actions else fn(payload)
+
+
+# ----------------------------------------------------------------------
+# Concurrency guard: serialize every fast state-mutating action under the
+# store's reentrant lock. Slow I/O actions (runadaptertask, runbigtasksubtasks,
+# runautocodereview, checklivequota, syncprofiles, collectgitdiff) are
+# deliberately EXCLUDED so the parallel subtask pool never deadlocks holding
+# the lock across a network/subprocess call; their state writes are protected
+# by the locked sub-calls they make (postmessage / submitcodereview / save).
+# ----------------------------------------------------------------------
+_LOCKED_METHODS = (
+    "loadsampleteam", "createagent", "updateagent", "moveagent", "deleteagent",
+    "setagentquota", "postgroupmessage", "createtask", "seedexampletask",
+    "claimtask", "postmessage", "submitcodereview", "updatetaskstatus",
+    "reassigntask", "deletetask", "deliverfinalresult", "reviewfinalresult",
+    "createskill", "updateskill", "deleteskill", "setagentskill",
+    "applyskillassignments", "exporttaskmd", "gettaskprompt", "toggleautoexecute",
+    "requestapproval", "resolveapproval", "executecriticalop", "createbigtask",
+    "aggregatebigtask",
+)
+for _method_name in _LOCKED_METHODS:
+    setattr(OfficeStore, _method_name, _locked(getattr(OfficeStore, _method_name)))
+del _method_name

@@ -523,6 +523,137 @@ def test_big_task_split_batch_review_and_aggregate_dry_run():
         assert done["status"] == "accepted_done"
 
 
+class CountingAdapter:
+    vendor = "Count"
+    model_id = "count-1"
+    access_kind = "api"
+
+    def __init__(self):
+        self.calls = 0
+
+    def chat(self, prompt, max_tokens=1000):
+        self.calls += 1
+        return AgentReply(text="ok", model="count-1", usage={"total_tokens": 7})
+
+    def check_quota(self):
+        return Quota(kind="api", percent_remaining=50.0)
+
+
+def test_p0_concurrent_writes_no_lost_updates_and_atomic_file():
+    with tempfile.TemporaryDirectory() as tmp:
+        path = Path(tmp) / "office.json"
+        store = OfficeStore(state_path=path)
+        errors = []
+
+        def recruit(i):
+            try:
+                store.createagent({
+                    "name": f"W{i}", "vendor": f"Vendor{i}", "model": f"m{i}",
+                    "access_kind": "api", "key_env": f"K{i}_KEY",
+                    "base_url": f"https://v{i}.invalid/v1", "floor": "worker",
+                })
+            except Exception as e:  # noqa: BLE001
+                errors.append(e)
+
+        threads = [threading.Thread(target=recruit, args=(i,)) for i in range(12)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+        assert not errors, errors
+        assert len(store.listagents()["agents"]) == 13  # chief + 12, no lost updates
+        json.loads(path.read_text(encoding="utf-8"))  # never a torn file
+        reloaded = OfficeStore(state_path=path)
+        assert len(reloaded.listagents()["agents"]) == 13
+
+
+def test_p0_parallel_big_task_subtasks_no_deadlock():
+    with tempfile.TemporaryDirectory() as tmp:
+        path = Path(tmp) / "office.json"
+        store = OfficeStore(state_path=path)
+        for i in range(3):
+            store.createagent({
+                "name": f"API W{i}", "vendor": f"ParVendor{i}", "model": f"pm{i}",
+                "access_kind": "api", "key_env": f"PAR{i}_KEY",
+                "base_url": f"https://par{i}.invalid/v1", "floor": "worker",
+            })
+        store._build_adapter = lambda agent, workspace_dir=".": FakeAdapter()
+        created = store.createbigtask({
+            "title": "并行压测", "goal": "三个小活并行",
+            "raw_steps": "1. 翻译短句\n2. 整理名单\n3. 生成摘要",
+        })
+        parent = created["parent"]
+        res = store.runbigtasksubtasks({"parent_task_id": parent["id"], "live": True})
+        assert res["mode"] == "live" and res["executed_count"] == 3
+        assert all(r.get("ok") for r in res["results"] if not r.get("skipped"))
+        subs = [store._find_task(sid) for sid in parent["subtask_ids"]]
+        assert all(s["worker_reported"] for s in subs)
+        json.loads(path.read_text(encoding="utf-8"))
+
+
+def test_p0_idempotent_work_order_receipts():
+    with tempfile.TemporaryDirectory() as tmp:
+        store = OfficeStore(state_path=Path(tmp) / "office.json")
+        w = store.createagent({
+            "name": "Idem W", "vendor": "IdemV", "model": "im",
+            "access_kind": "api", "key_env": "IDEM_KEY",
+            "base_url": "https://idem.invalid/v1", "floor": "worker",
+        })
+        payload = {"title": "重复点击工单", "goal": "只派一遍", "assigned_to": w["id"], "task_kind": "small"}
+        t1 = store.createtask(payload)
+        t2 = store.createtask(dict(payload))
+        assert t1["id"] == t2["id"]
+        assert len([t for t in store.listtasks()["tasks"] if t["title"] == "重复点击工单"]) == 1
+        assert any(len(fp) == 64 for fp in store.state["receipts"])  # SHA-256 hex
+
+        b1 = store.createbigtask({"title": "重复大任务", "raw_steps": "1. 甲\n2. 乙"})
+        b2 = store.createbigtask({"title": "重复大任务", "raw_steps": "1. 甲\n2. 乙"})
+        assert b1["parent"]["id"] == b2["parent"]["id"]
+
+        counter = CountingAdapter()
+        store._build_adapter = lambda agent, workspace_dir=".": counter
+        task = store.createtask({"title": "真调一次", "assigned_to": w["id"], "task_kind": "small", "force_new": True})
+        store.runadaptertask({"task_id": task["id"], "live": True})
+        r2 = store.runadaptertask({"task_id": task["id"], "live": True})
+        assert counter.calls == 1  # quota burned once, not twice
+        assert r2.get("idempotent_replay") is True
+        assert w["tokens_used"] == 7  # real tokens counted exactly once
+
+
+def test_p0_revision_circuit_breaker():
+    with tempfile.TemporaryDirectory() as tmp:
+        store = OfficeStore(state_path=Path(tmp) / "office.json")
+        coder = store.createagent({
+            "name": "CB Coder", "vendor": "CBV1", "model": "cb1",
+            "access_kind": "api", "key_env": "CB1_KEY",
+            "base_url": "https://cb1.invalid/v1", "floor": "worker",
+        })
+        reviewer = store.createagent({
+            "name": "CB Reviewer", "vendor": "CBV2", "model": "cb2",
+            "access_kind": "cli", "executable": "codex", "floor": "worker",
+        })
+        store.state["settings"]["max_revision_rounds"] = 1
+        task = store.createtask({
+            "title": "熔断测试", "assigned_to": coder["id"],
+            "task_kind": "code_change", "reviewer_id": reviewer["id"],
+        })
+        store.postmessage({"task_id": task["id"], "sender_id": coder["id"],
+                           "conclusion": "初版", "changed_files": ["x.py"], "is_delivery": True})
+        r1 = store.submitcodereview({"task_id": task["id"], "reviewer_id": reviewer["id"],
+                                     "passed": False, "issues": ["x.py:1 问题A"]})
+        assert r1["revision_round"] == 1 and r1["circuit_breaker"] == ""
+        r2 = store.submitcodereview({"task_id": task["id"], "reviewer_id": reviewer["id"],
+                                     "passed": False, "issues": ["x.py:2 问题B"]})
+        assert r2["circuit_breaker"] == "revision_limit"
+        assert r2["revision_round"] == 1  # stopped at ceiling, no further increment
+        assert any(m["kind"] == "circuit_breaker" for m in store.listgroupmessages())
+        try:
+            store.deliverfinalresult({"task_id": task["id"]})
+            raise AssertionError("breaker-tripped task must still block delivery")
+        except ValueError:
+            pass
+
+
 if __name__ == "__main__":
     for name in sorted(dir()):
         if name.startswith("test_"):
