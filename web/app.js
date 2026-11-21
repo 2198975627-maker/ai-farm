@@ -882,23 +882,19 @@ function renderGroupChat() {
   renderTaskBoard();
   const stream = document.getElementById("groupChatStream");
   const nearBottom = stream.scrollHeight - stream.scrollTop - stream.clientHeight < 100;
-  const openMessages = new Set([...stream.querySelectorAll('details[data-message][open]')].map(el => el.dataset.message));
   stream.innerHTML = APP_STATE.groupMessages.map(msg => {
     const isOwner = msg.sender_id === "owner" || msg.sender_id === "gao";
     const kind = msg.kind || 'chat';
     const task = msg.task_id ? APP_STATE.tasks.find(t => t.id === msg.task_id) : null;
-    const eventName = ({ task_card: '任务已发布', big_task_card: '大任务已拆分', private_report_lock: '收到私聊汇报', final_delivery_card: '结果已交付' })[kind];
-    const senderIcon = ({ task_card: 'box', big_task_card: 'users', private_report_lock: 'lock', final_delivery_card: 'check', error: 'alert', bus_error: 'alert' })[kind] || (isOwner ? 'user' : 'chat');
-    const fullText = formatChatTextWithMentions(msg.text || '');
+    const senderIcon = ({ task_card: 'box', big_task_card: 'users', private_report_lock: 'lock', final_delivery_card: 'check', error: 'alert', bus_error: 'alert', automation_status: 'check' })[kind] || (isOwner ? 'user' : 'chat');
+    const bodyText = kind === 'private_report_lock' && task
+      ? `${stripEmoji(msg.sender_name)} 已提交结论（${task.title}）`
+      : (msg.text || '');
+    const fullText = formatChatTextWithMentions(bodyText);
     return `<article class="chat-bubble ${isOwner ? 'from-gao' : ''} kind-${escapeHTML(kind)}">
       <div class="bubble-header"><span class="bubble-sender">${icon(senderIcon)}${escapeHTML(stripEmoji(msg.sender_name))}</span><span>${escapeHTML(msg.created_at || '')}</span></div>
-      ${task && eventName ? `<div class="message-record">
-        <div class="message-record-meta">${eventName} · ${escapeHTML(task.id)}</div><h3>${escapeHTML(task.title)}</h3>
-        <span class="task-state" data-status="${escapeHTML(task.status)}">${escapeHTML(taskStatusLabel(task.status))}</span>
-        <details class="message-full" data-message="${escapeHTML(msg.id)}" ${openMessages.has(String(msg.id)) ? 'open' : ''}><summary>查看完整消息</summary><div class="bubble-body">${fullText}</div></details>
-        <div class="card-actions-bar"><button class="btn btn-ghost" onclick="openTaskPrivateThread('${escapeHTML(task.id)}')">打开任务 ${icon('chevron')}</button></div>
-        ${renderDiscussionThread(task.id)}
-      </div>` : `<div class="bubble-body">${fullText}</div>`}
+      <div class="bubble-body">${fullText}</div>
+      ${task ? `<div class="bubble-inline-action"><span class="task-state" data-status="${escapeHTML(task.status)}">${escapeHTML(taskStatusLabel(task.status))}</span><button type="button" class="bubble-task-link" onclick="openTaskPrivateThread('${escapeHTML(task.id)}')">查看任务 ${escapeHTML(task.id)} →</button></div>` : ''}
     </article>`;
   }).join("");
   if (nearBottom) stream.scrollTop = stream.scrollHeight;
