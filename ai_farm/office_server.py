@@ -4,6 +4,7 @@ from __future__ import annotations
 import json
 import mimetypes
 import secrets
+import time
 from http.cookies import SimpleCookie
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -94,6 +95,45 @@ class OfficeHTTPHandler(BaseHTTPRequestHandler):
         self.send_header("Access-Control-Allow-Headers", "Content-Type, Authorization, X-Farm-CSRF")
         self.end_headers()
 
+    def _events(self, principal):
+        self.access.require_owner(principal)
+        with self.store._lock:
+            if self.server.event_clients >= 8:
+                self._json(429, {"ok": False, "error": "Too many open event streams"})
+                return
+            self.server.event_clients += 1
+        try:
+            self.send_response(200)
+            self.send_header("Content-Type", "text/event-stream; charset=utf-8")
+            self.send_header("Cache-Control", "no-store")
+            self.send_header("X-Content-Type-Options", "nosniff")
+            self.end_headers()
+            self.connection.settimeout(15)
+            seen = -1
+            while True:
+                with self.access.lock:
+                    self.access._revalidate(principal)
+                    remaining = principal["expires"] - time.monotonic()
+                with self.store._state_events:
+                    if self.server.events_closed:
+                        return
+                    if seen == self.store._state_revision:
+                        self.store._state_events.wait(min(30, max(0, remaining)))
+                    if self.server.events_closed:
+                        return
+                    revision = self.store._state_revision
+                with self.access.lock:
+                    self.access._revalidate(principal)
+                packet = (f"event: state\ndata: {revision}\n\n" if revision != seen else ": keep-alive\n\n")
+                self.wfile.write(packet.encode("utf-8"))
+                self.wfile.flush()
+                seen = revision
+        except (AccessDenied, OSError):
+            return
+        finally:
+            with self.store._lock:
+                self.server.event_clients -= 1
+
     def do_GET(self):
         try:
             self._origin()
@@ -107,6 +147,8 @@ class OfficeHTTPHandler(BaseHTTPRequestHandler):
                     self._json(200, {"ok": True, "connections": self.access.connections(principal)})
                 elif path == "/api/state":
                     self._json(200, {"ok": True, **self.access.snapshot(principal)})
+                elif path == "/api/events":
+                    self._events(principal)
                 else:
                     self._json(404, {"ok": False, "error": "Unknown endpoint"})
                 return
@@ -192,7 +234,15 @@ def create_server(host: str = "127.0.0.1", port: int = 8765, state_path: Path | 
 
     BoundHandler.store = store
     BoundHandler.access = OfficeAccess(store)
-    server = ThreadingHTTPServer((host, port), BoundHandler)
+    class OfficeServer(ThreadingHTTPServer):
+        def server_close(self):
+            # Revoke/wake waiters before ThreadingMixIn joins request threads.
+            try:
+                BoundHandler.access.collaboration.close()
+            finally:
+                super().server_close()
+
+    server = OfficeServer((host, port), BoundHandler)
     server.access = BoundHandler.access
     return server
 

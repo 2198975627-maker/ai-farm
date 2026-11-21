@@ -28,6 +28,7 @@ import os
 import re
 import sys
 import tempfile
+import threading
 import urllib.error
 import urllib.request
 from pathlib import Path
@@ -142,6 +143,28 @@ for _tool in TOOLS:
             _property["description"] = "Must match the authenticated member; cannot impersonate another agent."
 
 
+from .collaboration_service import ACTION_FIELDS
+
+for _action, (_required, _fields) in ACTION_FIELDS.items():
+    TOOLS.append({
+        "name": "farm_" + _action,
+        "description": (
+            "Collaboration within the credential's bound task scope. Identity comes from the member credential. "
+            "Owner-only connection/room/execute/close/resolve actions reject member credentials. "
+            "Only owner or room supervisor can authorize. Active members cannot be auto-woken. "
+            "Wait is one bounded condition wait; cancel via notifications/cancelled or "
+            "farm_collabcancelwait with the same wait_id (no polling)."
+        ),
+        "inputSchema": {"type": "object", "required": _required, "additionalProperties": False,
+                        "properties": {k: {"type": v, **({"items": {"type": "string"}} if v == "array" else {})}
+                                       for k, v in _fields.items()}},
+    })
+    if "agent_id" in _fields:
+        TOOLS[-1]["inputSchema"]["properties"]["agent_id"]["description"] = (
+            "Owner-only selection of a registered scoped target; members cannot impersonate another agent."
+        )
+
+
 class CoreBackend:
     """In-process backend for explicitly supplied test stores, never production."""
 
@@ -196,7 +219,8 @@ class HTTPBackend:
                 headers={"Authorization": f"Bearer {self._token}", "Content-Type": "application/json"},
                 method="GET" if payload is None else "POST",
             )
-            with self._opener.open(req, timeout=10 if payload is None else 20) as resp:
+            timeout = 310 if payload and payload.get("action") == "collabwait" else (10 if payload is None else 20)
+            with self._opener.open(req, timeout=timeout) as resp:
                 if not 200 <= resp.status < 300:
                     raise RuntimeError("Unexpected office response")
                 data = json.loads(resp.read().decode("utf-8"))
@@ -226,10 +250,12 @@ class FarmMCPRelay:
         self.backend = backend
 
     def handle_request(self, req: dict[str, Any]) -> dict[str, Any] | None:
+        if not isinstance(req, dict):
+            return self._error(None, -32600, "Invalid request")
         method = req.get("method", "")
         req_id = req.get("id")
         params = req.get("params") or {}
-        if method == "notifications/initialized":
+        if method in ("notifications/initialized", "notifications/cancelled"):
             return None
         try:
             if method == "initialize":
@@ -245,11 +271,13 @@ class FarmMCPRelay:
             else:
                 return self._error(req_id, -32601, "Method not found")
             return {"jsonrpc": "2.0", "id": req_id, "result": result}
-        except Exception as exc:  # noqa: BLE001
-            return self._error(req_id, -32000, str(exc))
+        except Exception:  # Never reflect local paths, secrets or raw exceptions.
+            return self._error(req_id, -32000, "Office tool failed; check permission and outcome before retrying")
 
     def _call_tool(self, name: str, args: dict[str, Any]) -> dict[str, Any]:
-        if name == "farm_list_agents":
+        if name.startswith("farm_collab") and name[5:] in ACTION_FIELDS:
+            data = self.backend.action(name[5:], args)
+        elif name == "farm_list_agents":
             snap = self.backend.snapshot()
             agents = snap.get("agents", {}).get("agents", [])
             data: Any = {
@@ -310,6 +338,72 @@ class FarmMCPRelay:
             raise ValueError("Unknown MCP tool")
         return {"content": [{"type": "text", "text": json.dumps(data, ensure_ascii=False, indent=2)}], "isError": False}
 
+    def serve_stdio(self, source, sink):
+        """Only waits run concurrently so stdin remains able to receive cancellation."""
+        lock = threading.RLock()
+        waits = {}
+
+        def emit(response):
+            if response is not None:
+                with lock:
+                    sink.write(json.dumps(response, ensure_ascii=False) + "\n")
+                    sink.flush()
+
+        def cancel(wait_id):
+            try:
+                self.backend.action("collabcancelwait", {"wait_id": wait_id})
+            except Exception:
+                pass
+
+        def waiting(request, request_id):
+            try:
+                emit(self.handle_request(request))
+            finally:
+                with lock:
+                    waits.pop(request_id, None)
+
+        try:
+            for line in source:
+                if not line.strip():
+                    continue
+                try:
+                    request = json.loads(line)
+                except (ValueError, RecursionError):
+                    emit(self._error(None, -32700, "Invalid JSON"))
+                    continue
+                if not isinstance(request, dict):
+                    emit(self._error(None, -32600, "Invalid request"))
+                    continue
+                params = request.get("params") or {}
+                if not isinstance(params, dict):
+                    emit(self._error(request.get("id"), -32602, "Invalid parameters"))
+                    continue
+                if request.get("method") == "notifications/cancelled":
+                    request_id = params.get("requestId")
+                    with lock:
+                        wait_id = waits.get(request_id) if type(request_id) in (str, int) else None
+                    if wait_id is not None:
+                        cancel(wait_id)
+                    continue
+                args = params.get("arguments") or {}
+                if request.get("method") == "tools/call" and params.get("name") == "farm_collabwait":
+                    request_id = request.get("id")
+                    wait_id = args.get("wait_id") if isinstance(args, dict) else None
+                    with lock:
+                        if (type(request_id) not in (str, int) or not isinstance(wait_id, str)
+                                or request_id in waits or len(waits) >= 8):
+                            emit(self._error(request_id, -32602, "Invalid or excessive wait request"))
+                            continue
+                        waits[request_id] = wait_id
+                    threading.Thread(target=waiting, args=(request, request_id), daemon=True).start()
+                else:
+                    emit(self.handle_request(request))
+        finally:
+            with lock:
+                pending = list(waits.values())
+            for wait_id in pending:
+                cancel(wait_id)
+
     @staticmethod
     def _error(req_id: Any, code: int, message: str) -> dict[str, Any]:
         return {"jsonrpc": "2.0", "id": req_id, "error": {"code": code, "message": message}}
@@ -347,19 +441,7 @@ def main() -> int:
 
     relay = FarmMCPRelay(backend)
     try:
-        for raw_line in sys.stdin:
-            line = raw_line.strip()
-            if not line:
-                continue
-            try:
-                req = json.loads(line)
-            except json.JSONDecodeError as exc:
-                resp = FarmMCPRelay._error(None, -32700, f"Invalid JSON: {exc}")
-            else:
-                resp = relay.handle_request(req)
-            if resp is not None:
-                sys.stdout.write(json.dumps(resp, ensure_ascii=False) + "\n")
-                sys.stdout.flush()
+        relay.serve_stdio(sys.stdin, sys.stdout)
     finally:
         if tmp_dir is not None:
             tmp_dir.cleanup()

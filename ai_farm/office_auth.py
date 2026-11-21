@@ -19,6 +19,9 @@ class OfficeAccess:
         self.pair_code = secrets.token_urlsafe(32)
         self.pair_deadline = time.monotonic() + 600
         self.credentials = {}
+        from .collaboration_service import CollaborationService
+        self.collaboration = CollaborationService(self)
+        store._collaboration_service = self.collaboration
 
     def _issue(self, principal):
         token = secrets.token_urlsafe(32)
@@ -52,6 +55,7 @@ class OfficeAccess:
     def issue_member(self, principal, payload):
         self.require_owner(principal)
         with self.lock, self.store._lock:
+            self._revalidate(principal)
             agent = self.store._find_agent(payload.get("agent_id"))
             role = payload.get("role", "member")
             tasks = payload.get("task_ids")
@@ -79,7 +83,9 @@ class OfficeAccess:
 
     def revoke(self, principal, credential_id):
         self.require_owner(principal)
-        with self.lock:
+        with self.lock, self.store._lock:
+            self._revalidate(principal)
+            self.collaboration.revoke(credential_id)
             for key, value in list(self.credentials.items()):
                 if value["id"] == credential_id:
                     del self.credentials[key]
@@ -121,6 +127,10 @@ class OfficeAccess:
                 raise AccessDenied("成员身份已变更。")
 
     def action(self, principal, name: str, payload: dict[str, Any]):
+        if name.startswith("collab") or name == "createroom":
+            # Service owns short critical sections; network/model waits must not
+            # inherit either lock (otherwise revoke/post could never wake them).
+            return self.collaboration.action(principal, name, payload)
         if principal["role"] == "owner":
             with self.lock, self.store._lock:
                 self._revalidate(principal)

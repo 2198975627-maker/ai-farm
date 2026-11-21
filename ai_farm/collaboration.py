@@ -159,7 +159,7 @@ class CollaborationRuntime:
         for key in [k for k, b in self._bindings.items() if b["agent_id"] == agent_id]:
             del self._bindings[key]
         for grant in self._data["grants"].values():
-            if grant["target"] == agent_id and grant["state"] in ("pending", "running"):
+            if (grant["target"] == agent_id or grant["authorized_by"] == agent_id) and grant["state"] in ("pending", "running"):
                 grant["state"] = "unknown" if grant["state"] == "running" else "cancelled"
                 grant["reason"] = "connection_revoked"
         return {"agent_id": agent_id, "revoked": True}
@@ -243,11 +243,12 @@ class CollaborationRuntime:
         return any(g["target"] == agent_id and g["state"] in ("running", "unknown")
                    for g in self._data["grants"].values())
 
-    def wait(self, token: str, room_id: str, timeout_seconds: int = 30) -> dict[str, Any]:
+    def wait(self, token: str, room_id: str, timeout_seconds: int = 30,
+             cancel: threading.Event | None = None) -> dict[str, Any]:
+        """One condition wait, never polling; callers revalidate external scope."""
         _number(timeout_seconds, "timeout_seconds", 0, 300)
-        deadline = time.monotonic() + timeout_seconds
         with self._condition:
-            while True:
+            def available():
                 binding = self._auth(token)
                 room = self._room(binding, room_id)
                 inbox = self._inbox(binding, room)
@@ -255,11 +256,17 @@ class CollaborationRuntime:
                 grants = [g for g in self._data["grants"].values()
                           if active and g["room_id"] == room_id and g["target"] == binding["agent_id"]
                           and g["state"] == "pending" and not self._busy(binding["agent_id"])]
-                remaining = min(deadline - time.monotonic(), binding["expires"] - time.monotonic())
-                if inbox["messages"] or grants or remaining <= 0 or not active:
-                    return {**inbox, "grants": copy.deepcopy(grants), "room_state": room["state"],
-                            "expired": time.time() >= room["deadline"]}
-                self._condition.wait(min(remaining, max(0, room["deadline"] - time.time())))
+                return binding, room, inbox, active, grants
+
+            binding, room, inbox, active, grants = available()
+            remaining = min(timeout_seconds, binding["expires"] - time.monotonic(),
+                            max(0, room["deadline"] - time.time()))
+            if not inbox["messages"] and not grants and active and remaining > 0 and not (cancel and cancel.is_set()):
+                self._condition.wait(remaining)
+            binding, room, inbox, active, grants = available()
+            return {**inbox, "grants": copy.deepcopy(grants), "room_state": room["state"],
+                    "expired": time.time() >= room["deadline"],
+                    "cancelled": bool(cancel and cancel.is_set())}
 
     @_change
     def authorize(self, token: str, room_id: str, target: str, prompt: str,
@@ -341,6 +348,9 @@ class CollaborationRuntime:
             if grant.get("result") != result:
                 raise CollaborationConflict("Execution already has a different result")
             return grant
+        self._room(binding, grant["room_id"], active=True)
+        if grant.get("reason") in ("connection_revoked", "room_stopped", "coordinator_closed", "coordinator_restart"):
+            raise CollaborationDenied("Revoked execution cannot accept a late result")
         if grant["state"] not in ("running", "unknown"):
             raise CollaborationConflict("Execution was not claimed or is already terminal")
         grant.update(state="succeeded", result=result, completed_at=time.time())

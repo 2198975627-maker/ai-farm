@@ -16,6 +16,7 @@ from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor
 from datetime import date
+import copy
 import functools
 import hashlib
 import json
@@ -51,7 +52,13 @@ def _locked(fn):
     @functools.wraps(fn)
     def wrapper(self, *args, **kwargs):
         with self._lock:
-            return fn(self, *args, **kwargs)
+            result = fn(self, *args, **kwargs)
+            if fn.__name__ in ("postmessage", "submitcodereview", "submitroundtableresult", "roundtablehandoff"):
+                runner = getattr(self, "_automation_runner", None)
+                payload = args[0] if args else kwargs.get("payload", {})
+                if runner is not None and payload.get("task_id"):
+                    runner.notify(payload["task_id"])
+            return result
     return wrapper
 
 
@@ -266,6 +273,8 @@ class OfficeStore(RoundtableMixin):
     def __init__(self, state_path: Path | None = None):
         self.state_path = state_path or (Path.home() / ".ai-farm" / "office_state.json")
         self._lock = threading.RLock()
+        self._state_events = threading.Condition(self._lock)
+        self._state_revision = 0
         self.state: dict[str, Any] = {
             "agents": [],
             "skills": [],
@@ -348,6 +357,8 @@ class OfficeStore(RoundtableMixin):
                     stream.flush()
                     os.fsync(stream.fileno())
                 os.replace(tmp_path, self.state_path)
+                self._state_revision += 1
+                self._state_events.notify_all()
             finally:
                 if tmp_path.exists():
                     try:
@@ -649,6 +660,10 @@ class OfficeStore(RoundtableMixin):
         if new_floor not in ("manager", "worker", "rest"):
             raise ValueError("目标楼层只能是 manager（2楼经理）、worker（1楼员工）或 rest（院子休息）。")
         old_floor = agent["floor"]
+        if new_floor != old_floor:
+            if "manager" in (old_floor, new_floor) and payload.get("confirm_manager") is not True:
+                raise ValueError("经理层换岗需要再次确认。")
+            self._guard_member_move(agent["id"])
         agent["floor"] = new_floor
         floor_names = {"manager": "2楼 经理层", "worker": "1楼 员工层", "rest": "院子休息"}
         agent["role_label"] = floor_names[new_floor]
@@ -666,6 +681,79 @@ class OfficeStore(RoundtableMixin):
             )
         self.save()
         return agent
+
+    def _guard_member_move(self, agent_id):
+        for grant in self.state.get("collaboration", {}).get("grants", {}).values():
+            if grant["target"] == agent_id and grant["state"] in ("pending", "running", "unknown"):
+                raise ValueError("该成员有未决执行授权，请先停止并核查结果，不能直接替换。")
+        for task in self.state["tasks"]:
+            if task.get("status") in ("accepted_done", "rejected"):
+                continue
+            seats = task.get("roundtable_state", {}).get("seats", {}).values()
+            member_ids = {task.get("assigned_to"), task.get("reviewer_id"), task.get("manager_id")}
+            member_ids.update(seat["id"] for seat in seats)
+            if agent_id in member_ids:
+                raise ValueError("成员仍关联未验收任务；请在具体任务中替换成员，不能直接换楼层。")
+
+    def replaceagent(self, payload):
+        task = self._find_task(payload.get("task_id"))
+        source = self._find_agent(payload.get("from_id"))
+        target = self._find_agent(payload.get("to_id"))
+        if source["id"] == target["id"]:
+            raise ValueError("请选择不同的替换成员。")
+        if task.get("status") in ("delivered", "awaiting_owner", "accepted_done", "rejected"):
+            raise ValueError("该任务已进入验收或结束，不能替换来源成员。")
+        if target.get("status") not in ("ready", "tired") or target.get("access_kind") == "chief":
+            raise ValueError("目标成员不可用。")
+        parent = self._find_task(task["parent_task_id"]) if task.get("parent_task_id") else task
+        if parent.get("automation", {}).get("status") in ("running", "waiting_manual"):
+            raise ValueError("请先停止本任务的自动编排，再更换成员。")
+        for grant in self.state.get("collaboration", {}).get("grants", {}).values():
+            if grant["target"] in (source["id"], target["id"]) and grant["state"] in ("pending", "running", "unknown"):
+                raise ValueError("成员有未决执行授权，禁止并发替换或重复派发。")
+        state = task.get("roundtable_state")
+        seat_key = next((k for k, seat in (state or {}).get("seats", {}).items()
+                         if seat["id"] == source["id"]), None)
+        manager = bool(seat_key or task.get("manager_id") == source["id"])
+        if manager and payload.get("confirm_manager") is not True:
+            raise ValueError("替换经理需要再次确认。")
+        if not manager and task.get("assigned_to") != source["id"]:
+            raise ValueError("原成员不是本任务的执行者或经理。")
+        if target["vendor"].strip().casefold() == source["vendor"].strip().casefold():
+            raise ValueError("替换必须跨厂商，不能重复消耗同一额度池。")
+        if task.get("worker_reported") or task.get("courier_dispatch") or task.get("roundtable_dispatch", {}).get("current"):
+            raise ValueError("本任务已有派发或结果回执，需按单点转交机制核查，不能直接替换。")
+        if any(a.get("status") in ("running", "unknown")
+               for a in parent.get("automation", {}).get("attempts", {}).values()):
+            raise ValueError("任务存在运行中或未知回执，请先核查。")
+        if target["id"] == task.get("reviewer_id") and not manager:
+            raise ValueError("执行者与独立审查者不能相同。")
+        previous = copy.deepcopy(self.state)
+        try:
+            if manager:
+                if target.get("floor") != "manager":
+                    raise ValueError("请选择经理层成员。")
+                if seat_key:
+                    if state["stage"] != "collecting" or state["attempts"]:
+                        raise ValueError("圆桌已开始，不能改变已授权席位。")
+                    choices = {"seat_" + key.lower(): seat["id"] for key, seat in state["seats"].items()}
+                    choices["seat_" + seat_key.lower()] = target["id"]
+                    state["seats"] = validate_seats(self, choices)
+                else:
+                    task.update(manager_id=target["id"], manager_name=target["name"])
+            else:
+                if target.get("paid") or target.get("floor") not in ("worker", "rest"):
+                    raise ValueError("执行员工只能替换为免费员工或免费备用成员。")
+                target.update(floor="worker", role_label="1楼 员工层", status="ready")
+                task.update(assigned_to=target["id"], assigned_name=target["name"],
+                            assigned_vendor=target["vendor"], status="assigned")
+            self._append_task_msg(task["id"], "owner", "主人", "transfer",
+                                  f"主人将 {source['name']} 替换为 {target['name']}；未自动发起模型调用。")
+            self.save()
+        except Exception:
+            self.state = previous
+            raise
+        return copy.deepcopy(task)
 
     # ------------------------------------------------------------------
     # Action 5: deleteagent
@@ -2759,17 +2847,25 @@ class OfficeStore(RoundtableMixin):
                 },
             ]
 
-        if seats:
+        if seats or mode == "standard":
             if len(specs) > 24:
-                raise ValueError("圆桌每单最多24张采集子单。")
+                raise ValueError("每单最多24张子单。")
             workers = [w for w in self._distinct_vendor_workers() if not w.get("paid")]
             for idx, spec in enumerate(specs):
                 assigned_id = spec.get("assigned_to") or (workers[idx % len(workers)]["id"] if workers else "")
+                if not assigned_id:
+                    raise ValueError("请先添加至少一位可用的免费员工。")
                 worker = self._find_agent(assigned_id)
                 if worker.get("floor") != "worker" or worker.get("paid"):
-                    raise ValueError("圆桌资料采集必须交给 1F 免费员工。")
+                    raise ValueError("两种模式的底层执行必须交给 1F 免费员工。")
                 spec["assigned_to"] = assigned_id
                 if spec.get("task_kind") == "code_change" or spec.get("skill_slug") in CODE_REVIEW_SKILL_SLUGS:
+                    if not spec.get("reviewer_id"):
+                        reviewer = next((w for w in workers if w["id"] != assigned_id
+                                         and w["vendor"].strip().casefold() != worker["vendor"].strip().casefold()
+                                         and w.get("access_kind") in ("api", "cli")), None)
+                        if reviewer:
+                            spec["reviewer_id"] = reviewer["id"]
                     self._pick_reviewer(assigned_id, manager, spec.get("reviewer_id") or "")
 
         base_id = f"EPIC-{int(time.time() * 1000) % 1000000}"
@@ -3949,7 +4045,7 @@ class OfficeStore(RoundtableMixin):
         self._rt_guard_execution(parent)
         live = bool(payload.get("live", False))
         workspace_dir = (payload.get("workspace_dir") or "").strip()
-        discuss = bool(payload.get("discuss", True))
+        discuss = parent.get("mode") != "standard" and bool(payload.get("discuss", False))
         steps: list[dict[str, Any]] = []
         stopped_reason = ""
 
@@ -4244,7 +4340,7 @@ class OfficeStore(RoundtableMixin):
             "listbusmessages", "busledger", "listdiscussions",
         }
         payload_actions = {
-            "createagent", "updateagent", "moveagent", "deleteagent", "setagentquota",
+            "createagent", "updateagent", "moveagent", "replaceagent", "deleteagent", "setagentquota",
             "postgroupmessage", "createtask", "claimtask", "listmessages", "postmessage",
             "submitcodereview", "updatetaskstatus", "reassigntask", "deletetask",
             "deliverfinalresult", "reviewfinalresult", "createskill", "updateskill",
@@ -4278,7 +4374,7 @@ class OfficeStore(RoundtableMixin):
 # `with self._lock:` around direct field mutations.
 # ----------------------------------------------------------------------
 _LOCKED_METHODS = (
-    "loadsampleteam", "createagent", "updateagent", "moveagent", "deleteagent",
+    "loadsampleteam", "createagent", "updateagent", "moveagent", "replaceagent", "deleteagent",
     "setagentquota", "postgroupmessage", "createtask", "seedexampletask",
     "claimtask", "postmessage", "submitcodereview", "updatetaskstatus",
     "reassigntask", "deletetask", "deliverfinalresult", "reviewfinalresult",
@@ -4286,7 +4382,7 @@ _LOCKED_METHODS = (
     "applyskillassignments", "exporttaskmd", "gettaskprompt", "toggleautoexecute",
     "courierstatus", "checkdesktopreceipt",
     "requestapproval", "resolveapproval", "listapprovals", "setapprovaltimeout",
-    "createbigtask", "aggregatebigtask",
+    "createbigtask", "aggregatebigtask", "submitroundtableresult", "roundtablehandoff",
     "bussend", "busflush", "businbox", "busledger", "listbusmessages",
     "startdiscussion", "postdiscussionmessage", "resolvediscussion",
     "listdiscussion", "listdiscussions", "sendconclusion",

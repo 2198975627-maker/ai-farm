@@ -891,7 +891,7 @@ def test_p1_mcp_relay_protocol_compatible_and_core_delegated():
                 "farm_submit_code_review", "farm_request_approval"} <= names
         assert {"farm_bus_send", "farm_bus_inbox", "farm_bus_ledger", "farm_start_discussion",
                 "farm_post_discussion", "farm_resolve_discussion"} <= names
-        assert len(TOOLS) == 12
+        assert len(names) == len(TOOLS)
 
         agents = payload(call("farm_list_agents"))["agents"]
         by_id = {a["id"]: a for a in agents}
