@@ -66,7 +66,8 @@ async function initOffice() {
     if (resp.ok) {
       const data = await resp.json();
       APP_STATE.backendOnline = true;
-      document.getElementById("connModeBadge").textContent = "Python 后端已连接 (4通道接口 + AgentAdapter)";
+      document.getElementById("connModeBadge").textContent = "本地服务已连接";
+      document.getElementById("connModeBadge").classList.add("connected");
       applySnapshot(data);
       applyShotParams();
       return;
@@ -75,7 +76,8 @@ async function initOffice() {
     // 离线文件模式
   }
   APP_STATE.backendOnline = false;
-  document.getElementById("connModeBadge").textContent = "本地演示模式 (运行 python -m ai_farm office 可连后端)";
+  document.getElementById("connModeBadge").textContent = "离线预览 · 操作不可用";
+  document.getElementById("connModeBadge").title = "运行 python -m ai_farm office 连接本地后端";
   APP_STATE.agents = JSON.parse(JSON.stringify(SEED_AGENTS));
   APP_STATE.skills = JSON.parse(JSON.stringify(SEED_SKILLS));
   APP_STATE.groupMessages = [
@@ -175,44 +177,53 @@ const ICON_PATHS = {
   eye: '<path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/>',
   undo: '<path d="M3 7v6h6"/><path d="M21 17a9 9 0 0 0-15-6.7L3 13"/>',
   search: '<circle cx="11" cy="11" r="8"/><path d="M21 21l-4.35-4.35"/>',
+  external: '<path d="M15 3h6v6M10 14L21 3M21 14v5a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5"/>',
+  corner: '<path d="M4 4v10h16M14 8l6 6-6 6"/>',
+  chevron: '<path d="M9 5l7 7-7 7"/>',
+  user: '<circle cx="12" cy="8" r="4"/><path d="M4 21v-2a6 6 0 0 1 6-6h4a6 6 0 0 1 6 6v2"/>',
+  gauge: '<path d="M4.2 19a10 10 0 1 1 15.6 0M12 12l5-5M5 12H3M12 4V2M19 12h2"/><circle cx="12" cy="12" r="2"/>',
 };
 function icon(name, cls = "") {
   return `<svg class="icon ${cls}" viewBox="0 0 24 24" aria-hidden="true">${ICON_PATHS[name] || ""}</svg>`;
 }
-const EMOJI_RE = /[\u{1F000}-\u{1FAFF}\u{2600}-\u{26FF}\u{2700}-\u{2714}\u{2716}-\u{27BF}\u{2B00}-\u{2BFF}\u{2300}-\u{23FF}\u{FE0F}\u{200D}\u{2190}-\u{21FF}]/gu;
+// 保留箭头、技术符号与原始空白，避免改变消息中的流程和代码语义。
+const EMOJI_RE = /[\u{1F000}-\u{1FAFF}\u{2600}-\u{26FF}\u{2700}-\u{2714}\u{2716}-\u{27BF}\u{2B00}-\u{2BFF}\u{FE0F}\u{200D}]/gu;
 function stripEmoji(str) {
-  return String(str == null ? "" : str).replace(EMOJI_RE, "").replace(/\s{2,}/g, " ").trim();
+  return String(str == null ? "" : str).replace(EMOJI_RE, "").trim();
 }
 const HEX_TOKEN_MAP = [
-  [/#(?:38bdf8|3b82f6|a5b4fc|22d3ee|60a5fa|818cf8)\b/gi, "var(--accent)"],
+  [/#(?:38bdf8|3b82f6|a5b4fc|22d3ee|60a5fa|818cf8|93c5fd|cbd5e1)\b/gi, "var(--text-secondary)"],
   [/#(?:94a3b8|64748b|71717a|a1a1aa)\b/gi, "var(--text-muted)"],
   [/#(?:f87171|ef4444|fca5a5)\b/gi, "var(--danger)"],
-  [/#(?:10b981|22c55e|86efac|4ade80)\b/gi, "var(--quota-green)"],
+  [/#(?:10b981|22c55e|86efac|4ade80|34d399)\b/gi, "var(--quota-green)"],
   [/#(?:f59e0b|fbbf24|eab308|facc15)\b/gi, "var(--quota-yellow)"],
   [/#(?:0f172a|1e293b)\b/gi, "var(--bg-card-elevated)"],
   [/#(?:334155|475569)\b/gi, "var(--border-strong)"],
+  [/#(?:ffffff|fff)\b/gi, "var(--text-main)"],
 ];
-function neutralizeHTML(html) {
-  let out = String(html == null ? "" : html).replace(EMOJI_RE, "");
-  for (const [re, tok] of HEX_TOKEN_MAP) out = out.replace(re, tok);
-  return out;
-}
-function neutralizePanels() {
-  ["agentProfileContent", "taskThreadContent", "skillsGrid", "floorSkillOverview", "judgeResultSection"].forEach(id => {
-    const el = document.getElementById(id);
-    if (el) el.innerHTML = neutralizeHTML(el.innerHTML);
+function neutralizePanel(id) {
+  const panel = document.getElementById(id);
+  if (!panel) return;
+  // 原位处理样式，不序列化/重建 DOM，不触碰 value、onclick、URL 或 Muse SVG。
+  panel.querySelectorAll("[style]").forEach(el => {
+    const original = el.getAttribute("style");
+    let style = original;
+    for (const [re, token] of HEX_TOKEN_MAP) style = style.replace(re, token);
+    if (style !== original) el.setAttribute("style", style);
   });
-}
-function neutralizeStaticChrome() {
-  document.querySelectorAll(".modal-card, .skills-top-card, .stage-header, .chat-composer, .security-banner, .login-once-box").forEach(el => {
-    el.innerHTML = neutralizeHTML(el.innerHTML);
-  });
+  const walker = document.createTreeWalker(panel, NodeFilter.SHOW_TEXT);
+  let node;
+  while ((node = walker.nextNode())) {
+    if (node.parentElement.closest("[data-preserve-text], input, textarea, select, code, pre, svg, .kv-row, .vendor-chip, .agent-avatar")) continue;
+    // 只移除 UI 文本节点开头的装饰，不清洗正文中的 emoji、箭头或颜色字面量。
+    node.nodeValue = node.nodeValue.replace(/^(\s*)[\u{1F000}-\u{1FAFF}\u{2600}-\u{26FF}\u{2700}-\u{2714}\u{2716}-\u{27BF}\u{2B00}-\u{2BFF}\u{FE0F}\u{200D}]+[ \t]*/u, "$1");
+  }
 }
 // 只读截图/演示入口：?view=skills / ?modal=recruit|newtask|approval（不改变任何数据）
 function applyShotParams() {
-  neutralizeStaticChrome();
   const p = new URLSearchParams(location.search);
-  if (p.get("view") === "skills") switchMainView("skills");
+  if (p.get("view") === "skills" || p.get("view") === "team") switchMainView(p.get("view"));
+  if (p.get("view") === "activity") switchWorkspaceTab("activity");
   const pane = p.get("pane");
   if (pane === "chat" || pane === "detail" || pane === "roster") switchMobilePane(pane);
   const modal = p.get("modal");
@@ -289,6 +300,10 @@ async function handleRollbackCritical(backupRef, workspaceDir) {
 function recruitWizardGo(delta) {
   const modal = document.getElementById("recruitModal");
   if (!modal) return;
+  if (delta > 0 && APP_STATE.recruitStep === 2) {
+    const form = document.getElementById("recruitForm");
+    if (!form.reportValidity()) return;
+  }
   let step = (APP_STATE.recruitStep || 1) + delta;
   step = Math.max(1, Math.min(3, step));
   APP_STATE.recruitStep = step;
@@ -320,7 +335,7 @@ function recruitWizardGo(delta) {
     const path = (document.getElementById("recPathInput") || {}).value || "api";
     const floor = (document.getElementById("recFloor") || {}).value || "worker";
     const summary = document.getElementById("recConfirmSummary");
-    if (summary) summary.innerHTML = `名字：<strong>${escapeHTML(name)}</strong><br>厂商：${escapeHTML(vendor)} · 模型：${escapeHTML(model)}<br>通道：${escapeHTML(path)} · 楼层：${escapeHTML(floor)}<br><span style="color:var(--text-muted);">API Key 永不落盘，只存环境变量名。</span>`;
+    if (summary) summary.innerHTML = `名字：<strong data-preserve-text>${escapeHTML(name)}</strong><br>厂商：${escapeHTML(vendor)} · 模型：${escapeHTML(model)}<br>通道：${escapeHTML(path)} · 楼层：${escapeHTML(floor)}<br><span style="color:var(--text-muted);">API Key 永不落盘，只存环境变量名。</span>`;
   }
 }
 
@@ -343,7 +358,7 @@ function renderAvatarHTML(agent) {
   const shortLabel = (agent.vendor || agent.name || "AI").slice(0, 4);
   return `
     <div class="agent-avatar" title="${escapeHTML(agent.brand)} · 诚实文字标识（不凭印象画假Logo）">
-      <span>${escapeHTML(shortLabel)}</span>
+      <span data-preserve-text>${escapeHTML(shortLabel)}</span>
       <span class="status-dot ${dotClass}"></span>
     </div>
   `;
@@ -362,10 +377,11 @@ function renderAll() {
   renderSelectedTaskThread();
   renderTeamOverview();
   renderSkillCenter();
-  neutralizePanels();
 }
 
 function renderTopBar() {
+  document.getElementById('workspaceDate').textContent = new Intl.DateTimeFormat('zh-CN', { month: 'long', day: 'numeric', weekday: 'long' }).format(new Date());
+  document.getElementById('navTeamCount').textContent = APP_STATE.agents.length;
   // 自动执行低风险开关（默认关闭；现收纳在「更多」菜单内）
   const autoBtn = document.getElementById("autoExecuteToggleBtn");
   if (autoBtn) {
@@ -430,9 +446,9 @@ function renderRoster() {
   document.getElementById("rosterTotalBadge").textContent = `${APP_STATE.agents.length} 模型/通道`;
 
   const emptyHint = {
-    manager: `<div style="font-size:11px;color:var(--text-muted);padding:6px;">暂无经理，可招募强推理模型或拖入此层</div>`,
-    worker: `<div style="font-size:11px;color:var(--text-muted);padding:8px;border:1px dashed var(--border-strong);border-radius:6px;">暂无 1楼员工。点左下角「招募」接入你的免费模型，或点顶部「更多 → 载入示例团队」</div>`,
-    rest: `<div style="font-size:11px;color:var(--text-muted);padding:6px;">暂无休息成员</div>`,
+    manager: `<div class="roster-empty">${q ? '没有匹配的经理。' : '添加推理模型，负责拆单与审查。'}</div>`,
+    worker: `<div class="roster-empty">${q ? '没有匹配的员工。' : '点击「添加成员」，接入执行任务的模型。'}</div>`,
+    rest: `<div class="roster-empty">${q ? '没有匹配的休息成员。' : '暂时没有休息成员。'}</div>`,
   };
 
   ["manager", "worker", "rest"].forEach(fl => {
@@ -458,9 +474,8 @@ function renderRoster() {
   if (mentionBar) {
     const workers = APP_STATE.agents.filter(a => a.floor === "worker");
     mentionBar.innerHTML = workers.length
-      ? `<span class="mention-tip">点此 @人派活：</span>` +
-        workers.slice(0, 6).map(w => `<button type="button" class="chip-btn" onclick="insertMention('@${escapeHTML(w.name)}')">@${escapeHTML(w.name)}</button>`).join("")
-      : `<span class="mention-tip">招募 1楼员工后可在此快捷 @人派活</span>`;
+      ? workers.map(w => `<button type="button" class="chip-btn" onclick="insertMention(${escapeHTML(JSON.stringify('@' + w.name))}); this.closest('details').open=false;">@${escapeHTML(w.name)}</button>`).join("")
+      : `<span class="mention-tip">添加员工后，可以在这里指定任务接收人。</span>`;
   }
 
   const judgeSel = document.getElementById("skillJudgeSelect");
@@ -473,69 +488,19 @@ function renderRoster() {
 }
 
 function renderAgentCardHTML(agent) {
-  const isSelected = agent.id === APP_STATE.selectedAgentId ? "selected" : "";
-  const hasPct = agent.quota_percent !== null && agent.quota_percent !== undefined;
-  const pct = hasPct ? Number(agent.quota_percent) : null;
-  // 对齐 Agent HUD：已用<70%(剩>30%)绿、已用70%-90%(剩11-30%)黄、剩<=10%变红闪烁
-  const isLow = hasPct && pct <= 10;
-  const isWarn = hasPct && pct > 10 && pct <= 30;
-  const fillClass = !hasPct ? "unknown" : isLow ? "low-red" : isWarn ? "quota-yellow" : "quota-green";
-  const labelText = !hasPct ? "额度未填" : `剩 ${pct}%`;
-  const widthPct = !hasPct ? 100 : Math.max(4, pct);
-  const tokensUsed = Number(agent.tokens_used || 0);
-  const sessCount = Number(agent.session_count || 0);
-  const hoverTelemetry = `剩余额度: ${hasPct ? pct + '%' : '额度未填'} | Token花费: ${tokensUsed} | 会话数: ${sessCount} | ${agent.quota_note || ''}`;
-
-  const toolsHTML = (agent.attached_tools || []).map(t =>
-    `<div class="tool-attachment-pill">${escapeHTML(t)}</div>`
-  ).join("");
-
-  const loginState = agent.login_state || "";
-  const loginCls = loginState === "已登录" ? "ok" : (loginState === "会话过期" ? "expired" : "");
-  const loginBadge = loginState ? `<span class="login-badge ${loginCls}" title="登录态（不显示任何密钥明文）">${escapeHTML(loginState)}</span>` : "";
-
-  return `
-    <div class="agent-card ${isSelected}" draggable="true"
-         ondragstart="onAgentDragStart(event, '${agent.id}')"
-         onclick="selectAgent('${agent.id}')"
-         title="${escapeHTML(hoverTelemetry)}">
-      <div class="agent-row-top">
-        ${renderAvatarHTML(agent)}
-        <div class="agent-meta">
-          <div class="agent-name-line">
-            <span class="agent-name">${escapeHTML(agent.name)}</span>
-            <span class="access-badge ${agent.badge_color || 'green'}">${escapeHTML(agent.badge)}</span>
-            ${loginBadge}
-            <button type="button" class="card-expand-btn" title="展开/收起详情" onclick="event.stopPropagation(); this.closest('.agent-card').classList.toggle('expanded')">${icon('eye')}</button>
-          </div>
-          <div class="agent-extra-info">
-            <div class="agent-subline">
-              模型: <strong>${escapeHTML(agent.model)}</strong> · ${escapeHTML(agent.vendor)}
-            </div>
-            ${(agent.tier || agent.expires_at) ? `
-            <div class="agent-subline" style="color:#a5b4fc;">
-              ${agent.tier ? `等级: <strong>${escapeHTML(agent.tier)}</strong>` : ''}${agent.tier && agent.expires_at ? ' · ' : ''}${agent.expires_at ? `到期: ${escapeHTML(agent.expires_at)}` : ''}
-            </div>` : ''}
-            <div class="agent-fallback-line" title="${escapeHTML(agent.fallback_note || '')}">
-              ↳ ${escapeHTML(agent.fallback_note || '降级后：换其他免费员工')}
-            </div>
-            ${toolsHTML}
-          </div>
-        </div>
-      </div>
-      <div class="mana-bar-wrap" onclick="handleManaBarClick(event, '${agent.id}')"
-           title="${escapeHTML(hoverTelemetry)}${agent.usage_url ? '（点击跳转官方实时查额度页）' : '（无独立查额度链接）'}">
-        <div class="mana-track">
-          <div class="mana-fill ${fillClass}" style="width:${widthPct}%"></div>
-        </div>
-        <span class="mana-label ${fillClass}">${labelText} ${agent.usage_url ? '↗' : ''}</span>
-      </div>
-      <div class="agent-telemetry-line">
-        <span>Token: ${tokensUsed}</span>
-        <span>会话: ${sessCount}</span>
-      </div>
-    </div>
-  `;
+  const hasQuota = agent.quota_percent !== null && agent.quota_percent !== undefined;
+  const quotaClass = hasQuota ? Number(agent.quota_percent) <= 10 ? 'quota-low' : 'quota-known' : '';
+  const selected = agent.id === APP_STATE.selectedAgentId && !document.getElementById('paneDetail').classList.contains('hidden');
+  return `<div class="agent-card ${selected ? 'selected' : ''}" draggable="true" role="button" tabindex="0"
+    ondragstart="onAgentDragStart(event, '${escapeHTML(agent.id)}')" onclick="selectAgent('${escapeHTML(agent.id)}')"
+    onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();selectAgent('${escapeHTML(agent.id)}')}"
+    aria-label="查看 ${escapeHTML(agent.name)} 的档案">
+    <div class="agent-row-top">${renderAvatarHTML(agent)}<div class="agent-meta">
+      <span class="agent-name">${escapeHTML(agent.name)}</span><div class="agent-subline">${escapeHTML(agent.model)}</div>
+    </div></div>
+    <div class="agent-summary">${escapeHTML(agent.specialty || '尚未填写擅长的工作')}</div>
+    <div class="agent-card-footer"><span>${escapeHTML(agent.badge || agent.access_kind)}</span><span class="${quotaClass}">${hasQuota ? '剩余 ' + escapeHTML(agent.quota_percent) + '%' : '额度未填'}</span></div>
+  </div>`;
 }
 
 function handleManaBarClick(event, agentId) {
@@ -609,14 +574,15 @@ function renderHudFlightStrip() {
     const blocked = fl.status === "blocked" || /blocked|卡住|超时|退回/.test(fl.channel || "") || fl.kind === "bus_error";
     return { from: nodeIndex(fl.from_id, fl.from_name), to: nodeIndex(fl.to_id, fl.to_name), fl, blocked };
   });
-  const gap = 130, padX = 46, baseY = 78, W = padX * 2 + gap * Math.max(1, nodes.length - 1), H = 110;
+  const gap = 130, padX = 60, baseY = 24 + edges.length * 17;
+  const W = padX * 2 + gap * Math.max(1, nodes.length - 1), H = baseY + 28;
   const x = i => padX + i * gap;
   let arcs = "";
   edges.forEach((e, idx) => {
     const x1 = x(e.from), x2 = x(e.to);
-    const mx = (x1 + x2) / 2, lift = 26 + (idx % 3) * 12;
-    const cy = baseY - lift;
-    const dropY = e.blocked ? baseY - 6 : cy + 6;
+    const mx = (x1 + x2) / 2, labelY = 12 + idx * 17;
+    const cy = 2 * (labelY + 8) - baseY;
+    const dropY = e.blocked ? baseY - 6 : labelY + 5;
     const onclick = e.fl.task_id ? `openTaskPrivateThread('${escapeHTML(e.fl.task_id)}')` : `selectAgent('${escapeHTML(e.fl.from_id)}')`;
     const title = `${escapeHTML(e.fl.created_at || '')} · ${escapeHTML(e.fl.channel || '')} · ${escapeHTML(e.fl.summary || e.fl.kind || '')}`;
     arcs += `
@@ -624,7 +590,7 @@ function renderHudFlightStrip() {
         <title>${title}</title>
         <path class="arc ${e.blocked ? 'blocked' : ''}" d="M ${x1} ${baseY} Q ${mx} ${cy} ${x2} ${baseY}"/>
         <path class="plane ${e.blocked ? 'blocked' : ''}" d="M ${mx - 5} ${dropY} l 10 3 l -10 3 l 2.5 -3 z"/>
-        <text class="node-label" x="${mx}" y="${cy - 2}" text-anchor="middle">${escapeHTML((e.fl.summary || e.fl.kind || '').slice(0, 10))}</text>
+        <text class="node-label" x="${mx}" y="${labelY}" text-anchor="middle">${escapeHTML((e.fl.summary || e.fl.kind || '').slice(0, 10))}</text>
       </g>`;
   });
   const nodeSvg = nodes.map((n, i) => `
@@ -675,7 +641,7 @@ function renderTaskStepFlow(status, task = null) {
   return `<div class="step-flow-bar">` + labels.map((st, idx) => {
     const cls = idx < currIdx ? "done" : idx === currIdx ? "curr" : "";
     return `<span class="step-item ${cls}">${st.text}</span>`;
-  }).join("<span>→</span>") + (status === "rejected" ? ` <span style="color:#f87171;font-weight:700;">(↩审查打回重做)</span>` : "") + `</div>`;
+  }).join(`<span class="step-sep">${icon('chevron')}</span>`) + (status === "rejected" ? ` <span class="step-rejected">${icon('undo')}(审查打回重做)</span>` : "") + `</div>`;
 }
 
 function renderDiscussionThread(taskId) {
@@ -694,105 +660,57 @@ function renderDiscussionThread(taskId) {
   }).join("");
 }
 
-function renderGroupChat() {
-  // 顶部快速切换任务条
+function taskStatusLabel(status) {
+  return ({ assigned: '待认领', accepted: '已认领', working: '进行中', in_review: '待审查', delivered: '待验收', accepted_done: '已完成', rejected: '待返修' })[status] || status;
+}
+
+function renderTaskBoard() {
   const strip = document.getElementById("activeTaskStrip");
-  if (APP_STATE.tasks.length === 0) {
-    strip.innerHTML = `<span style="font-size:11px;color:var(--text-muted);">当前暂无派单，可在右上角「更多 → 塞入示例任务」测试完整流程</span>`;
-  } else {
-    strip.innerHTML = APP_STATE.tasks.map(t => `
-      <button class="task-pill ${t.id === APP_STATE.selectedTaskId ? 'active' : ''}"
-              onclick="openTaskPrivateThread('${t.id}')">
-        ${escapeHTML(t.id)} · ${escapeHTML(t.title.slice(0, 14))} (${escapeHTML(t.status)})
-      </button>
-    `).join("");
+  document.getElementById("taskTotalCount").textContent = APP_STATE.tasks.length;
+  if (!APP_STATE.tasks.length) {
+    const hasWorker = APP_STATE.agents.some(a => a.floor === "worker");
+    strip.innerHTML = `<div class="empty-workspace">
+      <span class="empty-symbol">${icon('box')}</span><h2>从一个任务开始。</h2>
+      <p>${hasWorker ? '团队已在这里。点击右上角「新任务」，写下目标与验收标准。' : '接入你的 AI 员工，再把第一个任务交给团队。所有模型由你选择。'}</p>
+      ${hasWorker ? '' : '<button class="btn btn-ghost" onclick="openRecruitModal()">添加第一位员工</button>'}
+    </div>`;
+    return;
   }
+  const tasks = [...APP_STATE.tasks].reverse().sort((a, b) => Number(a.status === 'accepted_done') - Number(b.status === 'accepted_done'));
+  strip.innerHTML = tasks.map(task => {
+    const selected = task.id === APP_STATE.selectedTaskId && !document.getElementById("paneDetail").classList.contains("hidden");
+    return `<button class="task-pill ${selected ? 'active' : ''}" onclick="openTaskPrivateThread('${escapeHTML(task.id)}')">
+      <span><span class="task-name">${escapeHTML(task.title)}</span><span class="task-reference">${escapeHTML(task.id)}${task.is_parent ? ' · 拆分任务' : task.parent_task_id ? ' · 子任务' : ''}</span></span>
+      <span class="task-assignee"><span class="assignee-initial" aria-hidden="true">${escapeHTML((task.assigned_name || '待').slice(0, 1))}</span><span>${escapeHTML(task.assigned_name || '待分配')}</span></span>
+      <span class="task-state" data-status="${escapeHTML(task.status)}">${escapeHTML(taskStatusLabel(task.status))}</span>
+    </button>`;
+  }).join("") + `<p class="task-list-note">打开任务，查看进度、汇报与下一步操作。</p>`;
+}
 
+function renderGroupChat() {
+  renderTaskBoard();
   const stream = document.getElementById("groupChatStream");
+  const nearBottom = stream.scrollHeight - stream.scrollTop - stream.clientHeight < 100;
+  const openMessages = new Set([...stream.querySelectorAll('details[data-message][open]')].map(el => el.dataset.message));
   stream.innerHTML = APP_STATE.groupMessages.map(msg => {
-    const isGao = msg.sender_id === "owner" || msg.sender_id === "gao";
+    const isOwner = msg.sender_id === "owner" || msg.sender_id === "gao";
+    const kind = msg.kind || 'chat';
     const task = msg.task_id ? APP_STATE.tasks.find(t => t.id === msg.task_id) : null;
-    let actionBarHTML = "";
-    let discussionHTML = "";
-
-    if (task && msg.kind === "task_card") {
-      discussionHTML = renderDiscussionThread(task.id);
-      actionBarHTML = `
-        <div class="card-actions-bar">
-          ${renderTaskStepFlow(task.status, task)}
-          ${task.status === "assigned" ? `
-            <button class="btn btn-example" onclick="handleClaimTask('${task.id}', '${task.assigned_to || ''}')">
-              员工点击领取 (${escapeHTML(task.assigned_name)})
-            </button>
-          ` : ""}
-          <button class="btn btn-ghost" onclick="openTaskPrivateThread('${task.id}')">
-            ${icon('lock')}私聊汇报窗 (${task.worker_reported ? '已汇报' : '待汇报'})
-          </button>
-          ${task.status !== "accepted_done" ? `
-            <button class="btn btn-primary" onclick="handleDeliverFinalResult('${task.id}')">
-              ${icon('box')}经理统筹交付总结果
-            </button>
-          ` : ""}
-        </div>
-      `;
-    } else if (task && msg.kind === "private_report_lock") {
-      actionBarHTML = `
-        <div class="card-actions-bar">
-          <button class="btn btn-ghost" onclick="openTaskPrivateThread('${task.id}')">
-            ${icon('eye')}经理点此审阅结论/diff
-          </button>
-          <button class="btn btn-primary" onclick="handleDeliverFinalResult('${task.id}')">
-            ${icon('box')}经理统筹交付给 Gao
-          </button>
-        </div>
-      `;
-    } else if (task && msg.kind === "big_task_card") {
-      discussionHTML = renderDiscussionThread(task.id);
-      actionBarHTML = `
-        <div class="card-actions-bar">
-          <button class="btn btn-ghost" onclick="handleRunBigTaskSubtasks('${task.id}', false)">
-            批量干跑全部子单 (0消耗)
-          </button>
-          <button class="btn btn-primary" onclick="handleRunBigTaskSubtasks('${task.id}', true)">
-            ${icon('send')}并行真调 API/CLI 子单
-          </button>
-          <button class="btn btn-ghost" onclick="handleAggregateBigTask('${task.id}')">
-            ${icon('box')}汇总全部子单总交付
-          </button>
-          <button class="btn btn-ghost" onclick="openTaskPrivateThread('${task.id}')">
-            ${icon('eye')}查看子单进度 (${(task.subtask_ids || []).length})
-          </button>
-        </div>
-      `;
-    } else if (task && msg.kind === "final_delivery_card") {
-      discussionHTML = renderDiscussionThread(task.id);
-      actionBarHTML = `
-        <div class="card-actions-bar">
-          ${renderTaskStepFlow(task.status, task)}
-          <button class="btn btn-success" onclick="handleReviewFinalResult('${task.id}', 'verified')">
-            ${icon('check')}验收通过
-          </button>
-          <button class="btn btn-danger" onclick="handleReviewFinalResult('${task.id}', 'rejected')">
-            ${icon('undo')}打回重做
-          </button>
-        </div>
-      `;
-    }
-
-    return `
-      <div class="chat-bubble ${isGao ? 'from-gao' : ''} kind-${msg.kind || 'chat'}">
-        <div class="bubble-header">
-          <span class="bubble-sender">${escapeHTML(stripEmoji(msg.sender_name))}</span>
-          <span>${escapeHTML(msg.created_at || '')}</span>
-        </div>
-        <div class="bubble-body">${formatChatTextWithMentions(stripEmoji(msg.text))}</div>
-        ${discussionHTML}
-        ${actionBarHTML}
-      </div>
-    `;
+    const eventName = ({ task_card: '任务已发布', big_task_card: '大任务已拆分', private_report_lock: '收到私聊汇报', final_delivery_card: '结果已交付' })[kind];
+    const senderIcon = ({ task_card: 'box', big_task_card: 'users', private_report_lock: 'lock', final_delivery_card: 'check', error: 'alert', bus_error: 'alert' })[kind] || (isOwner ? 'user' : 'chat');
+    const fullText = formatChatTextWithMentions(msg.text || '');
+    return `<article class="chat-bubble ${isOwner ? 'from-gao' : ''} kind-${escapeHTML(kind)}">
+      <div class="bubble-header"><span class="bubble-sender">${icon(senderIcon)}${escapeHTML(stripEmoji(msg.sender_name))}</span><span>${escapeHTML(msg.created_at || '')}</span></div>
+      ${task && eventName ? `<div class="message-record">
+        <div class="message-record-meta">${eventName} · ${escapeHTML(task.id)}</div><h3>${escapeHTML(task.title)}</h3>
+        <span class="task-state" data-status="${escapeHTML(task.status)}">${escapeHTML(taskStatusLabel(task.status))}</span>
+        <details class="message-full" data-message="${escapeHTML(msg.id)}" ${openMessages.has(String(msg.id)) ? 'open' : ''}><summary>查看完整消息</summary><div class="bubble-body">${fullText}</div></details>
+        <div class="card-actions-bar"><button class="btn btn-ghost" onclick="openTaskPrivateThread('${escapeHTML(task.id)}')">打开任务 ${icon('chevron')}</button></div>
+        ${renderDiscussionThread(task.id)}
+      </div>` : `<div class="bubble-body">${fullText}</div>`}
+    </article>`;
   }).join("");
-
-  stream.scrollTop = stream.scrollHeight;
+  if (nearBottom) stream.scrollTop = stream.scrollHeight;
 }
 
 // =========================================================================
@@ -803,100 +721,121 @@ function selectAgent(agentId) {
   switchRightTab("profile");
   renderRoster();
   renderSelectedAgentProfile();
+  openDetailPanel();
+  document.getElementById('panelProfile').scrollTop = 0;
+}
+
+// Keep disclosure choices only while the same member/task remains selected.
+function captureDetailSections(container, selectionId) {
+  const openSections = new Map();
+  if (container.dataset.detailSelection === String(selectionId)) {
+    container.querySelectorAll('details[data-section]').forEach(detail => {
+      openSections.set(detail.dataset.section, detail.open);
+    });
+  }
+  container.dataset.detailSelection = String(selectionId);
+  return (section, initiallyOpen = false) =>
+    (openSections.has(section) ? openSections.get(section) : initiallyOpen) ? ' open' : '';
 }
 
 function renderSelectedAgentProfile() {
   const agent = APP_STATE.agents.find(a => a.id === APP_STATE.selectedAgentId) || APP_STATE.agents[0];
-  if (!agent) return;
   const container = document.getElementById("agentProfileContent");
-  const hasPct = agent.quota_percent !== null && agent.quota_percent !== undefined;
-  const pct = hasPct ? Number(agent.quota_percent) : null;
-  const isLow = hasPct && pct <= 10;
-
+  if (!container) return;
+  const sectionOpen = captureDetailSections(container, agent ? agent.id : '');
+  if (!agent) {
+    container.innerHTML = `<section class="section-body"><h2 class="detail-title">成员档案</h2><p class="detail-meta">暂无成员，请先招募 AI Agent。</p></section>`;
+    return;
+  }
+  const rawPct = agent.quota_percent;
+  const hasPct = rawPct !== null && rawPct !== undefined && rawPct !== '' &&
+    Number.isFinite(Number(rawPct)) && Number(rawPct) >= 0 && Number(rawPct) <= 100;
+  const pct = hasPct ? Number(rawPct) : null;
+  const agentArg = escapeHTML(JSON.stringify(String(agent.id)));
+  const loginUrl = /^https?:\/\//i.test(agent.login_url || '') ? agent.login_url : '';
+  const usageUrl = /^https?:\/\//i.test(agent.usage_url || '') ? agent.usage_url : '';
   const skillBadges = (agent.skills || []).map(slug => {
     const sk = APP_STATE.skills.find(s => s.slug === slug);
-    return `<span class="vendor-chip">${escapeHTML(sk ? sk.name : slug)}</span>`;
-  }).join(" ") || `<span style="color:#64748b;font-size:11px;">暂未装配固定技能</span>`;
+    return `<span class="vendor-chip" data-preserve-text>${escapeHTML(sk ? sk.name : slug)}</span>`;
+  }).join(' ') || `<span class="detail-meta">暂未装配固定技能</span>`;
 
   container.innerHTML = `
-    <div class="profile-box">
-      <div class="identity-block">
-        <div style="display:flex;align-items:center;gap:10px;margin-bottom:8px;">
-          ${renderAvatarHTML(agent)}
-          <div>
-            <div style="font-size:15px;font-weight:800;">${escapeHTML(agent.name)}</div>
-            <div style="font-size:11px;color:#94a3b8;">${escapeHTML(agent.role_label)} · <span class="access-badge ${agent.badge_color}">${escapeHTML(agent.badge)}</span></div>
-          </div>
-        </div>
-        <h4>🪪 独立身份（一图标一模型 · 绝非共用 Token 池）</h4>
-        <div class="kv-row"><span>所属厂商</span><span><strong>${escapeHTML(agent.vendor)}</strong> (${escapeHTML(agent.brand)})</span></div>
-        <div class="kv-row"><span>会员等级</span><span><strong>${escapeHTML(agent.tier || (agent.access_kind === 'api' ? (agent.paid ? '付费·API' : '免费·API') : '待同步'))}</strong></span></div>
-        <div class="kv-row"><span>到期时间</span><span>${escapeHTML(agent.expires_at || (agent.access_kind === 'api' ? '按余额消耗无固定到期日' : '未填/待同步'))}</span></div>
-        <div class="kv-row"><span>真实模型版本</span><span><code>${escapeHTML(agent.model)}</code> ${agent.verified_version ? '✅已核实' : '⚠️待核实'}</span></div>
-        ${(agent.available_models && agent.available_models.length) ? `<div class="kv-row"><span>接口实查可用模型</span><span><code>${escapeHTML(agent.available_models.join(', '))}</code></span></div>` : ''}
-        ${(agent.sub_models && agent.sub_models.length) ? `<div class="kv-row"><span>内置子模型与倍率</span><span>${agent.sub_models.map(m => `<span class="vendor-chip">${escapeHTML(m)}</span>`).join(' ')}</span></div>` : ''}
-        ${agent.last_synced_at ? `<div class="kv-row"><span>上次同步时间</span><span>${escapeHTML(agent.last_synced_at)}</span></div>` : ''}
-        <div class="kv-row"><span>接入通道</span><span>${escapeHTML(agent.access_kind)} (${escapeHTML(agent.badge)})</span></div>
-        <div class="kv-row"><span>降级规则</span><span style="color:#93c5fd;">${escapeHTML(agent.fallback_note || '未指定')}</span></div>
-        <div class="kv-row"><span>账号核实状态</span><span>${escapeHTML(agent.account_status)}</span></div>
-        ${agent.key_env ? `<div class="kv-row"><span>环境变量名</span><span><code>$${escapeHTML(agent.key_env)}</code>（密钥不落盘）</span></div>` : ""}
-        ${agent.login_url ? `<div class="kv-row"><span>厂商登录页</span><span><a href="${escapeHTML(agent.login_url)}" target="_blank" style="color:#38bdf8;">点此去官网登录 ↗</a></span></div>` : ""}
+    <header class="detail-header profile-header">
+      ${renderAvatarHTML({ ...agent, status: escapeHTML(agent.status || 'ready') })}
+      <div>
+        <h2 class="detail-title" data-preserve-text>${escapeHTML(agent.name)}</h2>
+        <p class="detail-meta" data-preserve-text>${escapeHTML(agent.role_label)} · ${escapeHTML(agent.badge)}</p>
       </div>
+    </header>
 
-      ${isLow ? `
-        <div class="security-banner" style="background:rgba(239,68,68,0.2);border-color:#ef4444;color:#fca5a5;">
-          🚨 <strong>低额度红色告警 (≤10%)：</strong>当前剩余额度为 <strong>${pct}%</strong>！
-          ${agent.access_kind === 'subscription' ? '订阅制到限额将自动降级为轻量模型，请只派边角小活。' : 'API 额度归零已真停，请移至院子休息并轮换其他免费员工。'}
-        </div>
-      ` : ""}
+    <section class="section-body" aria-label="模型与额度">
+      <div class="kv-row"><span>厂商</span><strong data-preserve-text>${escapeHTML(agent.vendor)} · ${escapeHTML(agent.brand)}</strong></div>
+      <div class="kv-row"><span>模型</span><span><code>${escapeHTML(agent.model)}</code> ${agent.verified_version ? icon('check') + '已核实' : icon('alert') + '待核实'}</span></div>
+      <div class="kv-row"><span>通道</span><span data-preserve-text>${escapeHTML(agent.access_kind)} · ${escapeHTML(agent.badge)}</span></div>
+      <div class="kv-row"><span>剩余额度</span><strong>${hasPct ? `${pct}%` : '额度未填'}</strong></div>
+      <p class="detail-meta" data-preserve-text>${escapeHTML(agent.quota_note || '未实查，不推测可用额度。')}</p>
+      ${hasPct && pct <= 10 ? `<p class="detail-meta quota-warning" role="status">${icon('alert')}剩余额度 ≤10%。${agent.access_kind === 'subscription' ? '订阅到限额可能降级，请核对下方降级规则。' : pct === 0 && agent.access_kind === 'api' ? 'API 额度已归零，请调至休息并轮换其他员工。' : '请核实用量，必要时轮换其他员工。'}</p>` : ''}
+    </section>
 
-      <div class="identity-block">
-        <h4>💧 真实法力值额度（查不到一律写「额度未填」，绝不编数字）</h4>
-        <div style="font-size:12px;margin-bottom:6px;">
-          当前显示：<strong>${hasPct ? `剩 ${pct}%` : '额度未填'}</strong>
+    <details class="detail-section" data-section="account"${sectionOpen('account')}>
+      <summary>账号与模型资料</summary>
+      <div class="section-body">
+        <p class="detail-meta">一位成员对应独立模型与通道，不共用 Token 池。</p>
+        <div class="kv-row"><span>会员等级</span><span data-preserve-text>${escapeHTML(agent.tier || (agent.access_kind === 'api' ? (agent.paid ? '付费·API' : '免费·API') : '待同步'))}</span></div>
+        <div class="kv-row"><span>到期时间</span><span data-preserve-text>${escapeHTML(agent.expires_at || (agent.access_kind === 'api' ? '按余额消耗，无固定到期日' : '未填/待同步'))}</span></div>
+        <div class="kv-row"><span>核实状态</span><span data-preserve-text>${escapeHTML(agent.account_status || '待核实')}</span></div>
+        <div class="kv-row"><span>登录状态</span><span data-preserve-text>${escapeHTML(agent.login_state || '未同步')}</span></div>
+        <div class="kv-row"><span>已记录 Token</span><span>${agent.tokens_used == null ? '未记录' : escapeHTML(agent.tokens_used)}</span></div>
+        <div class="kv-row"><span>已记录会话</span><span>${agent.session_count == null ? '未记录' : escapeHTML(agent.session_count)}</span></div>
+        <div class="kv-row"><span>已挂载工具</span><span data-preserve-text>${escapeHTML((agent.attached_tools || []).join('、') || '暂无')}</span></div>
+        <div class="kv-row"><span>降级规则</span><span data-preserve-text>${escapeHTML(agent.fallback_note || '未指定')}</span></div>
+        ${agent.available_models && agent.available_models.length ? `<div class="kv-row"><span>接口实查模型</span><code>${escapeHTML(agent.available_models.join(', '))}</code></div>` : ''}
+        ${agent.sub_models && agent.sub_models.length ? `<div class="kv-row"><span>子模型与倍率</span><span>${agent.sub_models.map(m => `<span class="vendor-chip">${escapeHTML(m)}</span>`).join(' ')}</span></div>` : ''}
+        ${agent.last_synced_at ? `<div class="kv-row"><span>上次同步</span><span data-preserve-text>${escapeHTML(agent.last_synced_at)}</span></div>` : ''}
+        ${agent.key_env ? `<div class="kv-row"><span>密钥环境变量</span><code>$${escapeHTML(agent.key_env)}</code></div>` : ''}
+        <p class="detail-meta">密钥仅读环境变量，不展示、不落盘。</p>
+        ${loginUrl ? `<a class="inline-link" href="${escapeHTML(loginUrl)}" target="_blank" rel="noopener noreferrer">前往厂商登录页 ${icon('external')}</a>` : ''}
+      </div>
+    </details>
+
+    <details class="detail-section" data-section="quota"${sectionOpen('quota')}>
+      <summary>查额度与登记实查值</summary>
+      <div class="section-body">
+        <p class="detail-meta">只登记实际查到的额度；查不到就保持「额度未填」。</p>
+        <div class="detail-actions">
+          ${usageUrl ? `<a class="btn btn-ghost" href="${escapeHTML(usageUrl)}" target="_blank" rel="noopener noreferrer">${icon('external')}官网查额度</a>` : `<span class="detail-meta">未提供独立查额度链接</span>`}
+          ${agent.access_kind === 'api' ? `<button type="button" class="btn btn-ghost" onclick="handleCheckLiveQuota(${agentArg})">${icon('gauge')}接口实查余额</button>` : ''}
         </div>
-        <div style="font-size:11px;color:#94a3b8;margin-bottom:8px;">
-          说明：${escapeHTML(agent.quota_note || '暂无说明')}
+        <div class="form-group">
+          <label for="manualQuotaPct">实查剩余百分比（留空表示未知）</label>
+          <input type="number" id="manualQuotaPct" class="obsidian-input" min="0" max="100" step="1" placeholder="0–100 或留空" value="${hasPct ? pct : ''}" />
         </div>
-        <div style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:8px;">
-          ${agent.usage_url ? `
-            <a class="btn btn-primary" href="${escapeHTML(agent.usage_url)}" target="_blank" rel="noopener" style="text-decoration:none;">
-              🔗 跳该账号实时查额度页 ↗
-            </a>
-          ` : `
-            <span class="vendor-chip">无独立查额度链接（遵循不编造原则）</span>
-          `}
-          ${agent.access_kind === 'api' ? `
-            <button class="btn btn-ghost" onclick="handleCheckLiveQuota('${agent.id}')">🔌 调接口实查余额</button>
-          ` : ""}
-        </div>
-        <div style="border-top:1px dashed #334155;padding-top:8px;margin-top:6px;">
-          <label style="font-size:11px;color:#cbd5e1;display:block;margin-bottom:4px;">去官网查完后手动登记真实百分比（留空=恢复「额度未填」）：</label>
-          <div style="display:flex;gap:6px;">
-            <input type="number" id="manualQuotaPct" min="0" max="100" step="1" placeholder="0-100 或留空"
-                   value="${hasPct ? pct : ''}" style="width:110px;background:#0f172a;border:1px solid #334155;color:#fff;padding:4px 6px;border-radius:4px;font-size:12px;" />
-            <button class="btn btn-ghost" onclick="handleUpdateManualQuota('${agent.id}')">保存实查值</button>
-            <button class="btn btn-ghost" onclick="handleClearManualQuota('${agent.id}')">标为额度未填</button>
-          </div>
+        <div class="detail-actions">
+          <button type="button" class="btn btn-primary" onclick="handleUpdateManualQuota(${agentArg})">保存实查值</button>
+          <button type="button" class="btn btn-ghost" onclick="handleClearManualQuota(${agentArg})">标为额度未填</button>
         </div>
       </div>
+    </details>
 
-      <div class="identity-block">
-        <h4>🛠️ 擅长与已装备技能</h4>
-        <div style="font-size:12px;color:#cbd5e1;margin-bottom:6px;">特长：${escapeHTML(agent.specialty)}</div>
-        <div style="display:flex;gap:4px;flex-wrap:wrap;">${skillBadges}</div>
-      </div>
+    <section class="section-body">
+      <h3 class="detail-title">擅长与技能</h3>
+      <p class="detail-meta" data-preserve-text>${escapeHTML(agent.specialty || '暂未填写特长')}</p>
+      <div class="detail-actions">${skillBadges}</div>
+    </section>
 
-      <div class="identity-block">
-        <h4>🔄 楼层调岗（也可直接拖拽左侧图标）</h4>
-        <div style="display:flex;gap:6px;flex-wrap:wrap;">
-          <button class="btn btn-ghost" onclick="callOfficeAction('moveagent', {id:'${agent.id}', floor:'manager'})">🏢 调至 2楼经理</button>
-          <button class="btn btn-ghost" onclick="callOfficeAction('moveagent', {id:'${agent.id}', floor:'worker'})">🛠️ 调至 1楼员工</button>
-          <button class="btn btn-ghost" onclick="callOfficeAction('moveagent', {id:'${agent.id}', floor:'rest'})">🌿 调至 院子休息</button>
+    <details class="detail-section" data-section="role"${sectionOpen('role')}>
+      <summary>调岗与休息</summary>
+      <div class="section-body">
+        <p class="detail-meta">更改成员岗位，也可拖拽成员到对应楼层。</p>
+        <div class="detail-actions">
+          <button type="button" class="btn btn-ghost" onclick="callOfficeAction('moveagent', {id:${agentArg}, floor:'manager'})">${icon('users')}调至经理</button>
+          <button type="button" class="btn btn-ghost" onclick="callOfficeAction('moveagent', {id:${agentArg}, floor:'worker'})">${icon('user')}调至员工</button>
+          <button type="button" class="btn btn-ghost" onclick="callOfficeAction('moveagent', {id:${agentArg}, floor:'rest'})">${icon('refresh')}调至休息</button>
         </div>
       </div>
-    </div>
+    </details>
   `;
+  neutralizePanel("agentProfileContent");
 }
 
 async function handleUpdateManualQuota(agentId) {
@@ -942,6 +881,9 @@ async function handleSyncProfiles() {
 async function openTaskPrivateThread(taskId) {
   APP_STATE.selectedTaskId = taskId;
   switchRightTab("thread");
+  renderSelectedTaskThread();
+  openDetailPanel();
+  document.getElementById('panelThread').scrollTop = 0;
   if (APP_STATE.backendOnline) {
     const msgs = await callOfficeAction("listmessages", { task_id: taskId });
     APP_STATE.taskMessages[taskId] = msgs;
@@ -954,188 +896,230 @@ function renderSelectedTaskThread() {
   const container = document.getElementById("taskThreadContent");
   const badge = document.getElementById("threadTaskBadge");
   const task = APP_STATE.tasks.find(t => t.id === APP_STATE.selectedTaskId) || APP_STATE.tasks[0];
+  if (!container) return;
+  const sameTask = task && container.dataset.detailSelection === String(task.id);
+  const previousReviewer = sameTask && container.querySelector('#reviewAgentSelect');
+  const previousIssues = sameTask && container.querySelector('#reviewIssuesInput');
+  const sectionOpen = captureDetailSections(container, task ? task.id : '');
   if (!task) {
-    badge.textContent = "";
-    container.innerHTML = `
-      <div class="identity-block">
-        <h4>🔒 任务私聊汇报窗</h4>
-        <p style="font-size:12px;color:#94a3b8;line-height:1.5;">
-          当前还没有选中的任务。点击顶部 <strong>「🧪 一键塞入通用示例任务」</strong>，员工领单后即可在此处<strong>单独私聊汇报给经理</strong>（群里只留一条 🔒 提示，正文不刷屏，省经理 Token）。
-        </p>
-      </div>
-    `;
+    if (badge) badge.textContent = '';
+    container.innerHTML = `<section class="section-body"><h2 class="detail-title">任务详情</h2><p class="detail-meta">选择一个任务，查看进度、执行或向经理汇报。</p></section>`;
     return;
   }
 
   APP_STATE.selectedTaskId = task.id;
-  badge.textContent = `(${task.id})`;
+  if (badge) badge.textContent = task.id;
+  const taskArg = escapeHTML(JSON.stringify(String(task.id)));
+  const terminal = task.status === 'accepted_done';
+  const disabled = terminal ? ' disabled' : '';
   const msgs = APP_STATE.taskMessages[task.id] || [];
-
-  // 可转交的其他厂商员工列表（页面上直观标注同厂商拦截）
-  const workers = APP_STATE.agents.filter(a => a.floor === "worker" && a.status !== "exhausted");
-  const transferOptions = workers.map(w => {
-    const sameVendor = task.assigned_vendor && w.vendor.toLowerCase() === task.assigned_vendor.toLowerCase();
-    return `<option value="${w.id}">${escapeHTML(w.name)} (${escapeHTML(w.vendor)} · ${escapeHTML(w.badge)})${sameVendor ? ' [同厂商将拦截]' : ' [可跨厂商轮换]'}</option>`;
-  }).join("");
-
   const draft = APP_STATE.reportDrafts[task.id] || {};
+  const worker = APP_STATE.agents.find(a => a.id === task.assigned_to);
+  const channel = worker ? worker.access_kind : '';
+  const statusLabels = {
+    assigned: '待领取', accepted: '已领取', working: '进行中', in_review: '待独立审查',
+    delivered: '待验收', accepted_done: '已验收', rejected: '待返修',
+  };
+  const workers = APP_STATE.agents.filter(a => a.floor === 'worker' && a.status !== 'exhausted');
+  const transferOptions = workers.map(w => {
+    const sameVendor = task.assigned_vendor && String(w.vendor).trim().toLowerCase() === String(task.assigned_vendor).trim().toLowerCase();
+    return `<option value="${escapeHTML(w.id)}">${escapeHTML(w.name)} (${escapeHTML(w.vendor)} · ${escapeHTML(w.badge)})${sameVendor ? ' [同厂商将拦截]' : ' [可跨厂商轮换]'}</option>`;
+  }).join('') || '<option value="">暂无可转交员工，请先招募或调岗</option>';
   const reviewerCandidates = APP_STATE.agents.filter(
-    a => a.floor !== "rest" && a.status !== "exhausted" && a.id !== task.assigned_to
+    a => a.floor !== 'rest' && a.status !== 'exhausted' && a.id !== task.assigned_to
   );
+  const reviewerId = previousReviewer ? previousReviewer.value : task.reviewer_id;
   const reviewerOptions = reviewerCandidates.map(r =>
-    `<option value="${r.id}" ${r.id === task.reviewer_id ? 'selected' : ''}>${escapeHTML(r.name)} (${escapeHTML(r.badge)})</option>`
-  ).join("");
+    `<option value="${escapeHTML(r.id)}"${r.id === reviewerId ? ' selected' : ''}>${escapeHTML(r.name)} (${escapeHTML(r.badge)})</option>`
+  ).join('') || '<option value="">暂无独立审查者，请先招募或调岗</option>';
   const reviewIssues = task.review_issues || [];
-  const childSubtasks = (task.subtask_ids || [])
-    .map(sid => APP_STATE.tasks.find(t => t.id === sid))
-    .filter(Boolean);
+  const childSubtasks = (task.subtask_ids || []).map(sid => APP_STATE.tasks.find(t => t.id === sid)).filter(Boolean);
+  const childrenReady = childSubtasks.length > 0 && childSubtasks.length === (task.subtask_ids || []).length &&
+    childSubtasks.every(sub => sub.worker_reported && (!sub.requires_code_review || sub.review_status === 'approved'));
+
+  // One contextual next step; all alternatives retain the existing handlers.
+  const call = (handler, ...args) => `${handler}(${args.map(arg => JSON.stringify(arg)).join(', ')})`;
+  const actions = {
+    claim: { label: '领取任务', icon: 'check', code: call('handleClaimTask', task.id, task.assigned_to || '') },
+    run: { label: channel === 'cli' ? '通过 CLI 执行' : channel === 'api' ? '通过 API 执行' : 'API / CLI 真调执行', icon: 'send', code: call('handleRunAdapterTask', task.id, true) },
+    dryrun: { label: '干跑演练（0 消耗）', icon: 'refresh', code: call('handleRunAdapterTask', task.id, false) },
+    web: { label: '打开网页并复制指令', icon: 'external', code: call('handleOpenWebAndCopyPrompt', task.id) },
+    export: { label: '导出 .md 并复制触发句', icon: 'box', code: call('handleExportTaskMd', task.id) },
+    copy: { label: '仅复制任务指令', icon: 'chat', code: call('handleCopyWorkerPrompt', task.id), readOnly: true },
+    diff: { label: '抓取本地 git diff 摘要', icon: 'search', code: call('handleCollectGitDiff', task.id), readOnly: true },
+    deliver: { label: '经理统筹交付', icon: 'box', code: call('handleDeliverFinalResult', task.id) },
+    accept: { label: '验收通过', icon: 'check', code: call('handleReviewFinalResult', task.id, 'verified') },
+    reject: { label: '打回重做', icon: 'undo', code: call('handleReviewFinalResult', task.id, 'rejected') },
+    parentRun: { label: '并行执行 API / CLI 子单', icon: 'send', code: call('handleRunBigTaskSubtasks', task.id, true) },
+    parentDryrun: { label: '批量干跑子单（0 消耗）', icon: 'refresh', code: call('handleRunBigTaskSubtasks', task.id, false) },
+    aggregate: { label: '汇总全部子单交付', icon: 'box', code: call('handleAggregateBigTask', task.id) },
+    review: { label: '审阅代码与问题清单', icon: 'eye', code: "document.querySelector('#taskThreadContent details[data-section=review]').open = true; document.getElementById('reviewAgentSelect').focus()", readOnly: true },
+    reviewDryrun: { label: '干跑 diff 审查', icon: 'search', code: call('handleAutoCodeReview', task.id, false) },
+    reviewLive: { label: '真调审查者读 diff', icon: 'eye', code: call('handleAutoCodeReview', task.id, true) },
+    reviewPass: { label: '手动审查通过', icon: 'check', code: call('handleSubmitCodeReview', task.id, true, false) },
+    reviewReject: { label: '提交问题并打回', icon: 'undo', code: `if (document.getElementById('reviewIssuesInput').value.trim()) { ${call('handleSubmitCodeReview', task.id, false, false)} } else { showToast('请填写实际问题清单后再打回', true); document.getElementById('reviewIssuesInput').focus(); }` },
+    merge: { label: '请求合并授权', icon: 'lock', code: call('handleRequestCriticalApproval', task.id, 'merge') },
+    deleteCode: { label: '请求删代码授权', icon: 'lock', code: call('handleRequestCriticalApproval', task.id, 'delete_code') },
+    deploy: { label: '请求部署授权', icon: 'lock', code: call('handleRequestCriticalApproval', task.id, 'deploy') },
+    reassign: { label: '转交任务', icon: 'corner', code: call('handleReassignTask', task.id) },
+  };
+  actions.claim.code += `.then(() => {
+    const current = APP_STATE.tasks.find(t => t.id === ${JSON.stringify(task.id)});
+    const report = document.querySelector('#taskThreadContent details[data-section=report]');
+    if (report && current && ['accepted', 'working'].includes(current.status) && APP_STATE.selectedTaskId === current.id) report.open = true;
+  })`;
+  const chosenExecution = channel === 'desktop' ? 'export' : ['web', 'subscription'].includes(channel) ? 'web' : ['api', 'cli'].includes(channel) ? 'run' : 'copy';
+  let primaryKeys = [];
+  if (!terminal) {
+    if (task.status === 'delivered') primaryKeys = ['accept', 'reject'];
+    else if (task.is_parent) primaryKeys = [childrenReady ? 'aggregate' : 'parentRun'];
+    else if (task.status === 'assigned') primaryKeys = ['claim'];
+    else if (task.requires_code_review && task.review_status !== 'approved' && (task.status === 'in_review' || (task.worker_reported && task.status !== 'rejected'))) primaryKeys = ['review'];
+    else if (task.worker_reported && task.status !== 'rejected') primaryKeys = ['deliver'];
+    else primaryKeys = [chosenExecution];
+  }
+  const actionButton = (key, primary = false) => {
+    const action = actions[key];
+    return `<button type="button" class="btn ${primary && key !== 'reject' ? 'btn-primary' : 'btn-ghost'}" onclick="${escapeHTML(action.code)}"${terminal && !action.readOnly && !['merge', 'deleteCode', 'deploy'].includes(key) ? ' disabled' : ''}>${icon(action.icon)}${escapeHTML(action.label)}</button>`;
+  };
+  const secondaryActions = keys => keys.filter(key => !primaryKeys.includes(key)).map(key => actionButton(key)).join('');
+  const reportInitiallyOpen = !terminal && !task.is_parent && !task.worker_reported && ['accepted', 'working', 'rejected'].includes(task.status);
 
   container.innerHTML = `
-    <div class="profile-box">
-      <div class="identity-block">
-        <h4>🔒 私聊专线：${escapeHTML(task.assigned_name)} ⇄ 经理 ${escapeHTML(task.manager_name)}</h4>
-        <div style="font-size:12px;font-weight:700;margin-bottom:4px;">${escapeHTML(task.id)} · ${escapeHTML(task.title)}</div>
-        ${renderTaskStepFlow(task.status, task)}
-        <div style="font-size:11px;color:var(--text-secondary);margin-top:6px;">
-          • <strong>当前执行员工</strong>：${escapeHTML(task.assigned_name)}（厂商：${escapeHTML(task.assigned_vendor || '待认领')}）<br/>
-          • <strong>A message, not the conversation</strong>：汇报只传【结论 / 改动文件 / 测试结果】，不传全对话记录。
-        </div>
-      </div>
+    <header class="detail-header">
+      <h2 class="detail-title" data-preserve-text>${escapeHTML(task.title)}</h2>
+      <p class="detail-meta"><strong data-preserve-text>${escapeHTML(statusLabels[task.status] || task.status)}</strong> · <span data-preserve-text>${escapeHTML(task.id)}</span></p>
+      <p class="detail-meta">执行：<strong data-preserve-text>${escapeHTML(task.assigned_name || '待指派')}</strong> · <span data-preserve-text>${escapeHTML(task.assigned_vendor || '厂商待确定')}${channel ? ` / ${escapeHTML(channel)}` : ''}</span><br>经理：<span data-preserve-text>${escapeHTML(task.manager_name || '待指定')}</span></p>
+      ${renderTaskStepFlow(task.status, task)}
+      ${primaryKeys.length ? `<div class="detail-actions">${primaryKeys.map(key => actionButton(key, true)).join('')}</div>` : '<p class="detail-meta">任务已验收，保留交付与汇报记录供查阅。</p>'}
+      ${['api', 'cli'].includes(channel) && primaryKeys.includes('run') ? '<p class="detail-meta">调用已配置的真实模型；API 密钥仅读环境变量。</p>' : ''}
+      ${task.circuit_breaker ? `<p class="detail-meta" data-preserve-text>${icon('alert')}需人工处理：${escapeHTML(task.circuit_breaker)}</p>` : ''}
+    </header>
 
-      ${task.is_parent ? `
-      <div class="identity-block">
-        <h4>🧩 大任务子单进度看板 (${childSubtasks.length} 张子单)</h4>
-        <div style="display:flex;flex-direction:column;gap:5px;margin-bottom:8px;">
-          ${childSubtasks.map(sub => `
-            <button type="button" class="btn btn-ghost" style="justify-content:space-between;width:100%;" onclick="openTaskPrivateThread('${sub.id}')">
-              <span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${escapeHTML(sub.id)} · ${escapeHTML(sub.title)}</span>
-              <span class="access-badge ${sub.review_status === 'approved' || sub.status === 'delivered' ? 'green' : sub.status === 'rejected' ? 'red' : 'orange'}">${escapeHTML(sub.requires_code_review ? (sub.review_status || sub.status) : sub.status)}</span>
-            </button>
-          `).join("")}
-        </div>
-        <div style="display:flex;gap:6px;flex-wrap:wrap;">
-          <button type="button" class="btn btn-ghost btn-xs" onclick="handleRunBigTaskSubtasks('${task.id}', false)">🧪 批量干跑子单</button>
-          <button type="button" class="btn btn-primary btn-xs" onclick="handleRunBigTaskSubtasks('${task.id}', true)">🚀 并行真调 API/CLI</button>
-          <button type="button" class="btn btn-ghost btn-xs" onclick="handleAggregateBigTask('${task.id}')">📦 汇总总交付</button>
-        </div>
-      </div>
-      ` : ""}
+    ${task.final_delivery_text ? `<section class="section-body"><h3 class="detail-title">交付结果</h3><p data-preserve-text style="white-space:pre-wrap;overflow-wrap:anywhere;">${formatChatTextWithMentions(task.final_delivery_text)}</p></section>` : ''}
 
-      ${task.requires_code_review ? `
-      <div class="identity-block">
-        <h4>🔍 写—审—改闭环（改代码任务专属 · 写手与审查必须分开）</h4>
-        <div style="font-size:11px;color:var(--text-secondary);margin-bottom:6px;">
-          写代码：<strong>${escapeHTML(task.assigned_name)}</strong> → 独立审查：<strong>${escapeHTML(task.reviewer_name || '待指定')}</strong>
-          · 状态：<span class="access-badge ${task.review_status === 'approved' ? 'green' : task.review_status === 'changes_requested' ? 'red' : 'orange'}">${escapeHTML(task.review_status || 'pending_review')}</span>
-          ${task.revision_round ? ` · 已返修 ${task.revision_round} 轮` : ''}
+    ${task.is_parent ? `
+      <section class="section-body">
+        <h3 class="detail-title">子单进度 · ${childSubtasks.length}</h3>
+        <div class="subtask-list">
+          ${childSubtasks.map(sub => `<button type="button" class="btn btn-ghost subtask-row" onclick="${escapeHTML(call('openTaskPrivateThread', sub.id))}"><span data-preserve-text>${escapeHTML(sub.id)} · ${escapeHTML(sub.title)}</span><span class="detail-meta" data-preserve-text>${escapeHTML(statusLabels[sub.status] || sub.status)}${sub.requires_code_review ? ` · 审查 ${escapeHTML(sub.review_status || 'pending_review')}` : ''}</span></button>`).join('') || '<p class="detail-meta">暂无可显示的子单。</p>'}
         </div>
-        ${reviewIssues.length > 0 ? `
-          <div class="review-checklist-box">
-            <div style="font-weight:700;margin-bottom:4px;color:#fca5a5;">当前待修改问题清单：</div>
-            ${reviewIssues.map((it, idx) => `<div class="review-issue-item">${idx + 1}. ${escapeHTML(it)}</div>`).join("")}
+      </section>
+      <details class="detail-section" data-section="subtasks"${sectionOpen('subtasks')}>
+        <summary>子单批量执行与汇总</summary>
+        <div class="section-body">
+          <p class="detail-meta">真调仅执行 API / CLI 子单；网页与桌面通道等待实际回执。全部子单汇报、代码审查通过后再汇总。</p>
+          <div class="detail-actions">${secondaryActions(['parentRun', 'parentDryrun', 'aggregate'])}</div>
+        </div>
+      </details>
+    ` : ''}
+
+    <details class="detail-section" data-section="brief"${sectionOpen('brief')}>
+      <summary>任务目标与验收标准</summary>
+      <div class="section-body">
+        ${[['目标', task.goal], ['输入内容', task.input_text], ['输出格式', task.output_format], ['验收标准', task.acceptance], ['执行约束', task.rule_footer]].map(([label, value]) => `<h3 class="detail-title">${label}</h3><p data-preserve-text style="white-space:pre-wrap;overflow-wrap:anywhere;">${escapeHTML(value || '未填写')}</p>`).join('')}
+        ${task.parent_task_id ? `<div class="detail-actions"><button type="button" class="btn btn-ghost" onclick="${escapeHTML(call('openTaskPrivateThread', task.parent_task_id))}">${icon('corner')}打开所属大任务</button></div>` : ''}
+      </div>
+    </details>
+
+    <details class="detail-section${terminal ? ' hidden' : ''}" data-section="report"${sectionOpen('report', reportInitiallyOpen || (!terminal && Boolean(draft.conclusion || draft.files || draft.tests)))}>
+      <summary>${task.worker_reported ? '补充私聊汇报' : '向经理汇报结果'}</summary>
+      <div class="section-body">
+        <p class="detail-meta">只传结论、改动文件与测试结果，不传完整对话。正文仅在任务私聊中展示，群里只留提示。</p>
+        <form onsubmit="handleWorkerPrivateReport(event, ${taskArg})" class="conclusion-grid">
+          <div class="form-group">
+            <label for="reportConclusionInput">结论</label>
+            <input type="text" id="reportConclusionInput" class="obsidian-input" required placeholder="做了什么，是否完成" value="${escapeHTML(draft.conclusion || '')}" oninput="updateReportDraft(${taskArg}, 'conclusion', this.value)"${disabled} />
           </div>
-        ` : ""}
-        <div style="display:flex;gap:6px;margin-bottom:6px;align-items:center;">
-          <select id="reviewAgentSelect" class="select-sm" style="flex:1;">${reviewerOptions}</select>
-        </div>
-        <textarea id="reviewIssuesInput" rows="2" class="obsidian-input" placeholder="审查只写问题清单（每行一条：文件:行号 问题描述）；点下方「通过」则无需填问题" style="margin-bottom:6px;"></textarea>
-        <div style="display:flex;gap:6px;flex-wrap:wrap;">
-          <button type="button" class="btn btn-ghost btn-xs" onclick="handleAutoCodeReview('${task.id}', false)">🤖 自动读 diff 审查 (干跑)</button>
-          <button type="button" class="btn btn-primary btn-xs" onclick="handleAutoCodeReview('${task.id}', true)">🚀 真调审查者读 diff</button>
-          <button type="button" class="btn btn-success btn-xs" onclick="handleSubmitCodeReview('${task.id}', true, false)">✅ 手动审查通过</button>
-          <button type="button" class="btn btn-danger btn-xs" onclick="handleSubmitCodeReview('${task.id}', false, true)">↩ 打回重做 (问题清单)</button>
-        </div>
-      </div>
-      ` : ""}
-
-      <!-- 快捷操作栏：4种调用方法 + 结论-only 汇报模板 + 关键操作门禁 -->
-      <div class="identity-block">
-        <h4>⚡ 员工执行与结论-only 汇报</h4>
-        <div style="margin-bottom:8px;">
-          <label style="font-size:11px;color:var(--text-secondary);display:block;margin-bottom:3px;">
-            📁 目标工作文件夹路径（选填，供 CLI 执行或给 WorkBuddy 导出 .md 工单用）：
-          </label>
-          <input type="text" id="customWorkspaceInput" class="obsidian-input"
-                 placeholder="例：C:\\Users\\你的用户名\\Desktop\\my-project（留空默认本仓库）"
-                 value="${escapeHTML(APP_STATE.customWorkspaceDir || '')}"
-                 oninput="APP_STATE.customWorkspaceDir = this.value.trim()" />
-        </div>
-        <div style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:8px;">
-          <button class="btn btn-ghost" onclick="handleRunAdapterTask('${task.id}', false)" title="不花钱演练路由与降级链">
-            🧪 干跑演练 (0消耗)
-          </button>
-          <button class="btn btn-primary" onclick="handleRunAdapterTask('${task.id}', true)" title="调用真实 API（读环境变量 Key）或本地 CLI（如 Codex）执行并回填结论">
-            🚀 真调执行 (API / CLI)
-          </button>
-          <button class="btn btn-ghost" onclick="handleOpenWebAndCopyPrompt('${task.id}')" title="方式1：直接打开该员工的免费聊天网页，并自动把标准工单指令复制到剪贴板">
-            🌐 打开网页 + 复制指令
-          </button>
-          <button class="btn btn-ghost" onclick="handleExportTaskMd('${task.id}')" title="生成工单 .md 并复制 @文件 触发句，供桌面端/信箱执行">
-            📂 导出 .md + 复制 @触发句
-          </button>
-          <button class="btn btn-ghost" onclick="handleCollectGitDiff('${task.id}')" title="读取工作区 git status/diff 摘要并填入改动文件（0 Token 质检）">
-            🔍 抓取本地 git diff 摘要
-          </button>
-          <button class="btn btn-ghost" onclick="handleCopyWorkerPrompt('${task.id}')" title="仅复制纯文本模板指令">
-            📋 仅复制指令
-          </button>
-          <button class="btn btn-ghost" onclick="handleDeliverFinalResult('${task.id}')">
-            📦 经理统筹交付总结果
-          </button>
-        </div>
-
-        <form onsubmit="handleWorkerPrivateReport(event, '${task.id}')" class="conclusion-grid">
-          <label style="font-size:11px;color:var(--text-secondary);">📤 固定「结论-only」汇报模板（经理不读整段对话）：</label>
-          <input type="text" id="reportConclusionInput" class="obsidian-input" required
-                 placeholder="1. 【结论】一句话说清做了什么、是否完成..."
-                 value="${escapeHTML(draft.conclusion || '')}"
-                 oninput="updateReportDraft('${task.id}', 'conclusion', this.value)" />
-          <input type="text" id="reportFilesInput" class="obsidian-input"
-                 placeholder="2. 【改动文件】例：ai_farm/office_store.py, web/app.js（或填 无）"
-                 value="${escapeHTML(draft.files || '')}"
-                 oninput="updateReportDraft('${task.id}', 'files', this.value)" />
-          <input type="text" id="reportTestInput" class="obsidian-input"
-                 placeholder="3. 【测试结果】例：python tests/test_farm.py 全部 PASS（或 未运行）"
-                 value="${escapeHTML(draft.tests || '')}"
-                 oninput="updateReportDraft('${task.id}', 'tests', this.value)" />
-          <button type="submit" class="btn btn-ghost" style="width:100%;">🔒 发送结论-only 私聊汇报（不刷大群）</button>
+          <div class="form-group">
+            <label for="reportFilesInput">改动文件</label>
+            <input type="text" id="reportFilesInput" class="obsidian-input" placeholder="文件路径，用逗号分隔；没有则填「无」" value="${escapeHTML(draft.files || '')}" oninput="updateReportDraft(${taskArg}, 'files', this.value)"${disabled} />
+          </div>
+          <div class="form-group">
+            <label for="reportTestInput">测试结果</label>
+            <input type="text" id="reportTestInput" class="obsidian-input" placeholder="实际运行的测试及结果；未运行请如实填写" value="${escapeHTML(draft.tests || '')}" oninput="updateReportDraft(${taskArg}, 'tests', this.value)"${disabled} />
+          </div>
+          <div class="detail-actions"><button type="submit" class="btn btn-ghost"${disabled}>${icon('lock')}发送私聊汇报</button></div>
         </form>
-
-        <div style="border-top:1px dashed var(--border);padding-top:8px;margin-bottom:8px;">
-          <label style="font-size:11px;color:var(--text-secondary);display:block;margin-bottom:4px;">🛡️ 关键操作人工授权测试（合并 / 删代码 / 部署，默认先问老板）：</label>
-          <div style="display:flex;gap:6px;flex-wrap:wrap;">
-            <button type="button" class="btn btn-ghost btn-xs" onclick="handleRequestCriticalApproval('${task.id}', 'merge')">请求合并授权</button>
-            <button type="button" class="btn btn-ghost btn-xs" onclick="handleRequestCriticalApproval('${task.id}', 'delete_code')">请求删代码授权</button>
-            <button type="button" class="btn btn-ghost btn-xs" onclick="handleRequestCriticalApproval('${task.id}', 'deploy')">请求部署授权</button>
-          </div>
-        </div>
-
-        <div style="border-top:1px dashed var(--border);padding-top:8px;">
-          <label style="font-size:11px;color:var(--text-secondary);display:block;margin-bottom:4px;">↪ 跨厂商轮换转交（强制仅限不同厂商，禁止同家多开倒手）：</label>
-          <div style="display:flex;gap:6px;">
-            <select id="reassignTargetSelect" class="select-sm" style="flex:1;">${transferOptions}</select>
-            <button type="button" class="btn btn-ghost" onclick="handleReassignTask('${task.id}')">↪ 转交</button>
-          </div>
-        </div>
       </div>
+    </details>
 
-      <!-- 私聊消息流 -->
-      <div class="identity-block">
-        <h4>💬 私聊汇报记录 (${msgs.length} 条)</h4>
-        <div style="display:flex;flex-direction:column;gap:8px;max-height:260px;overflow-y:auto;">
-          ${msgs.map(m => `
-            <div style="background:var(--bg-card);border:1px solid var(--border);border-radius:var(--radius-sm);padding:7px 9px;font-size:12px;">
-              <div style="display:flex;justify-content:space-between;color:var(--text-muted);font-size:10px;margin-bottom:3px;">
-                <strong>${escapeHTML(m.sender_name)}</strong>
-                <span>${escapeHTML(m.created_at || '')}</span>
-              </div>
-              <div style="white-space:pre-wrap;line-height:1.45;">${escapeHTML(m.text)}</div>
-            </div>
-          `).join("")}
-        </div>
+    <details class="detail-section${terminal ? ' hidden' : ''}" data-section="execution"${sectionOpen('execution')}>
+      <summary>其他执行方式</summary>
+      <div class="section-body">
+        <p class="detail-meta">干跑只演练路由，不代表真实完成。真调遵循模型、额度与降级限制；网页、桌面执行需实际回填结果。</p>
+        <div class="detail-actions">${secondaryActions(['run', 'dryrun', 'web', 'export', 'copy'])}</div>
       </div>
-    </div>
+    </details>
+
+    ${task.requires_code_review ? `
+      <details class="detail-section" data-section="review"${sectionOpen('review')}>
+        <summary>独立代码审查</summary>
+        <div class="section-body">
+          <p class="detail-meta">写手与审查者必须分开。当前审查者：<strong data-preserve-text>${escapeHTML(task.reviewer_name || '待指定')}</strong> · <span data-preserve-text>${escapeHTML(task.review_status || 'pending_review')}</span>${task.revision_round ? ` · 已返修 ${escapeHTML(task.revision_round)} 轮` : ''}</p>
+          ${reviewIssues.length ? `<h3 class="detail-title">待修改问题</h3><ol>${reviewIssues.map(issue => `<li data-preserve-text>${escapeHTML(issue)}</li>`).join('')}</ol>` : ''}
+          <div class="form-group">
+            <label for="reviewAgentSelect">独立审查者</label>
+            <select id="reviewAgentSelect" class="select-sm"${disabled}>${reviewerOptions}</select>
+          </div>
+          <div class="form-group">
+            <label for="reviewIssuesInput">问题清单</label>
+            <textarea id="reviewIssuesInput" rows="3" class="obsidian-input" placeholder="每行一条：文件:行号 问题描述；通过时无需填写"${disabled}>${escapeHTML(previousIssues ? previousIssues.value : '')}</textarea>
+          </div>
+          <p class="detail-meta">手动打回必须填写实际问题。干跑仅用于演练，不代替真实审查。</p>
+          <div class="detail-actions">${secondaryActions(['reviewLive', 'reviewDryrun', 'reviewPass', 'reviewReject'])}</div>
+        </div>
+      </details>
+    ` : ''}
+
+    <details class="detail-section${terminal ? ' hidden' : ''}" data-section="delivery"${sectionOpen('delivery')}>
+      <summary>交付与验收</summary>
+      <div class="section-body">
+        <p class="detail-meta">请先汇报真实结论；代码任务必须独立审查通过，才能交付和验收。</p>
+        <div class="detail-actions">${secondaryActions(['deliver', ...(task.status === 'delivered' || terminal ? ['accept', 'reject'] : [])])}</div>
+      </div>
+    </details>
+
+    <details class="detail-section" data-section="workspace"${sectionOpen('workspace')}>
+      <summary>工作区与本地改动</summary>
+      <div class="section-body">
+        <div class="form-group">
+          <label for="customWorkspaceInput">目标工作文件夹（选填）</label>
+          <input type="text" id="customWorkspaceInput" class="obsidian-input" placeholder="留空使用本仓库" value="${escapeHTML(APP_STATE.customWorkspaceDir || '')}" oninput="APP_STATE.customWorkspaceDir = this.value.trim()" />
+        </div>
+        <p class="detail-meta">用于 CLI、diff 审查与 .md 工单导出。抓取 diff 只读取本地改动摘要，不调用模型。</p>
+        <div class="detail-actions">${actionButton('diff')}</div>
+      </div>
+    </details>
+
+    <details class="detail-section" data-section="approval"${sectionOpen('approval')}>
+      <summary>关键操作授权</summary>
+      <div class="section-body">
+        <p class="detail-meta">合并、删代码、部署必须先请求人工授权；请求不等于执行。</p>
+        <div class="detail-actions">${secondaryActions(['merge', 'deleteCode', 'deploy'])}</div>
+      </div>
+    </details>
+
+    <details class="detail-section${terminal ? ' hidden' : ''}" data-section="reassign"${sectionOpen('reassign')}>
+      <summary>跨厂商转交</summary>
+      <div class="section-body">
+        <p class="detail-meta">仅限不同厂商轮换；同厂商倒手、休息或额度耗尽的成员会被拦截。</p>
+        <div class="form-group">
+          <label for="reassignTargetSelect">接手员工</label>
+          <select id="reassignTargetSelect" class="select-sm"${disabled}>${transferOptions}</select>
+        </div>
+        <div class="detail-actions">${actionButton('reassign')}</div>
+      </div>
+    </details>
+
+    <section class="section-body">
+      <h3 class="detail-title">私聊汇报记录 · ${msgs.length}</h3>
+      <div class="thread-messages">
+        ${msgs.map(m => `<article class="thread-message"><header class="detail-meta"><strong data-preserve-text>${escapeHTML(m.sender_name)}</strong> <span data-preserve-text>${escapeHTML(m.created_at || '')}</span></header><p data-preserve-text style="white-space:pre-wrap;overflow-wrap:anywhere;">${escapeHTML(m.text)}</p></article>`).join('') || '<p class="detail-meta">暂无私聊汇报。执行后请提交实际结果。</p>'}
+      </div>
+    </section>
   `;
+  neutralizePanel("taskThreadContent");
 }
 
 // =========================================================================
@@ -1182,89 +1166,62 @@ function renderTeamOverview() {
 // 技能中心 (Skill Center — 12 种子技能 + 高级模型裁判)
 // =========================================================================
 function renderSkillCenter() {
-  const ov = document.getElementById("floorSkillOverview");
-  const floors = [
-    { key: "manager", title: "🏢 2楼 经理层技能装配" },
-    { key: "worker", title: "🛠️ 1楼 员工层技能装配" },
-    { key: "rest", title: "🌿 院子休息区" },
-  ];
-  ov.innerHTML = floors.map(f => {
-    const list = APP_STATE.agents.filter(a => a.floor === f.key);
-    return `
-      <div class="floor-ov-box">
-        <div style="font-weight:700;margin-bottom:6px;color:#38bdf8;">${f.title} (${list.length})</div>
-        ${list.map(ag => `
-          <div style="display:flex;justify-content:space-between;padding:3px 0;border-bottom:1px dashed #334155;font-size:11px;">
-            <span>${escapeHTML(ag.name)}</span>
-            <span style="color:#94a3b8;">${(ag.skills || []).length} 个技能</span>
-          </div>
-        `).join("")}
-      </div>
-    `;
-  }).join("");
-
-  const grid = document.getElementById("skillsGrid");
-  grid.innerHTML = APP_STATE.skills.map(sk => {
-    const carriers = APP_STATE.agents.filter(a => (a.skills || []).includes(sk.slug));
-    return `
-      <div class="skill-card">
-        <div style="display:flex;justify-content:space-between;align-items:center;">
-          <strong style="font-size:14px;">🛠️ ${escapeHTML(sk.name)}</strong>
-          <span class="vendor-chip">${escapeHTML(sk.category || '通用')}</span>
-        </div>
-        <div style="font-size:11px;color:#cbd5e1;background:#0f172a;padding:6px;border-radius:6px;border:1px solid #334155;">
-          <strong>固定步骤 (SOP)：</strong>${escapeHTML(sk.steps)}
-        </div>
-        <div style="font-size:11px;color:#34d399;">
-          💡 <strong>省额度原理：</strong>${escapeHTML(sk.savings_note || '')}
-        </div>
-        <div style="font-size:11px;color:#94a3b8;">
-          推荐模型：${escapeHTML(sk.best_for)}
-        </div>
-        <div style="margin-top:auto;padding-top:6px;border-top:1px dashed #334155;font-size:11px;">
-          <span>当前装备者 (${carriers.length})：</span>
-          ${carriers.map(c => `<span class="vendor-chip">${escapeHTML(c.name)}</span>`).join(" ") || '<span style="color:#64748b;">暂无</span>'}
-        </div>
-      </div>
-    `;
-  }).join("");
+  const ov = document.getElementById('floorSkillOverview');
+  const floors = [{ key: 'manager', title: '经理' }, { key: 'worker', title: '员工' }, { key: 'rest', title: '休息成员' }];
+  ov.innerHTML = floors.map(floor => {
+    const agents = APP_STATE.agents.filter(agent => agent.floor === floor.key);
+    return `<div class="floor-ov-box"><h4>${floor.title} · ${agents.length}</h4>
+      ${agents.map(agent => `<div class="kv-row"><span>${escapeHTML(agent.name)}</span><span>${(agent.skills || []).length} 个技能</span></div>`).join('') || '<p class="detail-meta">尚无成员</p>'}</div>`;
+  }).join('');
+  const grid = document.getElementById('skillsGrid');
+  const openSkills = new Set([...grid.querySelectorAll('details[open]')].map(el => el.dataset.skill));
+  grid.innerHTML = APP_STATE.skills.map(skill => {
+    const carriers = APP_STATE.agents.filter(agent => (agent.skills || []).includes(skill.slug));
+    return `<details class="skill-card" data-skill="${escapeHTML(skill.slug)}" ${openSkills.has(skill.slug) ? 'open' : ''}>
+      <summary><span class="skill-card-name">${escapeHTML(skill.name)}</span><span class="skill-card-category">${escapeHTML(skill.category || '通用')}</span>${icon('chevron')}</summary>
+      <div class="skill-detail"><div><h4>固定执行步骤</h4><p>${escapeHTML(skill.steps)}</p><h4>省额度原理</h4><p>${escapeHTML(skill.savings_note || '暂无说明')}</p></div>
+      <div><h4>适合的成员</h4><p>${escapeHTML(skill.best_for)}</p><h4>当前装配 · ${carriers.length}</h4><p>${carriers.map(agent => `<span class="vendor-chip">${escapeHTML(agent.name)}</span>`).join(' ') || '尚未装配'}</p></div></div>
+    </details>`;
+  }).join('');
 }
 
 async function handleRunSkillJudge() {
   const judgeId = document.getElementById("skillJudgeSelect").value;
   const res = await callOfficeAction("analyzeskillassignments", { judge_id: judgeId });
-  if (!res) return;
+  if (!res) {
+    neutralizePanel("judgeResultSection");
+    return;
+  }
   APP_STATE.latestRecommendations = res.recommendations || [];
   const box = document.getElementById("judgeResultSection");
   box.classList.remove("hidden");
 
   if (APP_STATE.latestRecommendations.length === 0) {
-    box.innerHTML = `<div>✅ 高级模型裁判 <strong>${escapeHTML(res.judge)}</strong> 评估完毕：当前所有在岗成员的技能均已处于最优配置！</div>`;
+    box.innerHTML = `<div>${icon('check')}高级模型裁判 <strong data-preserve-text>${escapeHTML(res.judge)}</strong> 评估完毕：当前所有在岗成员的技能均已处于最优配置！</div>`;
+    neutralizePanel("judgeResultSection");
     return;
   }
 
   box.innerHTML = `
-    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;flex-wrap:wrap;gap:8px;">
-      <strong>🧠 高级模型裁判「${escapeHTML(res.judge)}」打分推荐清单（请勾选批准后应用）：</strong>
-      <button class="btn btn-success" onclick="handleApplyApprovedSkills('${escapeHTML(res.judge)}')">
-        ✅ 批准并应用勾选项（同步发群通知）
-      </button>
+    <div class="recommendation-heading">
+      <strong data-preserve-text>${escapeHTML(res.judge)} 的技能推荐</strong>
+      <button class="btn btn-primary" onclick="handleApplyApprovedSkills(${escapeHTML(JSON.stringify(res.judge))})">应用勾选项</button>
     </div>
-    <div style="display:flex;flex-direction:column;gap:6px;max-height:240px;overflow-y:auto;">
+    <p class="detail-meta">由你确认后装配，并同步通知团队。</p>
+    <div class="recommendation-list">
       ${APP_STATE.latestRecommendations.map((r, idx) => `
-        <label style="display:flex;align-items:flex-start;gap:8px;background:#0f172a;padding:7px 10px;border-radius:6px;font-size:12px;cursor:pointer;">
-          <input type="checkbox" class="rec-skill-chk" data-idx="${idx}" checked style="margin-top:3px;" />
-          <div>
-            <div>
-              <strong>${escapeHTML(r.agent_name)}</strong> ➕ 装配技能 <strong>「${escapeHTML(r.skill_name)}」</strong>
-              <span class="access-badge green">匹配度 ${r.score} 分</span>
-            </div>
-            <div style="font-size:11px;color:#94a3b8;margin-top:2px;">${escapeHTML(r.reason)}</div>
-          </div>
-        </label>
+        <div class="recommendation-row">
+          <label class="recommendation-choice">
+            <input type="checkbox" class="rec-skill-chk" data-idx="${idx}" checked />
+            <span><strong data-preserve-text>${escapeHTML(r.agent_name)}</strong> · <span data-preserve-text>${escapeHTML(r.skill_name)}</span></span>
+            <span class="access-badge green">${escapeHTML(r.score)} 分</span>
+          </label>
+          <details class="recommendation-reason"><summary>推荐理由</summary><p data-preserve-text>${escapeHTML(r.reason)}</p></details>
+        </div>
       `).join("")}
     </div>
   `;
+  neutralizePanel("judgeResultSection");
 }
 
 async function handleApplyApprovedSkills(judgeName) {
@@ -1327,7 +1284,9 @@ async function handleWorkerPrivateReport(event, taskId) {
   });
   delete APP_STATE.reportDrafts[taskId];
   await openTaskPrivateThread(taskId);
-  showToast("🔒 结论-only 汇报已发送给经理（未贴全对话，大群仅留折叠提示）！");
+  document.querySelector('#taskThreadContent details[data-section=report]').open = false;
+  document.querySelector('#taskThreadContent details[data-section=execution]').open = false;
+  showToast("结论汇报已发送给经理，群里仅保留提示。");
 }
 
 async function handleCollectGitDiff(taskId) {
@@ -1577,6 +1536,7 @@ function openRecruitModal() {
   document.getElementById("loginOnceStatusBadge").className = "login-status-pill";
   document.getElementById("recruitModal").classList.remove("hidden");
   APP_STATE.recruitStep = 1;
+  switchRecruitPath(document.getElementById("recPathInput").value);
   recruitWizardGo(0);
 }
 
@@ -1594,6 +1554,13 @@ function switchRecruitPath(path) {
   document.getElementById("recWebFields").classList.toggle("hidden", path !== "web");
   document.getElementById("recCliFields").classList.toggle("hidden", path !== "cli");
   document.getElementById("recDesktopFields").classList.toggle("hidden", path !== "desktop");
+  for (const [channel, id] of Object.entries({ api: "recApiFields", web: "recWebFields", cli: "recCliFields", desktop: "recDesktopFields" })) {
+    document.getElementById(id).querySelectorAll("input, select").forEach(el => { el.disabled = channel !== path; });
+  }
+  document.getElementById("recKeyEnv").required = path === "api";
+  document.getElementById("recBaseUrl").required = path === "api";
+  document.getElementById("recLoginUrl").required = path === "web";
+  document.getElementById("recCliExec").required = path === "cli";
 }
 
 function handleLoginOnceClick() {
@@ -1760,7 +1727,9 @@ async function handleCreateTaskSubmit(event) {
   closeNewTaskModal();
   if (task) {
     APP_STATE.selectedTaskId = task.id;
-    showToast(`已在大群发布任务：${task.title}`);
+    switchMainView('workspace');
+    switchWorkspaceTab('tasks');
+    showToast(`已发布任务：${task.title}`);
   }
 }
 
@@ -1792,6 +1761,25 @@ async function handleCreateSkillSubmit(event) {
 // =========================================================================
 // 视图与辅助工具
 // =========================================================================
+document.addEventListener("keydown", event => {
+  const overlay = document.querySelector('.modal-backdrop:not(.hidden)') || document.querySelector('.approval-drawer.open') || document.querySelector('#paneDetail:not(.hidden)');
+  if (!overlay) return;
+  if (event.key === "Escape") {
+    event.preventDefault();
+    overlay.querySelector(".close-btn").click();
+    return;
+  }
+  if (event.key !== "Tab") return;
+  const controls = [...overlay.querySelectorAll("button, input, select, textarea, a[href], [tabindex]")]
+    .filter(el => !el.disabled && el.tabIndex >= 0 && el.getClientRects().length && getComputedStyle(el).visibility !== "hidden");
+  if (!controls.length) return;
+  const first = controls[0], last = controls[controls.length - 1];
+  if (!overlay.contains(document.activeElement) || (event.shiftKey && document.activeElement === first) || (!event.shiftKey && document.activeElement === last)) {
+    event.preventDefault();
+    (event.shiftKey ? last : first).focus();
+  }
+});
+
 function closeTopbarDropdown(id) {
   const el = document.getElementById(id);
   if (el) el.removeAttribute("open");
@@ -1804,10 +1792,60 @@ document.addEventListener("click", (ev) => {
 });
 
 function switchMainView(view) {
-  document.getElementById("tabBtnWorkspace").classList.toggle("active", view === "workspace");
-  document.getElementById("tabBtnSkills").classList.toggle("active", view === "skills");
-  document.getElementById("workspaceView").classList.toggle("hidden", view !== "workspace");
-  document.getElementById("skillsView").classList.toggle("hidden", view !== "skills");
+  closeDetailPanel();
+  for (const [key, id] of Object.entries({ workspace: 'tabBtnWorkspace', team: 'tabBtnTeam', skills: 'tabBtnSkills' })) {
+    const button = document.getElementById(id);
+    button.classList.toggle('active', key === view);
+    if (key === view) button.setAttribute('aria-current', 'page');
+    else button.removeAttribute('aria-current');
+  }
+  document.getElementById('currentViewLabel').textContent = ({ workspace: '工作台', team: '团队', skills: '技能库' })[view];
+  document.querySelector('.new-task-trigger').classList.toggle('btn-primary', view === 'workspace');
+  document.getElementById('workspaceView').classList.toggle('hidden', view === 'skills');
+  document.getElementById('skillsView').classList.toggle('hidden', view !== 'skills');
+  document.getElementById('paneRoster').classList.toggle('hidden', view !== 'team');
+  document.getElementById('paneChat').classList.toggle('hidden', view !== 'workspace');
+}
+
+function switchWorkspaceTab(tab) {
+  const activity = tab === 'activity';
+  document.getElementById('taskBoard').classList.toggle('hidden', activity);
+  document.getElementById('groupChatStream').classList.toggle('hidden', !activity);
+  document.getElementById('groupComposer').classList.toggle('hidden', !activity);
+  for (const [id, active] of [['workTabTasks', !activity], ['workTabActivity', activity]]) {
+    document.getElementById(id).classList.toggle('active', active);
+    document.getElementById(id).setAttribute('aria-pressed', String(active));
+  }
+  if (activity) {
+    const stream = document.getElementById('groupChatStream');
+    stream.scrollTop = stream.scrollHeight;
+  }
+}
+
+function toggleWorkspaceOverview() {
+  const panel = document.getElementById('workspaceOverview');
+  const hidden = panel.classList.toggle('hidden');
+  document.getElementById('overviewToggle').setAttribute('aria-expanded', String(!hidden));
+}
+
+let detailReturnFocus = null;
+function openDetailPanel() {
+  if (document.getElementById('workspaceView').classList.contains('hidden')) switchMainView('workspace');
+  const panel = document.getElementById('paneDetail');
+  if (panel.classList.contains('hidden')) detailReturnFocus = document.activeElement;
+  panel.classList.remove('hidden');
+  document.getElementById('detailBackdrop').classList.remove('hidden');
+  panel.querySelector('.close-btn').focus();
+}
+
+function closeDetailPanel() {
+  const panel = document.getElementById('paneDetail');
+  if (panel.classList.contains('hidden')) return;
+  panel.classList.add('hidden');
+  document.getElementById('detailBackdrop').classList.add('hidden');
+  if (detailReturnFocus?.isConnected) detailReturnFocus.focus();
+  else document.getElementById('tabBtnWorkspace').focus();
+  document.querySelectorAll('.task-pill.active').forEach(el => el.classList.remove('active'));
 }
 
 function switchRightTab(tab) {
@@ -1818,20 +1856,24 @@ function switchRightTab(tab) {
 }
 
 function switchMobilePane(pane) {
-  ["Roster", "Chat", "Detail"].forEach(p => {
-    const key = p.toLowerCase();
-    document.getElementById("mTab" + p).classList.toggle("active", key === pane);
-    document.getElementById("pane" + p).classList.toggle("active", key === pane);
-  });
+  if (pane === 'roster') switchMainView('team');
+  else if (pane === 'chat') {
+    switchMainView('workspace');
+    switchWorkspaceTab('activity');
+  } else if (pane === 'detail') {
+    switchMainView('workspace');
+    openDetailPanel();
+  }
 }
 
 function showToast(msg, isError = false) {
   const c = document.getElementById("toastContainer");
   const el = document.createElement("div");
-  el.className = "toast";
-  if (isError) el.style.borderColor = "#ef4444";
-  el.textContent = msg;
+  el.className = isError ? "toast toast-error" : "toast";
+  el.setAttribute("role", isError ? "alert" : "status");
+  el.innerHTML = `${icon(isError ? 'alert' : 'check')}<span>${escapeHTML(stripEmoji(msg))}</span>`;
   c.appendChild(el);
+  while (c.children.length > 2) c.firstElementChild.remove();
   setTimeout(() => el.remove(), 3600);
 }
 
