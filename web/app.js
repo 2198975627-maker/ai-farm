@@ -1884,13 +1884,13 @@ function updateBigTaskRoundtableMode() {
   document.querySelector('#bigTaskForm button[type="submit"]').disabled = enabled && !valid;
 }
 
-function openBigTaskModal() {
+function openBigTaskModal(forceRoundtable = false) {
   const mgrSel = document.getElementById('bigTaskManagerSelect');
   const managers = APP_STATE.agents.filter(a => a.floor === 'manager');
   if (mgrSel) {
     mgrSel.innerHTML = managers.map(m => `<option value="${escapeHTML(m.id)}">${escapeHTML(m.name)} (${escapeHTML(m.badge)})</option>`).join('');
   }
-  document.getElementById('bigTaskRoundtable').checked = false;
+  document.getElementById('bigTaskRoundtable').checked = Boolean(forceRoundtable || APP_STATE.draftMode === 'roundtable');
   const candidates = usableRoundtableManagers();
   ['A', 'B', 'C'].forEach(seat => {
     document.getElementById(`bigTaskSeat${seat}`).innerHTML = '<option value="">请选择经理</option>' + candidates.map(a =>
@@ -2238,6 +2238,10 @@ async function handleLoadSampleTeam() {
 // 派新任务弹窗 & 新增技能弹窗
 // =========================================================================
 function openNewTaskModal() {
+  if (APP_STATE.draftMode === "roundtable") {
+    openBigTaskModal(true);
+    return;
+  }
   const mgrSel = document.getElementById("taskManagerSelect");
   const wrkSel = document.getElementById("taskWorkerSelect");
   const skSel = document.getElementById("taskSkillSelect");
