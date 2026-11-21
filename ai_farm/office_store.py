@@ -2885,9 +2885,18 @@ class OfficeStore(AutomationMixin, RoundtableMixin):
         if seats or mode == "standard":
             if len(specs) > 24:
                 raise ValueError("每单最多24张子单。")
+            def _worker_auto_rank(w: dict[str, Any]) -> int:
+                ak = w.get("access_kind")
+                if ak == "api" and w.get("key_env") and os.environ.get(str(w["key_env"])):
+                    return 0
+                if ak == "cli" and w.get("executable") and shutil.which(str(w["executable"])):
+                    return 0
+                if ak in ("web", "desktop", "subscription"):
+                    return 1
+                return 2
             workers = sorted(
                 [w for w in self._distinct_vendor_workers() if not w.get("paid")],
-                key=lambda w: 0 if w.get("access_kind") in ("api", "cli") else 1,
+                key=_worker_auto_rank,
             )
             for idx, spec in enumerate(specs):
                 assigned_id = spec.get("assigned_to") or (workers[idx % len(workers)]["id"] if workers else "")

@@ -10,6 +10,7 @@ from __future__ import annotations
 import copy
 import hashlib
 import json
+import os
 import re
 import subprocess
 import threading
@@ -235,10 +236,14 @@ class _GuardedStore:
 
     def _build_adapter(self, agent, workspace_dir="."):
         self.runner._check(self.parent_id, self.key)
+        if agent.get("access_kind") == "api" and agent.get("key_env") and not os.environ.get(str(agent["key_env"])):
+            raise _Blocked("missing_api_key:" + str(agent["key_env"]))
         try:
             adapter = self.runner.store._build_adapter(agent, workspace_dir=workspace_dir)
         except Exception as exc:
             raise _Blocked("adapter_unavailable") from exc
+        if agent.get("access_kind") == "cli" and hasattr(adapter, "is_installed") and not adapter.is_installed():
+            raise _Blocked("missing_cli_executable")
         runner, parent_id, key = self.runner, self.parent_id, self.key
 
         class GuardedAdapter:
