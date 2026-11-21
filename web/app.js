@@ -25,6 +25,7 @@ let APP_STATE = {
   customWorkspaceDir: "",
   reportDrafts: {},
   draftMode: "standard",
+  pendingAttachments: { single: [], big: [] },
 };
 
 // =========================================================================
@@ -1481,10 +1482,13 @@ function renderRoundtablePanel(container, task, sectionOpen) {
     <div class="roundtable-notice" role="status"><p>${notice}</p>${local.notice ? `<p data-preserve-text>${escapeHTML(local.notice)}</p>` : ''}${local.busy ? '<p>请求处理中，操作已锁定。请勿重复提交。</p>' : ''}</div>
     <fieldset class="roundtable-controls"${local.busy ? ' disabled' : ''}><legend class="roundtable-sr-only">圆桌操作</legend>
       <div class="detail-actions">
-        <button type="button" class="btn btn-primary" data-rt-action="step"${canRun ? '' : ' disabled'}>${gate.manual ? '准备当前席位交接' : '推进下一步（真实执行）'}</button>
-        <button type="button" class="btn btn-ghost" data-rt-action="plan">查看干跑计划（0 消耗）</button>
-        <button type="button" class="btn btn-ghost" data-rt-action="refresh">核对最新状态</button>
+        <button type="button" class="btn btn-primary" data-rt-action="auto_start"${['running', 'waiting_manual'].includes(task.automation?.status) ? ' disabled' : ''}>一键自动运行</button>
+        ${['running', 'waiting_manual'].includes(task.automation?.status) ? '<button type="button" class="btn btn-danger" data-rt-action="auto_stop">停止自动</button>' : ''}
+        <button type="button" class="btn btn-ghost" data-rt-action="step"${canRun ? '' : ' disabled'}>${gate.manual ? '准备当前席位交接' : '推进单步'}</button>
+        <button type="button" class="btn btn-ghost" data-rt-action="plan">干跑预览</button>
+        <button type="button" class="btn btn-ghost" data-rt-action="refresh">刷新</button>
       </div>
+      ${task.automation?.status ? `<p class="detail-meta">自动编排状态：<strong>${escapeHTML(task.automation.status)}</strong>（${escapeHTML(task.automation.reason || '')} · 已用 ${escapeHTML(task.automation.calls_used || 0)} / ${escapeHTML(task.automation.max_calls || 0)} 次）</p>` : ''}
       <p class="detail-meta">不自动轮询、不自动重发。API Key 仅读环境变量；额度未知时以「额度未填」为准。</p>
       ${local.plan ? `<details class="detail-section" data-section="rt-plan"${sectionOpen('rt-plan', true)}><summary>干跑计划 · 未调用模型，未生成任何成果</summary>${roundtableOutput(local.plan)}</details>` : ''}
       <details class="detail-section" data-section="rt-basket"${sectionOpen('rt-basket', gate.stage === 0)}><summary>Stage 0 · 资料篮与 1F 子单</summary><div class="section-body">
@@ -1567,6 +1571,16 @@ async function handleRoundtableAction(taskId, action) {
     } catch (error) { local.notice = error.message; }
     finally { local.busy = false; renderSelectedTaskThread(); }
     return;
+  }
+  if (action === 'auto_start') {
+    return roundtableRequest(taskId, 'startautomation', {
+      task_id: taskId, confirmed: true, live: true,
+      request_id: roundtableRequestId(), max_calls: 16,
+      workspace_dir: APP_STATE.customWorkspaceDir || '.',
+    }, () => { local.notice = '已授权自动编排，后台正在推进；结果会实时推送到群聊。'; });
+  }
+  if (action === 'auto_stop') {
+    return roundtableRequest(taskId, 'stopautomation', { task_id: taskId }, () => { local.notice = '已停止自动编排。'; });
   }
   if (action === 'plan') return roundtableRequest(taskId, 'runroundtablestep', { task_id: taskId, live: false }, result => { local.plan = result; });
   if (action === 'copy') {
@@ -1884,6 +1898,57 @@ function updateBigTaskRoundtableMode() {
   document.querySelector('#bigTaskForm button[type="submit"]').disabled = enabled && !valid;
 }
 
+function renderAttachmentChips(scope) {
+  const listEl = document.getElementById(scope === 'big' ? 'bigTaskFileList' : 'newTaskFileList');
+  if (!listEl) return;
+  const items = APP_STATE.pendingAttachments[scope] || [];
+  listEl.innerHTML = items.map((att, idx) => `<span class="attachment-chip">${escapeHTML(att.name)} (${Math.max(1, Math.round((att.size || 0) / 1024))}KB) <button type="button" aria-label="移除 ${escapeHTML(att.name)}" onclick="removePendingAttachment('${scope}', ${idx})">×</button></span>`).join('');
+}
+
+function removePendingAttachment(scope, index) {
+  APP_STATE.pendingAttachments[scope].splice(index, 1);
+  renderAttachmentChips(scope);
+}
+
+async function handleTaskFileSelect(input, scope) {
+  const files = Array.from(input.files || []);
+  if (!files.length) return;
+  if (!APP_STATE.backendOnline) {
+    showToast('上传文件/图片需要连接本地服务（python -m ai_farm office）', true);
+    input.value = '';
+    return;
+  }
+  for (const file of files) {
+    if (file.size > 5 * 1024 * 1024) {
+      showToast(`附件 ${file.name} 超过 5MB 上限`, true);
+      continue;
+    }
+    try {
+      const b64 = await new Promise((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = () => {
+          const res = String(reader.result || '');
+          resolve(res.includes(',') ? res.split(',')[1] : res);
+        };
+        reader.onerror = () => reject(new Error('读取文件失败'));
+        reader.readAsDataURL(file);
+      });
+      const resp = await fetch('/api/upload', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'X-Farm-CSRF': officeCsrf },
+        body: JSON.stringify({ name: file.name, mime: file.type || '', content_base64: b64 }),
+      });
+      const data = await resp.json();
+      if (!resp.ok || !data.ok) throw new Error(data.error || '上传失败');
+      APP_STATE.pendingAttachments[scope].push(data.attachment);
+      renderAttachmentChips(scope);
+    } catch (err) {
+      showToast(`上传 ${file.name} 失败：${err.message}`, true);
+    }
+  }
+  input.value = '';
+}
+
 function openBigTaskModal(forceRoundtable = false) {
   const mgrSel = document.getElementById('bigTaskManagerSelect');
   const managers = APP_STATE.agents.filter(a => a.floor === 'manager');
@@ -1892,11 +1957,25 @@ function openBigTaskModal(forceRoundtable = false) {
   }
   document.getElementById('bigTaskRoundtable').checked = Boolean(forceRoundtable || APP_STATE.draftMode === 'roundtable');
   const candidates = usableRoundtableManagers();
-  ['A', 'B', 'C'].forEach(seat => {
-    document.getElementById(`bigTaskSeat${seat}`).innerHTML = '<option value="">请选择经理</option>' + candidates.map(a =>
+  const picked = [];
+  const usedVendors = new Set();
+  for (const cand of candidates) {
+    const v = roundtableIdentity(cand.vendor);
+    if (!usedVendors.has(v)) {
+      usedVendors.add(v);
+      picked.push(cand.id);
+      if (picked.length === 3) break;
+    }
+  }
+  ['A', 'B', 'C'].forEach((seat, idx) => {
+    const sel = document.getElementById(`bigTaskSeat${seat}`);
+    sel.innerHTML = '<option value="">请选择经理</option>' + candidates.map(a =>
       `<option value="${escapeHTML(a.id)}">${escapeHTML(a.name)} · ${escapeHTML(a.vendor)} / ${escapeHTML(a.model)} · ${['api', 'cli'].includes(a.access_kind) ? '真调' : '人工回填'}</option>`
     ).join('');
+    if (picked[idx]) sel.value = picked[idx];
   });
+  APP_STATE.pendingAttachments.big = [];
+  renderAttachmentChips('big');
   updateBigTaskRoundtableMode();
   document.getElementById('bigTaskModal').classList.remove('hidden');
 }
@@ -1915,14 +1994,19 @@ async function handleCreateBigTaskSubmit(event) {
     showToast('圆桌需要三个不同厂商、不同模型的付费经理；请调整席位。', true);
     return;
   }
+  const goal = document.getElementById('bigTaskGoal').value.trim();
+  const rawTitle = document.getElementById('bigTaskTitle').value.trim();
+  const title = rawTitle || goal.split(/\r?\n/)[0].slice(0, 28) || '圆桌任务';
   const payload = {
-    title: document.getElementById('bigTaskTitle').value.trim(),
-    manager_id: document.getElementById('bigTaskManagerSelect').value,
-    goal: document.getElementById('bigTaskGoal').value.trim(),
+    title,
+    manager_id: document.getElementById('bigTaskManagerSelect').value || ids[0] || '',
+    goal,
     raw_steps: document.getElementById('bigTaskSteps').value,
+    attachments: APP_STATE.pendingAttachments.big || [],
     mode,
     ...(mode === 'roundtable' ? { seat_a: ids[0], seat_b: ids[1], seat_c: ids[2] } : {}),
   };
+  const autoRun = Boolean(document.getElementById('bigTaskAutoRun')?.checked);
   const controls = [...form.querySelectorAll('input, select, textarea, button')].map(el => [el, el.disabled]);
   form.dataset.busy = 'true';
   controls.forEach(([el]) => { el.disabled = true; });
@@ -1932,14 +2016,29 @@ async function handleCreateBigTaskSubmit(event) {
     closeBigTaskModal();
     if (res.parent) {
       APP_STATE.selectedTaskId = res.parent.id;
+      if (autoRun) {
+        try {
+          await callOfficeAction('startautomation', {
+            task_id: res.parent.id, confirmed: true, live: true,
+            request_id: `auto-create-${Date.now()}`, max_calls: 16,
+            workspace_dir: APP_STATE.customWorkspaceDir || '.',
+          });
+          showToast('🚀 已发布并启动自动运行，群聊坐等结果。');
+        } catch (autoErr) {
+          showToast(`已发布任务，但自动运行未启动：${autoErr.message}`, true);
+        }
+      } else {
+        showToast(mode === 'roundtable' ? '圆桌任务已创建。' : `大任务已拆成 ${(res.subtasks || []).length} 张子单。`);
+      }
       await openTaskPrivateThread(res.parent.id);
-      showToast(mode === 'roundtable' ? '圆桌任务已创建。先收集 1F 子单结论，再逐步推进；不会自动调用经理。' : `大任务已拆成 ${(res.subtasks || []).length} 张子单并跨厂商分派。`);
     }
   } catch (error) {
     showToast(`创建未确认：${error.message}。请检查任务列表，不要重复提交。`, true);
   } finally {
     form.dataset.busy = 'false';
     controls.forEach(([el, wasDisabled]) => { el.disabled = wasDisabled; });
+    APP_STATE.pendingAttachments.big = [];
+    renderAttachmentChips('big');
     updateBigTaskRoundtableMode();
   }
 }
@@ -2304,8 +2403,11 @@ async function handleCreateTaskSubmit(event) {
     output_format: document.getElementById("taskFormat").value.trim(),
     acceptance: document.getElementById("taskAcceptance").value.trim(),
     mode: (document.getElementById("taskModeInput") || {}).value || "solo",
+    attachments: APP_STATE.pendingAttachments.single || [],
   };
   const task = await callOfficeAction("createtask", payload);
+  APP_STATE.pendingAttachments.single = [];
+  renderAttachmentChips('single');
   closeNewTaskModal();
   if (task) {
     APP_STATE.selectedTaskId = task.id;

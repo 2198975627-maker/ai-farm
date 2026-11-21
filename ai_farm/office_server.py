@@ -16,6 +16,7 @@ from .office_store import OfficeStore
 
 WEB_DIR = Path(__file__).resolve().parents[1] / "web"
 MAX_ACTION_BODY_BYTES = 1_048_576
+MAX_UPLOAD_BODY_BYTES = 8 * 1024 * 1024
 
 
 class OfficeHTTPHandler(BaseHTTPRequestHandler):
@@ -179,13 +180,14 @@ class OfficeHTTPHandler(BaseHTTPRequestHandler):
             self._origin()
             if self.headers.get("Transfer-Encoding"):
                 raise ValueError("Transfer-Encoding is not supported")
+            path = urlparse(self.path).path
+            max_bytes = MAX_UPLOAD_BODY_BYTES if path == "/api/upload" else MAX_ACTION_BODY_BYTES
             length = int(self.headers.get("Content-Length", "0"))
-            if length > MAX_ACTION_BODY_BYTES:
+            if length > max_bytes:
                 self._json(413, {"ok": False, "error": "Request body too large"})
                 return
             if length < 0 or self.headers.get_content_type() != "application/json":
                 raise ValueError("Expected a JSON request")
-            path = urlparse(self.path).path
             principal = None if path == "/api/pair" else self._principal(mutate=True)
             self.connection.settimeout(15)
             request = json.loads(self.rfile.read(length).decode("utf-8"))
@@ -204,6 +206,9 @@ class OfficeHTTPHandler(BaseHTTPRequestHandler):
             elif path == "/api/logout":
                 self.access.revoke(principal, principal["id"])
                 self._json(200, {"ok": True}, "farm_session=; HttpOnly; SameSite=Strict; Path=/; Max-Age=0")
+            elif path == "/api/upload":
+                self.access.require_owner(principal)
+                self._json(200, {"ok": True, "attachment": self.store.uploadattachment(request)})
             elif path == "/api/action":
                 action, payload = request.get("action"), request.get("payload", {})
                 if not isinstance(action, str) or not isinstance(payload, dict):

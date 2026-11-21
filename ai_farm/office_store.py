@@ -907,7 +907,9 @@ class OfficeStore(AutomationMixin, RoundtableMixin):
         existing_ids = {t["id"] for t in self.state["tasks"]}
         task_id = base_id if base_id not in existing_ids else f"{base_id}-{len(self.state['tasks']) + 1}"
         goal = (payload.get("goal") or title).strip()
-        input_text = (payload.get("input_text") or "见工单说明").strip()
+        attachments = self._normalize_attachments(payload.get("attachments"))
+        att_summary = self._attachments_prompt_block(attachments)
+        input_text = ((payload.get("input_text") or "见工单说明").strip() + ("\n\n" + att_summary if att_summary else "")).strip()
         output_format = (payload.get("output_format") or "按验收标准输出结构化结果，不讲废话").strip()
         acceptance = (payload.get("acceptance") or "结果完整、不编造数据、符合格式要求").strip()
         skill_slug = payload.get("skill_slug") or ""
@@ -978,6 +980,7 @@ class OfficeStore(AutomationMixin, RoundtableMixin):
             "parent_task_id": parent_task_id,
             "is_parent": bool(payload.get("is_parent", False)),
             "subtask_ids": list(payload.get("subtask_ids") or []),
+            "attachments": attachments,
             "mode": (payload.get("mode") or "solo").strip().lower(),
             "circuit_breaker": "",
             "depends_on": list(payload.get("depends_on") or []),
@@ -2848,31 +2851,44 @@ class OfficeStore(AutomationMixin, RoundtableMixin):
                 })
 
         if not specs:
-            specs = [
-                {
-                    "title": f"子单 1：梳理骨架与验收清单 — {title[:18]}",
-                    "goal": f"针对「{goal}」输出精简目录大纲与关键验收点（不超过300字）。",
-                    "task_kind": "small",
-                    "skill_slug": "doc-drafting-frame",
-                },
-                {
-                    "title": f"子单 2：核心代码改动与测试 — {title[:18]}",
-                    "goal": f"按大纲完成「{goal}」的核心实现与边界测试，提交结论+改动文件+测试结果。",
-                    "task_kind": "code_change",
-                    "skill_slug": "cheap-code-jobs",
-                },
-                {
-                    "title": f"子单 3：结果核对与三档摘要 — {title[:18]}",
-                    "goal": f"对照验收标准核对「{goal}」产出，生成一句话结论与要点清单。",
-                    "task_kind": "small",
-                    "skill_slug": "three-tier-summary",
-                },
-            ]
+            if mode == "roundtable":
+                specs = [
+                    {
+                        "title": f"子单 1：资料收集与要点梳理 — {title[:18]}",
+                        "goal": f"针对「{goal}」收集关键事实与约束要点（不超过300字）。",
+                        "task_kind": "small",
+                        "skill_slug": "three-tier-summary",
+                    },
+                ]
+            else:
+                specs = [
+                    {
+                        "title": f"子单 1：梳理骨架与验收清单 — {title[:18]}",
+                        "goal": f"针对「{goal}」输出精简目录大纲与关键验收点（不超过300字）。",
+                        "task_kind": "small",
+                        "skill_slug": "doc-drafting-frame",
+                    },
+                    {
+                        "title": f"子单 2：核心代码改动与测试 — {title[:18]}",
+                        "goal": f"按大纲完成「{goal}」的核心实现与边界测试，提交结论+改动文件+测试结果。",
+                        "task_kind": "code_change",
+                        "skill_slug": "cheap-code-jobs",
+                    },
+                    {
+                        "title": f"子单 3：结果核对与三档摘要 — {title[:18]}",
+                        "goal": f"对照验收标准核对「{goal}」产出，生成一句话结论与要点清单。",
+                        "task_kind": "small",
+                        "skill_slug": "three-tier-summary",
+                    },
+                ]
 
         if seats or mode == "standard":
             if len(specs) > 24:
                 raise ValueError("每单最多24张子单。")
-            workers = [w for w in self._distinct_vendor_workers() if not w.get("paid")]
+            workers = sorted(
+                [w for w in self._distinct_vendor_workers() if not w.get("paid")],
+                key=lambda w: 0 if w.get("access_kind") in ("api", "cli") else 1,
+            )
             for idx, spec in enumerate(specs):
                 assigned_id = spec.get("assigned_to") or (workers[idx % len(workers)]["id"] if workers else "")
                 if not assigned_id:
@@ -2894,6 +2910,8 @@ class OfficeStore(AutomationMixin, RoundtableMixin):
         existing_ids = {t["id"] for t in self.state["tasks"]}
         parent_id = base_id if base_id not in existing_ids else f"{base_id}-{len(self.state['tasks']) + 1}"
 
+        attachments = self._normalize_attachments(payload.get("attachments"))
+        att_summary = self._attachments_prompt_block(attachments)
         parent_task: dict[str, Any] = {
             "id": parent_id,
             "title": title if mode == "roundtable" else f"🧩 [大任务] {title}",
@@ -2902,8 +2920,9 @@ class OfficeStore(AutomationMixin, RoundtableMixin):
             "assigned_to": "",
             "assigned_name": f"已拆 {len(specs)} 张子单",
             "assigned_vendor": "多厂商并行",
-            "goal": goal,
-            "input_text": f"共拆解为 {len(specs)} 张子单并行推进。",
+            "goal": goal + ("\n\n" + att_summary if att_summary else ""),
+            "input_text": f"共拆解为 {len(specs)} 张子单并行推进。" + ("\n\n" + att_summary if att_summary else ""),
+            "attachments": attachments,
             "output_format": "全部子单结论-only 汇总交付（未重读对话全文）",
             "acceptance": "全部子单完成汇报，且所有改代码子单通过独立审查后聚合交付。",
             "rule_footer": "大任务自动拆单：小活直通省额度，改代码子单必走写-审-改闭环。",
@@ -4351,6 +4370,83 @@ class OfficeStore(AutomationMixin, RoundtableMixin):
         if len(flights) > 40:
             del flights[:-40]
         return entry
+
+    _ALLOWED_ATTACHMENT_EXTS = {
+        ".png", ".jpg", ".jpeg", ".webp", ".gif",
+        ".txt", ".md", ".py", ".js", ".ts", ".json", ".csv", ".log", ".yaml", ".yml", ".html", ".css", ".pdf", ".docx",
+    }
+    _IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".webp", ".gif"}
+    _TEXT_EXTS = {".txt", ".md", ".py", ".js", ".ts", ".json", ".csv", ".log", ".yaml", ".yml", ".html", ".css"}
+
+    def uploadattachment(self, payload: dict[str, Any]) -> dict[str, Any]:
+        import base64
+        import binascii
+        raw_name = str(payload.get("name") or "").strip()
+        if not raw_name or "/" in raw_name or "\\" in raw_name or ".." in raw_name:
+            raise ValueError("附件文件名不合法。")
+        safe_name = Path(raw_name).name
+        ext = Path(safe_name).suffix.lower()
+        if ext not in self._ALLOWED_ATTACHMENT_EXTS:
+            raise ValueError(f"不支持的附件类型：{ext or '无后缀'}")
+        b64 = payload.get("content_base64")
+        if not isinstance(b64, str) or not b64:
+            raise ValueError("附件内容不能为空。")
+        try:
+            data = base64.b64decode(b64, validate=True)
+        except (binascii.Error, ValueError) as exc:
+            raise ValueError("附件 Base64 编码无效。") from exc
+        if not data or len(data) > 5 * 1024 * 1024:
+            raise ValueError("单个附件大小必须在 1B–5MB 之间。")
+        att_dir = self.state_path.parent / "attachments"
+        att_dir.mkdir(parents=True, exist_ok=True)
+        att_id = f"att-{secrets.token_hex(6)}"
+        dest = att_dir / f"{att_id}_{safe_name}"
+        dest.write_bytes(data)
+        kind = "image" if ext in self._IMAGE_EXTS else ("text" if ext in self._TEXT_EXTS else "file")
+        excerpt = ""
+        if kind == "text":
+            excerpt = data.decode("utf-8", errors="replace")[:4000]
+        return {
+            "id": att_id, "name": safe_name, "kind": kind,
+            "mime": str(payload.get("mime") or "")[:120],
+            "size": len(data), "path": str(dest), "excerpt": excerpt,
+        }
+
+    def _normalize_attachments(self, raw: Any) -> list[dict[str, Any]]:
+        if not raw:
+            return []
+        if not isinstance(raw, list) or len(raw) > 10:
+            raise ValueError("单次最多附带 10 个文件或图片。")
+        out = []
+        att_root = (self.state_path.parent / "attachments").resolve()
+        for item in raw:
+            if not isinstance(item, dict):
+                raise ValueError("附件格式无效。")
+            path_str = str(item.get("path") or "")
+            p = Path(path_str).resolve()
+            if not path_str or att_root not in p.parents or not p.is_file():
+                raise ValueError("附件必须先通过工作台安全上传。")
+            out.append({
+                "id": str(item.get("id") or "")[:40],
+                "name": p.name.split("_", 1)[-1][:120],
+                "kind": str(item.get("kind") or "file")[:16],
+                "mime": str(item.get("mime") or "")[:120],
+                "size": int(item.get("size") or p.stat().st_size),
+                "path": str(p),
+                "excerpt": str(item.get("excerpt") or "")[:4000],
+            })
+        return out
+
+    @staticmethod
+    def _attachments_prompt_block(attachments: list[dict[str, Any]]) -> str:
+        if not attachments:
+            return ""
+        lines = ["【随单附件】"]
+        for att in attachments:
+            lines.append(f"- {att['name']} ({att['kind']}, {att['size']}B, 路径: {att['path']})")
+            if att.get("excerpt"):
+                lines.append(f"  内容摘要：\n{att['excerpt'][:1500]}")
+        return "\n".join(lines)
 
     def dispatch_action(self, action_name: str, payload: dict[str, Any] | None = None) -> Any:
         payload = payload or {}

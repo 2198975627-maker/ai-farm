@@ -445,6 +445,11 @@
             </div>
           </div>
           </details>
+          <div class="form-group">
+            <label for="newTaskFiles">附加文件 / 图片（可选，单文件 ≤ 5MB）</label>
+            <input type="file" id="newTaskFiles" multiple accept="image/*,.txt,.md,.py,.js,.ts,.json,.csv,.log,.yaml,.yml,.html,.css,.pdf,.docx" onchange="handleTaskFileSelect(this, 'single')" />
+            <div class="attachment-chip-list" id="newTaskFileList"></div>
+          </div>
           <div class="modal-footer">
             <button type="button" class="btn btn-ghost" onclick="closeNewTaskModal()">取消</button>
             <button type="submit" class="btn btn-primary">发布任务</button>
@@ -454,52 +459,63 @@
     </div>
   </div>
 
-  <!-- 弹窗 2b：大任务一键拆子单（父任务 → 跨厂商多子单 → 聚合总交付） -->
+  <!-- 弹窗 2b：发布圆桌 / 大任务（精简版：选经理 + 写要求 + 传文件/图片 + 发布即自动运行） -->
   <div class="modal-backdrop hidden" id="bigTaskModal">
-    <div class="modal-card" role="dialog" aria-modal="true" aria-label="大任务一键拆子单">
+    <div class="modal-card" role="dialog" aria-modal="true" aria-label="发布圆桌或大任务">
       <div class="modal-header">
-        <h2><svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/></svg>大任务一键拆子单（跨厂商分派 · 改代码自动开写-审-改）</h2>
+        <h2><svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/></svg>发布圆桌 / 大任务</h2>
         <button class="close-btn" onclick="closeBigTaskModal()" aria-label="关闭"><svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M18 6L6 18M6 6l12 12"/></svg></button>
       </div>
       <div class="modal-body">
         <form id="bigTaskForm" onsubmit="handleCreateBigTaskSubmit(event)">
-          <div class="form-grid">
-            <div class="form-group">
-              <label for="bigTaskTitle">大任务标题 *</label>
-              <input type="text" id="bigTaskTitle" required placeholder="例：给用户登录模块补齐校验与测试" />
+          <section class="roundtable-mode" id="bigTaskRoundtableSeats" aria-labelledby="bigTaskModeHeading">
+            <h3 id="bigTaskModeHeading">1. 选择圆桌三位经理</h3>
+            <div class="roundtable-seat-fields">
+              <div class="form-group"><label for="bigTaskSeatA">经理 A · 出策</label><select id="bigTaskSeatA" onchange="updateBigTaskRoundtableMode()"></select></div>
+              <div class="form-group"><label for="bigTaskSeatB">经理 B · 产出</label><select id="bigTaskSeatB" onchange="updateBigTaskRoundtableMode()"></select></div>
+              <div class="form-group"><label for="bigTaskSeatC">经理 C · 红队改良</label><select id="bigTaskSeatC" onchange="updateBigTaskRoundtableMode()"></select></div>
             </div>
-            <div class="form-group">
-              <label for="bigTaskManagerSelect">统筹经理（只审结论与汇总）*</label>
-              <select id="bigTaskManagerSelect"></select>
-            </div>
-          </div>
-          <div class="form-group">
-            <label for="bigTaskGoal">总目标（一句话说清）*</label>
-            <input type="text" id="bigTaskGoal" required placeholder="例：先梳理验收清单，再修复空密码登录 Bug 并补单测，最后生成变更摘要" />
-          </div>
-          <section class="roundtable-mode" aria-labelledby="bigTaskModeHeading">
-            <h3 id="bigTaskModeHeading">执行模式</h3>
-            <label class="roundtable-check" for="bigTaskRoundtable">
-              <input type="checkbox" id="bigTaskRoundtable" onchange="updateBigTaskRoundtableMode()" aria-controls="bigTaskRoundtableSeats" />
-              <span>开启圆桌精雕模式<small>默认不勾选：普通省钱模式。高价值任务才启用三经理对抗，最终由你定稿。</small></span>
-            </label>
-            <div id="bigTaskRoundtableSeats" class="hidden">
-              <p class="detail-meta">1F 员工只采集资料，不入席。A 出策、B 产出、C 批判改良；A/B 对比后停止。固定 1 轮对抗 + 1 轮对比，不自动续轮。</p>
-              <div class="roundtable-seat-fields">
-                <div class="form-group"><label for="bigTaskSeatA">经理 A · 出策</label><select id="bigTaskSeatA" onchange="updateBigTaskRoundtableMode()" disabled></select></div>
-                <div class="form-group"><label for="bigTaskSeatB">经理 B · 产出</label><select id="bigTaskSeatB" onchange="updateBigTaskRoundtableMode()" disabled></select></div>
-                <div class="form-group"><label for="bigTaskSeatC">经理 C · 红队改良</label><select id="bigTaskSeatC" onchange="updateBigTaskRoundtableMode()" disabled></select></div>
-              </div>
-              <p id="bigTaskSeatGuidance" class="detail-meta" role="status"></p>
-            </div>
+            <p id="bigTaskSeatGuidance" class="detail-meta" role="status"></p>
           </section>
           <div class="form-group">
-            <label for="bigTaskSteps">子单拆分清单（每行一条；写 <code>[代码]</code> 自动开写-审-改闭环；留空则自动拆 3 张标准子单）</label>
-            <textarea id="bigTaskSteps" rows="4" placeholder="1. 梳理登录接口边界用例清单&#10;2. [代码] 修复空密码校验并补 3 个单元测试&#10;3. 汇总改动结论与发布说明"></textarea>
+            <label for="bigTaskGoal">2. 任务要求 *</label>
+            <textarea id="bigTaskGoal" rows="4" required placeholder="直接写清你要解决的问题、背景或产出要求…"></textarea>
           </div>
+          <div class="form-group">
+            <label for="bigTaskFiles">3. 上传文件或图片（可选，单文件 ≤ 5MB）</label>
+            <div class="upload-dropzone">
+              <input type="file" id="bigTaskFiles" multiple accept="image/*,.txt,.md,.py,.js,.ts,.json,.csv,.log,.yaml,.yml,.html,.css,.pdf,.docx" onchange="handleTaskFileSelect(this, 'big')" />
+              <div class="attachment-chip-list" id="bigTaskFileList"></div>
+            </div>
+          </div>
+          <label class="roundtable-check" for="bigTaskAutoRun">
+            <input type="checkbox" id="bigTaskAutoRun" checked />
+            <span>发布后立即自动运行<small>自动推进 API / CLI 环节，群聊实时播报进度，你只需坐等定稿。</small></span>
+          </label>
+          <details class="field-optional">
+            <summary>高级选项（模式切换、自定义标题、手动拆子单）</summary>
+            <label class="roundtable-check" for="bigTaskRoundtable">
+              <input type="checkbox" id="bigTaskRoundtable" onchange="updateBigTaskRoundtableMode()" aria-controls="bigTaskRoundtableSeats" />
+              <span>启用圆桌三经理模式<small>取消勾选则切为普通大任务模式。</small></span>
+            </label>
+            <div class="form-grid">
+              <div class="form-group">
+                <label for="bigTaskTitle">自定义标题（留空自动截取任务要求）</label>
+                <input type="text" id="bigTaskTitle" placeholder="可选：留空则自动生成" />
+              </div>
+              <div class="form-group">
+                <label for="bigTaskManagerSelect">统筹经理</label>
+                <select id="bigTaskManagerSelect"></select>
+              </div>
+            </div>
+            <div class="form-group">
+              <label for="bigTaskSteps">自定义子单拆分（留空自动分配 1 条收集起点；写 <code>[代码]</code> 开写-审-改闭环）</label>
+              <textarea id="bigTaskSteps" rows="3" placeholder="可选：留空则自动开始"></textarea>
+            </div>
+          </details>
           <div class="modal-footer">
             <button type="button" class="btn btn-ghost" onclick="closeBigTaskModal()">取消</button>
-            <button type="submit" class="btn btn-primary"><svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/></svg>一键拆单并跨厂商派发</button>
+            <button type="submit" class="btn btn-primary">发布并开始</button>
           </div>
         </form>
       </div>

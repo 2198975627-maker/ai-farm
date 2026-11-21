@@ -42,14 +42,22 @@ class CLIAdapter:
         return shutil.which(self.executable) is not None
 
     def chat(self, prompt: str, max_tokens: int = 1000) -> AgentReply:
-        if not self.is_installed():
+        resolved = shutil.which(self.executable)
+        if not resolved:
             raise RuntimeError(
                 f"本地未检测到 CLI 工具 `{self.executable}`，无法自动调用；"
                 "自动触发降级链换其他员工。"
             )
-        cmd = [self.executable] + [a.replace("{prompt}", prompt) for a in self.args_template]
+        stdin_text = None
+        if self.args_template == ["exec", "{prompt}"]:
+            is_codex = Path(resolved).stem.lower() == "codex"
+            cmd = [resolved, "exec"] + (["--skip-git-repo-check"] if is_codex else []) + ["-"]
+            stdin_text = prompt
+        else:
+            cmd = [resolved] + [a.replace("{prompt}", prompt) for a in self.args_template]
         proc = subprocess.run(
             cmd,
+            input=stdin_text,
             cwd=self.workspace,
             capture_output=True,
             text=True,

@@ -362,9 +362,20 @@ class AutomationRunner:
 
     def _set_status(self, task_id, status, reason):
         record = self._record(task_id)
+        prev = record.get("status")
         record.update(status=status, reason=reason)
         if status not in _ACTIVE:
             record["authorized"] = False
+        if status != prev and status in ("awaiting_owner", "waiting_manual", "blocked"):
+            label = {
+                "awaiting_owner": "✅ 自动编排已完成，等待你最终验收/定稿。",
+                "waiting_manual": "⏸ 自动编排暂停：当前环节为手动/网页通道，等待提交回执后自动继续。",
+                "blocked": f"⛔ 自动编排已停下（{reason}）。",
+            }[status]
+            self.store._append_group_msg(
+                sender_id="chief", sender_name="自动编排", sender_role="chief",
+                kind="automation_status", task_id=task_id, text=f"{label}（`{task_id}`）",
+            )
         self.store.save()
 
     def _check(self, task_id, key=None):
