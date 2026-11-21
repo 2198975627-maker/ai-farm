@@ -60,8 +60,18 @@ const SEED_SKILLS = [
 // =========================================================================
 // 初始化与 API 通信
 // =========================================================================
+let officeCsrf = "";
+
 async function initOffice() {
   try {
+    const session = await fetch("/api/session", { cache: "no-store" });
+    if (session.status === 401 || session.status === 403) {
+      APP_STATE.backendOnline = false;
+      document.getElementById("connModeBadge").textContent = "等待本机配对";
+      showPairingForm();
+      return;
+    }
+    if (session.ok) officeCsrf = (await session.json()).csrf;
     const resp = await fetch("/api/state", { cache: "no-store" });
     if (resp.ok) {
       const data = await resp.json();
@@ -92,6 +102,85 @@ async function initOffice() {
   ];
   renderAll();
   applyShotParams();
+}
+
+function showPairingForm() {
+  if (document.getElementById("officePairing")) return;
+  const dialog = document.createElement("dialog");
+  dialog.id = "officePairing";
+  dialog.className = "auth-dialog";
+  dialog.innerHTML = `<form id="officePairForm"><h2>连接你的本机农场</h2><p>从启动服务的终端粘贴一次性配对码。它不是模型 API Key，也不要分享给员工。</p><label for="officePairCode">本机配对码</label><input id="officePairCode" type="password" autocomplete="off" required maxlength="128"><p id="officePairError" role="alert"></p><button type="submit" class="btn btn-primary">配对并进入</button><p>配对码 10 分钟有效，只能使用一次；会话失效时请在本机重启服务。</p></form>`;
+  document.body.appendChild(dialog);
+  dialog.addEventListener("cancel", event => event.preventDefault());
+  document.getElementById("officePairForm").addEventListener("submit", async event => {
+    event.preventDefault();
+    const button = event.target.querySelector("button");
+    button.disabled = true;
+    try {
+      const response = await fetch("/api/pair", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ code: document.getElementById("officePairCode").value.trim() }) });
+      const data = await response.json();
+      if (!response.ok) throw new Error(data.error || "配对失败");
+      officeCsrf = data.csrf;
+      document.getElementById("officePairCode").value = "";
+      dialog.close();
+      dialog.remove();
+      await initOffice();
+    } catch (error) {
+      document.getElementById("officePairError").textContent = error.message;
+    } finally { button.disabled = false; }
+  });
+  dialog.showModal();
+}
+
+async function openConnections() {
+  if (!APP_STATE.backendOnline) return showPairingForm();
+  document.getElementById("officeConnections")?.remove();
+  const dialog = document.createElement("dialog");
+  dialog.id = "officeConnections";
+  dialog.className = "auth-dialog";
+  dialog.innerHTML = `<h2>任务范围连接</h2><p>凭据仅在本次服务运行中有效，不保存到本地存储。MCP 使用成员凭据，网页员工使用单工单传令兵凭据。</p><form id="connectionForm"><label for="connectionTask">授权工单</label><select id="connectionTask" required>${APP_STATE.tasks.filter(t => !t.is_parent).map(t => `<option value="${escapeHTML(t.id)}">${escapeHTML(t.title)}</option>`).join("")}</select><label for="connectionAgent">执行者 / 审查者</label><select id="connectionAgent" required>${APP_STATE.agents.map(a => `<option value="${escapeHTML(a.id)}">${escapeHTML(a.name)}</option>`).join("")}</select><button class="btn btn-primary" type="submit">生成任务凭据</button></form><p id="connectionError" role="alert"></p><textarea id="connectionSecret" readonly aria-label="本次生成的凭据" placeholder="凭据只显示在此处；关闭后清空"></textarea><p>MCP：在启动中继的进程环境设置 AI_FARM_MEMBER_TOKEN。传令兵：在对应网页点击“绑定工单”粘贴此凭据。不要放进 URL 或公开配置。</p><div id="connectionList"></div><button id="connectionClose" class="btn">关闭并清空</button>`;
+  document.body.appendChild(dialog);
+  const api = async (path, body) => {
+    const response = await fetch(path, body ? { method: "POST", headers: { "Content-Type": "application/json", "X-Farm-CSRF": officeCsrf }, body: JSON.stringify(body) } : { cache: "no-store" });
+    const result = await response.json();
+    if (!response.ok) throw new Error(result.error || "连接操作失败");
+    return result;
+  };
+  const refresh = async () => {
+    const data = await api("/api/connections");
+    if (!dialog.isConnected) return;
+    const list = dialog.querySelector("#connectionList");
+    list.replaceChildren();
+    for (const connection of data.connections.filter(c => c.role !== "owner")) {
+      const row = document.createElement("p");
+      row.textContent = `${connection.agent_id} · ${connection.task_ids.join(", ")} `;
+      const button = document.createElement("button");
+      button.className = "btn";
+      button.textContent = "撤销";
+      button.onclick = async () => { try { await api("/api/revoke", { credential_id: connection.id }); await refresh(); } catch (error) { document.getElementById("connectionError").textContent = error.message; } };
+      row.appendChild(button); list.appendChild(row);
+    }
+  };
+  document.getElementById("connectionForm").onsubmit = async event => {
+    event.preventDefault();
+    const button = event.target.querySelector("button"); button.disabled = true;
+    try {
+      const agent = APP_STATE.agents.find(a => a.id === document.getElementById("connectionAgent").value);
+      const result = await api("/api/connections", { agent_id: agent.id, task_ids: [document.getElementById("connectionTask").value], role: ["web", "subscription"].includes(agent.access_kind) ? "courier" : "member" });
+      if (!dialog.isConnected) return;
+      dialog.querySelector("#connectionSecret").value = result.token;
+      dialog.querySelector("#connectionError").textContent = "已生成；仅授予所选工单，不授权模型执行。";
+      await refresh();
+    } catch (error) { if (dialog.isConnected) dialog.querySelector("#connectionError").textContent = error.message; }
+    finally { button.disabled = false; }
+  };
+  const clear = () => { dialog.querySelector("#connectionSecret").value = ""; dialog.remove(); };
+  const close = () => { clear(); dialog.close(); };
+  dialog.addEventListener("close", clear, { once: true });
+  dialog.addEventListener("cancel", event => { event.preventDefault(); close(); });
+  document.getElementById("connectionClose").onclick = close;
+  dialog.showModal();
+  try { await refresh(); } catch (error) { document.getElementById("connectionError").textContent = error.message; }
 }
 
 function applySnapshot(snap) {
@@ -141,7 +230,7 @@ async function callOfficeAction(action, payload = {}) {
   if (APP_STATE.backendOnline) {
     const resp = await fetch("/api/action", {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: { "Content-Type": "application/json", "X-Farm-CSRF": officeCsrf },
       body: JSON.stringify({ action, payload }),
     });
     const data = await resp.json();
@@ -661,7 +750,7 @@ function renderDiscussionThread(taskId) {
 }
 
 function taskStatusLabel(status) {
-  return ({ assigned: '待认领', accepted: '已认领', working: '进行中', in_review: '待审查', delivered: '待验收', accepted_done: '已完成', rejected: '待返修' })[status] || status;
+  return ({ assigned: '待认领', accepted: '已认领', working: '进行中', in_review: '待审查', delivered: '待验收', awaiting_owner: '待你定稿', accepted_done: '已完成', rejected: '待返修' })[status] || status;
 }
 
 function renderTaskBoard() {
@@ -679,12 +768,13 @@ function renderTaskBoard() {
   const tasks = [...APP_STATE.tasks].reverse().sort((a, b) => Number(a.status === 'accepted_done') - Number(b.status === 'accepted_done'));
   strip.innerHTML = tasks.map(task => {
     const selected = task.id === APP_STATE.selectedTaskId && !document.getElementById("paneDetail").classList.contains("hidden");
-    return `<button class="task-pill ${selected ? 'active' : ''}" onclick="openTaskPrivateThread('${escapeHTML(task.id)}')">
-      <span><span class="task-name">${escapeHTML(task.title)}</span><span class="task-reference">${escapeHTML(task.id)}${task.is_parent ? ' · 拆分任务' : task.parent_task_id ? ' · 子任务' : ''}</span></span>
+    return `<button class="task-pill ${selected ? 'active' : ''}" data-open-task="${escapeHTML(task.id)}">
+      <span><span class="task-name">${escapeHTML(task.title)}</span><span class="task-reference">${escapeHTML(task.id)}${isRoundtableParent(task) ? ' · 圆桌精雕' : task.is_parent ? ' · 拆分任务' : task.parent_task_id ? ' · 子任务' : ''}</span></span>
       <span class="task-assignee"><span class="assignee-initial" aria-hidden="true">${escapeHTML((task.assigned_name || '待').slice(0, 1))}</span><span>${escapeHTML(task.assigned_name || '待分配')}</span></span>
       <span class="task-state" data-status="${escapeHTML(task.status)}">${escapeHTML(taskStatusLabel(task.status))}</span>
     </button>`;
   }).join("") + `<p class="task-list-note">打开任务，查看进度、汇报与下一步操作。</p>`;
+  strip.querySelectorAll('[data-open-task]').forEach(button => button.addEventListener('click', () => openTaskPrivateThread(button.dataset.openTask)));
 }
 
 function renderGroupChat() {
@@ -909,6 +999,12 @@ function renderSelectedTaskThread() {
 
   APP_STATE.selectedTaskId = task.id;
   if (badge) badge.textContent = task.id;
+  document.getElementById('paneDetail').classList.toggle('roundtable-detail', isRoundtableParent(task));
+  if (isRoundtableParent(task)) {
+    renderRoundtablePanel(container, task, sectionOpen);
+    return;
+  }
+  const roundtableParent = APP_STATE.tasks.find(parent => parent.id === task.parent_task_id && isRoundtableParent(parent));
   const taskArg = escapeHTML(JSON.stringify(String(task.id)));
   const terminal = task.status === 'accepted_done';
   const disabled = terminal ? ' disabled' : '';
@@ -968,6 +1064,10 @@ function renderSelectedTaskThread() {
     const report = document.querySelector('#taskThreadContent details[data-section=report]');
     if (report && current && ['accepted', 'working'].includes(current.status) && APP_STATE.selectedTaskId === current.id) report.open = true;
   })`;
+  if (roundtableParent) {
+    actions.export = { ...actions.copy, label: '复制桌面端单次工单（手动执行）', readOnly: false };
+    actions.copy.readOnly = false;
+  }
   const chosenExecution = channel === 'desktop' ? 'export' : ['web', 'subscription'].includes(channel) ? 'web' : ['api', 'cli'].includes(channel) ? 'run' : 'copy';
   let primaryKeys = [];
   if (!terminal) {
@@ -978,9 +1078,15 @@ function renderSelectedTaskThread() {
     else if (task.worker_reported && task.status !== 'rejected') primaryKeys = ['deliver'];
     else primaryKeys = [chosenExecution];
   }
+  const childDispatch = roundtableParent && task.roundtable_dispatch;
+  const childReceipt = childDispatch?.receipts?.[childDispatch.current];
+  const childLocal = roundtableChildUI.get(task.id) || {};
   const actionButton = (key, primary = false) => {
     const action = actions[key];
-    return `<button type="button" class="btn ${primary && key !== 'reject' ? 'btn-primary' : 'btn-ghost'}" onclick="${escapeHTML(action.code)}"${terminal && !action.readOnly && !['merge', 'deleteCode', 'deploy'].includes(key) ? ' disabled' : ''}>${icon(action.icon)}${escapeHTML(action.label)}</button>`;
+    const locked = roundtableParent && (childLocal.busy || childLocal.uncertain ||
+      (roundtableParent.roundtable_state?.stage !== 'collecting' && !action.readOnly) ||
+      (childReceipt && ['run', 'web', 'export', 'copy'].includes(key)));
+    return `<button type="button" class="btn ${primary && key !== 'reject' ? 'btn-primary' : 'btn-ghost'}" onclick="${escapeHTML(action.code)}"${locked || (terminal && !action.readOnly && !['merge', 'deleteCode', 'deploy'].includes(key)) ? ' disabled' : ''}>${icon(action.icon)}${escapeHTML(action.label)}</button>`;
   };
   const secondaryActions = keys => keys.filter(key => !primaryKeys.includes(key)).map(key => actionButton(key)).join('');
   const reportInitiallyOpen = !terminal && !task.is_parent && !task.worker_reported && ['accepted', 'working', 'rejected'].includes(task.status);
@@ -995,6 +1101,8 @@ function renderSelectedTaskThread() {
       ${['api', 'cli'].includes(channel) && primaryKeys.includes('run') ? '<p class="detail-meta">调用已配置的真实模型；API 密钥仅读环境变量。</p>' : ''}
       ${task.circuit_breaker ? `<p class="detail-meta" data-preserve-text>${icon('alert')}需人工处理：${escapeHTML(task.circuit_breaker)}</p>` : ''}
     </header>
+
+    ${roundtableParent ? `<section class="section-body"><h3 class="detail-title">圆桌采集 · 单发单收</h3><p class="detail-meta" data-preserve-text>实际回执：${escapeHTML(childReceipt?.status || '尚未派发')}${childLocal.uncertain ? ' · 上次请求未确认，请先到父单核对最新状态' : ''}。只回结论、改动文件和测试结果；进行中、未知或已回收的子单不重复投喂。</p>${childReceipt ? `<details class="detail-section" data-section="child-receipt"${sectionOpen('child-receipt')}><summary>查看派发回执与已派出指令（不要重复发送）</summary>${roundtableOutput(childReceipt)}</details>` : ''}</section>` : ''}
 
     ${task.final_delivery_text ? `<section class="section-body"><h3 class="detail-title">交付结果</h3><p data-preserve-text style="white-space:pre-wrap;overflow-wrap:anywhere;">${formatChatTextWithMentions(task.final_delivery_text)}</p></section>` : ''}
 
@@ -1100,6 +1208,7 @@ function renderSelectedTaskThread() {
       </div>
     </details>
 
+    ${roundtableParent ? renderRoundtableHandoff(task, roundtableParent) : `
     <details class="detail-section${terminal ? ' hidden' : ''}" data-section="reassign"${sectionOpen('reassign')}>
       <summary>跨厂商转交</summary>
       <div class="section-body">
@@ -1110,7 +1219,7 @@ function renderSelectedTaskThread() {
         </div>
         <div class="detail-actions">${actionButton('reassign')}</div>
       </div>
-    </details>
+    </details>`}
 
     <section class="section-body">
       <h3 class="detail-title">私聊汇报记录 · ${msgs.length}</h3>
@@ -1120,6 +1229,284 @@ function renderSelectedTaskThread() {
     </section>
   `;
   neutralizePanel("taskThreadContent");
+  if (roundtableParent) {
+    bindRoundtableHandoffs(container, roundtableParent);
+    const freezeReport = childLocal.uncertain || roundtableParent.roundtable_state?.stage !== 'collecting' ||
+      ['running', 'unknown', 'blocked', 'invalid', 'completed'].includes(childReceipt?.status);
+    if (freezeReport) container.querySelectorAll('[data-section="report"] input, [data-section="report"] button').forEach(el => { el.disabled = true; });
+    if (childLocal.busy) container.querySelectorAll('button, input, select, textarea').forEach(el => { el.disabled = true; });
+  }
+}
+
+// =========================================================================
+// 五阶段圆桌：独立父任务面板，不复用旧 runroundtable 或父单交付动作。
+// =========================================================================
+const roundtableUI = new Map();
+const roundtableChildUI = new Map();
+function roundtableChildParent(taskId) {
+  const child = APP_STATE.tasks.find(task => task.id === taskId);
+  return child && APP_STATE.tasks.find(task => task.id === child.parent_task_id && isRoundtableParent(task));
+}
+async function roundtableChildAction(taskId, action, payload) {
+  const local = roundtableChildUI.get(taskId) || {};
+  if (local.busy || local.uncertain) return null;
+  local.busy = true;
+  roundtableChildUI.set(taskId, local);
+  renderSelectedTaskThread();
+  try { return await callOfficeAction(action, payload); }
+  catch (error) {
+    local.uncertain = true;
+    showToast(`${error.message}。已停止；请在圆桌父单核对最新状态，不要重复派发。`, true);
+    return null;
+  } finally { local.busy = false; renderSelectedTaskThread(); }
+}
+const ROUNDTABLE_STAGES = ['资料入篮', 'A 收料出策', 'B 整合产出', 'C 红队改良', 'A / B 对比与拍板'];
+function isRoundtableParent(task) {
+  return Boolean(task && task.is_parent && task.mode === 'roundtable');
+}
+function roundtableLocal(taskId) {
+  if (!roundtableUI.has(taskId)) roundtableUI.set(taskId, { busy: false, prompt: null, drafts: {}, comment: '', notice: '', plan: null, uncertain: null });
+  return roundtableUI.get(taskId);
+}
+function roundtableText(value) {
+  return typeof value === 'string' ? value : value == null ? '' : JSON.stringify(value, null, 2);
+}
+function roundtableAttempts(state) {
+  return Array.isArray(state.attempts) ? state.attempts : Object.entries(state.attempts || {}).map(([key, value]) => ({ stage_key: key, ...(typeof value === 'object' ? value : { status: value }) }));
+}
+function roundtableStageIndex(stage) {
+  const key = String(stage ?? '').toLowerCase();
+  const numbered = key.match(/^(?:stage_?)?([0-4])(?:$|[_-])/);
+  if (numbered) return Number(numbered[1]);
+  const aliases = {
+    collecting: 0, collection: 0, basket: 0, collecting_materials: 0,
+    a: 1, architect: 1, manager_a: 1, manager_a_prompt: 1,
+    b: 2, builder: 2, draft_v1: 2, manager_b: 2,
+    c: 3, critic: 3, refiner: 3, refined_v2: 3, manager_c: 3,
+    'a-comparison': 4, 'b-comparison': 4, rejected: 4,
+    compare_a: 4, compare_b: 4, comparison_a: 4, comparison_b: 4, compare: 4,
+    awaiting_owner: 4, completed: 4, accepted: 4, accepted_done: 4, revision_requested: 4,
+  };
+  return Object.hasOwn(aliases, key) ? aliases[key] : -1;
+}
+function roundtableSeat(state, seat) {
+  const stored = state.seats?.[seat] ?? state.seats?.[seat.toLowerCase()] ?? state.seats?.[`seat_${seat.toLowerCase()}`];
+  const id = typeof stored === 'object' && stored ? (stored.agent_id || stored.id) : stored;
+  return (typeof stored === 'object' && stored ? stored : APP_STATE.agents.find(a => a.id === id)) || { id, name: id || '未指定', vendor: '未标注', model: '未标注' };
+}
+function roundtableGate(task) {
+  const state = task.roundtable_state || {};
+  const stage = roundtableStageIndex(state.stage);
+  const attempts = roundtableAttempts(state);
+  const waiting = state.stage === 'awaiting_owner';
+  const done = ['completed', 'accepted', 'accepted_done', 'revision_requested', 'rejected'].includes(state.stage) || task.status === 'accepted_done';
+  const blocked = attempts.some(a => ['pending', 'running', 'unknown', 'invalid', 'blocked', 'error', 'failed'].includes(a.status)) ||
+    ['pending', 'running', 'unknown', 'invalid', 'blocked', 'error', 'failed'].includes(state.status) || Boolean(task.circuit_breaker);
+  const activeSeat = stage === 1 ? 'A' : stage === 2 ? 'B' : stage === 3 ? 'C' : /(?:compare|comparison).*b|b-comparison|stage_?4_b/i.test(String(state.stage)) ? 'B' : 'A';
+  const manager = roundtableSeat(state, activeSeat);
+  const pendingManual = attempts.find(a => a.stage_key === state.stage && a.status === 'pending_manual');
+  const manual = ['web', 'subscription', 'desktop'].includes(manager.access_kind) || Boolean(pendingManual);
+  const children = (task.subtask_ids || []).map(id => APP_STATE.tasks.find(child => child.id === id));
+  const basketReady = stage !== 0 || (children.length > 0 && children.every(child => child?.worker_reported &&
+    (!child.requires_code_review || (child.review_status === 'approved' && child.roundtable_review?.dry_run === false))));
+  return { stage, waiting, done, blocked, manual, pendingManual, basketReady, activeSeat, manager };
+}
+function roundtableSource(state, keys) {
+  const records = roundtableAttempts(state).filter(a => keys.includes(String(a.stage_key || a.stage)));
+  const receipt = records.at(-1);
+  if (!receipt) return '回执来源：未标注';
+  const source = receipt.provenance || receipt.source || receipt.result_source || receipt.mode;
+  const label = source === 'manual' ? '人工粘贴的外部模型输出' : source === 'adapter' ? '实际 API / CLI 调用' : source ? roundtableText(source) : '未标注';
+  const seat = receipt.seat;
+  return `回执来源：${label}${seat ? ` · ${seat.vendor} / ${seat.model}` : receipt.agent_id ? ` · ${receipt.agent_id}` : ''}`;
+}
+function roundtableOutput(value, empty = '尚未收到实际结果。') {
+  return value == null || value === '' || (Array.isArray(value) && !value.length)
+    ? `<p class="detail-meta">${empty}</p>`
+    : `<pre class="roundtable-output" tabindex="0" data-preserve-text>${escapeHTML(roundtableText(value))}</pre>`;
+}
+function renderRoundtableHandoff(child, parent) {
+  if (roundtableStageIndex(parent.roundtable_state?.stage) !== 0 || child.worker_reported || child.status === 'accepted_done') return '';
+  const dispatch = child.roundtable_dispatch || {};
+  const receipt = dispatch.receipts?.[dispatch.current];
+  if (!receipt || !['unknown', 'blocked', 'pending_manual'].includes(receipt.status)) return '';
+  const previousWorkers = Object.values(dispatch.receipts || {}).map(entry => entry.worker_id);
+  const source = APP_STATE.agents.find(a => a.id === child.assigned_to);
+  const vendor = roundtableIdentity(child.assigned_vendor || source?.vendor);
+  const choices = APP_STATE.agents.filter(a => a.floor === 'worker' && !a.paid && a.status === 'ready' && !previousWorkers.includes(a.id) &&
+    vendor && roundtableIdentity(a.vendor) && roundtableIdentity(a.vendor) !== vendor);
+  return `<div class="roundtable-handoff" data-rt-child="${escapeHTML(child.id)}">
+    <p class="detail-meta">若验证码或执行卡住，先在原客户端确认任务已停止，再单点转交。进行中或已回收的子单不得重复派发。</p>
+    <label>跨厂商接手员工<select class="select-sm" data-rt-target${choices.length ? '' : ' disabled'}><option value="">选择另一位 1F 员工</option>${choices.map(a => `<option value="${escapeHTML(a.id)}">${escapeHTML(a.name)} · ${escapeHTML(a.vendor)}</option>`).join('')}</select></label>
+    ${choices.length ? '' : '<p class="detail-meta">暂无不同厂商的可用员工，请先在团队接入或调岗。</p>'}
+    <button type="button" class="btn btn-ghost" data-rt-handoff${choices.length ? '' : ' disabled'}>确认原任务已停止并转交</button>
+  </div>`;
+}
+function bindRoundtableHandoffs(container, parent) {
+  const local = roundtableLocal(parent.id);
+  container.querySelectorAll('[data-rt-handoff]').forEach(button => {
+    button.disabled = button.disabled || local.busy || Boolean(local.uncertain);
+    button.addEventListener('click', async () => {
+      const row = button.closest('[data-rt-child]');
+      const targetId = row.querySelector('[data-rt-target]').value;
+      if (!targetId) return showToast('请先选择不同厂商的接手员工。', true);
+      if (!window.confirm('请核对原客户端：这张子单确实已卡住，当前没有运行，也没有尚未回收的结果。确认后才转交；转交本身不执行新模型。')) return;
+      await roundtableRequest(parent.id, 'roundtablehandoff', { task_id: row.dataset.rtChild, target_id: targetId, to_worker_id: targetId, blocked: true, confirmed_not_running: true }, () => { roundtableChildUI.delete(row.dataset.rtChild); });
+    });
+  });
+  if (local.busy) container.querySelectorAll('button, input, select, textarea').forEach(el => { el.disabled = true; });
+}
+function renderRoundtablePanel(container, task, sectionOpen) {
+  const state = task.roundtable_state || {};
+  const local = roundtableLocal(task.id);
+  const gate = roundtableGate(task);
+  const children = (task.subtask_ids || []).map(id => APP_STATE.tasks.find(child => child.id === id)).filter(Boolean);
+  if (local.prompt && local.prompt.stage_key !== state.stage && state.stage !== 'collecting') local.prompt = null;
+  const prompt = local.prompt || gate.pendingManual;
+  if (prompt && !local.prompt) local.prompt = { stage_key: prompt.stage_key, prompt: prompt.prompt, request_id: prompt.request_id };
+  const promptKey = prompt?.stage_key || '';
+  const canRun = gate.stage >= 0 && gate.basketReady && !gate.waiting && !gate.done && !gate.blocked && !local.uncertain && !gate.pendingManual;
+  const canManual = gate.stage >= 0 && gate.basketReady && !gate.waiting && !gate.done && !gate.blocked && !local.uncertain;
+  const content = (title, value, source) => `<section class="roundtable-version"><h3>${title}</h3><p class="roundtable-source" data-preserve-text>${escapeHTML(source)}</p>${roundtableOutput(value)}</section>`;
+  const notice = local.uncertain ? '结果尚未确认，已停止。请核对服务端回执及原客户端，不要重复发送。' : gate.blocked ? '存在进行中、未知或失败回执，已停止推进。请核对下方回执；不会自动重试。' : gate.waiting ? 'A / B 对比已结束。只有你可以采纳 B、采纳 C 或退回重修。' : gate.done ? '本轮已停止；保留全部原稿和回执，不自动开启下一轮。' : gate.stage < 0 ? '阶段未识别，已停止执行。请刷新状态或核对服务端阶段字段。' : !gate.basketReady ? '先完成并汇报全部 1F 子单；改代码子单还需独立真实审查。资料齐备后才能启动 A 席。' : gate.manual ? '当前席位需半自动交接：获取提示词，在外部模型运行后人工回填 JSON。' : '每次只推进一阶段；Stage 4 的 A、B 对比分别返回后停止，等待你拍板。';
+  container.innerHTML = `<section class="roundtable-panel" aria-labelledby="roundtableTitle" aria-busy="${local.busy}">
+    <header class="detail-header"><h2 class="detail-title" id="roundtableTitle" data-preserve-text>${escapeHTML(task.title)}</h2>
+      <p class="detail-meta">圆桌精雕 · <span data-preserve-text>${escapeHTML(task.id)} · ${escapeHTML(state.stage ?? '阶段未提供')}</span></p>
+      <p class="detail-meta" data-preserve-text>${escapeHTML(task.goal || '未填写总目标')}</p>
+    </header>
+    <ol class="roundtable-progress" aria-label="圆桌五阶段">${ROUNDTABLE_STAGES.map((label, index) => `<li class="${index < gate.stage ? 'done' : index === gate.stage ? 'current' : ''}"${index === gate.stage ? ' aria-current="step"' : ''}><span>Stage ${index}</span><strong>${label}</strong></li>`).join('')}</ol>
+    <p class="detail-meta roundtable-pass">已用 Pass ${escapeHTML(state.passes_used ?? '未提供')} / 2 · 固定 1 轮对抗 + 1 轮对比 · 自动调用 ${escapeHTML(state.calls_used ?? '未提供')} / 5</p>
+    <p class="detail-meta">Stage 4：A、B 各不超过 3 条短评，reply_hint=false；只传结论、问题清单和增量差异，不重写全文。</p>
+    <dl class="roundtable-seats">${['A', 'B', 'C'].map(seat => { const a = roundtableSeat(state, seat); return `<div><dt>经理 ${seat}</dt><dd data-preserve-text>${escapeHTML(a.name || a.id)}<small>${escapeHTML(a.vendor)} / ${escapeHTML(a.model)} · ${['web', 'subscription', 'desktop'].includes(a.access_kind) ? '人工回填' : escapeHTML(a.access_kind || '通道未标注')}</small></dd></div>`; }).join('')}</dl>
+    <div class="roundtable-notice" role="status"><p>${notice}</p>${local.notice ? `<p data-preserve-text>${escapeHTML(local.notice)}</p>` : ''}${local.busy ? '<p>请求处理中，操作已锁定。请勿重复提交。</p>' : ''}</div>
+    <fieldset class="roundtable-controls"${local.busy ? ' disabled' : ''}><legend class="roundtable-sr-only">圆桌操作</legend>
+      <div class="detail-actions">
+        <button type="button" class="btn btn-primary" data-rt-action="step"${canRun ? '' : ' disabled'}>${gate.manual ? '准备当前席位交接' : '推进下一步（真实执行）'}</button>
+        <button type="button" class="btn btn-ghost" data-rt-action="plan">查看干跑计划（0 消耗）</button>
+        <button type="button" class="btn btn-ghost" data-rt-action="refresh">核对最新状态</button>
+      </div>
+      <p class="detail-meta">不自动轮询、不自动重发。API Key 仅读环境变量；额度未知时以「额度未填」为准。</p>
+      ${local.plan ? `<details class="detail-section" data-section="rt-plan"${sectionOpen('rt-plan', true)}><summary>干跑计划 · 未调用模型，未生成任何成果</summary>${roundtableOutput(local.plan)}</details>` : ''}
+      <details class="detail-section" data-section="rt-basket"${sectionOpen('rt-basket', gate.stage === 0)}><summary>Stage 0 · 资料篮与 1F 子单</summary><div class="section-body">
+        <p class="detail-meta">资料篮只收【结论】【改动文件】【测试结果】，不把 1F 对话全文带上圆桌。点开子单，沿用原执行与汇报流程。</p>
+        ${Array.isArray(state.basket) && state.basket.length ? `<ul class="roundtable-materials">${state.basket.map(item => `<li><h4 data-preserve-text>${escapeHTML(item.task_id || '子单结论')} · ${escapeHTML(item.sender_id || '来源未标注')}</h4><p data-preserve-text>${escapeHTML(item.conclusion || '')}</p><p class="detail-meta" data-preserve-text>改动文件：${escapeHTML(roundtableText(item.changed_files || []))}<br>测试结果：${escapeHTML(item.test_result || '未填写')}<br>实际来源：${escapeHTML(item.provenance || '未标注')}</p>${item.diff_summary ? roundtableOutput(item.diff_summary) : ''}</li>`).join('')}</ul>` : roundtableOutput(state.basket, '资料篮尚无结论。请先完成并汇报子单。')}
+        <div class="subtask-list">${children.map(child => `<div class="roundtable-child"><button type="button" class="btn btn-ghost subtask-row" data-rt-open-child="${escapeHTML(child.id)}"><span data-preserve-text>${escapeHTML(child.title)}</span><span class="detail-meta" data-preserve-text>${escapeHTML(child.status)} · ${escapeHTML(child.assigned_name || '未指派')}${child.worker_reported ? ' · 已汇报' : ' · 待回收'}</span></button>${renderRoundtableHandoff(child, task)}</div>`).join('') || '<p class="detail-meta">暂无子单记录，请核对服务端拆单结果。</p>'}</div>
+      </div></details>
+      <details class="detail-section" data-section="rt-architect"${sectionOpen('rt-architect')}><summary>Stage 1 · A 的执行提示词与验收约束</summary><p class="roundtable-source" data-preserve-text>${escapeHTML(roundtableSource(state, ['A']))}</p>${roundtableOutput(state.manager_a_prompt)}</details>
+      <section class="roundtable-section"><h3>成果对比</h3><div class="roundtable-comparison">
+        ${content('B · Draft v1', state.draft_v1, roundtableSource(state, ['B', 'builder', 'manager_b', 'stage2', 'stage_2', 'draft_v1']))}
+        ${content('C · Refined v2', state.refined_v2, roundtableSource(state, ['C', 'critic', 'manager_c', 'stage3', 'stage_3', 'refined_v2']))}
+      </div></section>
+      <section class="roundtable-section"><h3>C · P0 / P1 问题清单</h3>${Array.isArray(state.critic_issues) && state.critic_issues.length ? `<ol class="roundtable-issues">${state.critic_issues.map(issue => `<li data-preserve-text>${escapeHTML(issue?.severity ? `${issue.severity} · ${issue.detail || ''}` : roundtableText(issue))}</li>`).join('')}</ol>` : roundtableOutput(state.critic_issues, '尚未收到问题清单；不代表已通过审查。')}</section>
+      <section class="roundtable-section"><h3>Stage 4 · A / B 对比短评</h3><div class="roundtable-comparison">${['A', 'B'].map(seat => { const opinion = state.ab_opinions?.[seat]; return `<section class="roundtable-opinion"><h4>经理 ${seat} · ${opinion ? '已回议' : '待回议'}</h4><p class="roundtable-source" data-preserve-text>${escapeHTML(roundtableSource(state, [`${seat}-comparison`]))}</p>${opinion ? `<p class="detail-meta" data-preserve-text>建议采纳：${escapeHTML(opinion.recommendation || '未标注')}（不代表你的决定）</p>${Array.isArray(opinion.comments) ? `<ul>${opinion.comments.map(comment => `<li data-preserve-text>${escapeHTML(comment)}</li>`).join('')}</ul>` : roundtableOutput(opinion)}` : '<p class="detail-meta">尚未收到实际短评。</p>'}</section>`; }).join('')}</div></section>
+      ${gate.waiting ? `<section class="roundtable-section roundtable-owner"><h3>董事长定稿</h3><p class="detail-meta">采纳不会覆盖另一份原稿。退回重修会停止本轮，不自动续费重跑。</p><div class="form-group"><label for="roundtableOwnerComment">定稿说明 / 重修要求</label><textarea id="roundtableOwnerComment" rows="3" maxlength="2000" placeholder="退回重修时请说明要改什么">${escapeHTML(local.comment)}</textarea></div><div class="detail-actions"><button type="button" class="btn btn-primary" data-rt-choice="C"${local.uncertain ? ' disabled' : ''}>采纳 C 版</button><button type="button" class="btn btn-ghost" data-rt-choice="B"${local.uncertain ? ' disabled' : ''}>采纳 B 版</button><button type="button" class="btn btn-ghost" data-rt-choice="revise"${local.uncertain ? ' disabled' : ''}>退回重修</button></div></section>` : ''}
+      ${canManual || prompt ? `<details class="detail-section" data-section="rt-manual"${sectionOpen('rt-manual', gate.manual || Boolean(prompt))}><summary>半自动席位 · 复制提示词 / 人工回填</summary><div class="section-body"><p class="detail-meta">必须来自当前付费经理的真实外部模型输出；这是人工粘贴，不是农场自动生成。不要粘贴整段聊天或凭据。</p><button type="button" class="btn btn-ghost" data-rt-action="prompt"${canManual ? '' : ' disabled'}>获取当前席位提示词（不调用模型）</button>
+        ${prompt ? `<p class="detail-meta" data-preserve-text>服务端阶段：${escapeHTML(promptKey)} · 人工交接</p><div class="form-group"><label for="roundtableManualPrompt">本席完整提示词（只读）</label><textarea id="roundtableManualPrompt" rows="7" readonly>${escapeHTML(prompt.prompt)}</textarea></div><button type="button" class="btn btn-ghost" data-rt-action="copy">复制本席提示词</button><form id="roundtableResultForm"><div class="form-group"><label for="roundtableManualResult">实际外部模型结果 · JSON 对象</label><textarea id="roundtableManualResult" rows="9" required spellcheck="false" placeholder="粘贴本席提示词要求的 JSON 对象；不接受 Markdown 代码围栏或数组">${escapeHTML(local.drafts[promptKey] || '')}</textarea></div><label class="roundtable-check"><input type="checkbox" id="roundtableManualConfirmed" required><span>我确认这是本席外部模型的真实结果，授权人工回填。</span></label><button type="submit" class="btn btn-primary"${canManual ? '' : ' disabled'}>提交人工回填结果</button></form>` : ''}
+      </div></details>` : ''}
+      <details class="detail-section" data-section="rt-receipts"${sectionOpen('rt-receipts', gate.blocked || Boolean(local.uncertain))}><summary>请求回执与实际来源</summary><p class="detail-meta">pending / unknown 表示没有可确认的结果，不等于失败后可安全重试。</p>${roundtableOutput(state.attempts, '尚无请求回执。')}${local.uncertain ? roundtableOutput(local.uncertain) : ''}</details>
+      ${state.decision ? `<section class="roundtable-section"><h3>已记录的人工决定</h3>${roundtableOutput(state.decision)}</section>` : ''}
+      ${task.final_delivery_text ? `<section class="roundtable-section"><h3>人工决定后的交付记录</h3>${roundtableOutput(task.final_delivery_text)}</section>` : ''}
+    </fieldset></section>`;
+  container.querySelectorAll('[data-rt-open-child]').forEach(button => button.addEventListener('click', () => openTaskPrivateThread(button.dataset.rtOpenChild)));
+  container.querySelectorAll('[data-rt-action]').forEach(button => button.addEventListener('click', () => handleRoundtableAction(task.id, button.dataset.rtAction)));
+  container.querySelectorAll('[data-rt-choice]').forEach(button => button.addEventListener('click', () => handleRoundtableChoice(task.id, button.dataset.rtChoice)));
+  container.querySelector('#roundtableOwnerComment')?.addEventListener('input', event => { local.comment = event.target.value; });
+  container.querySelector('#roundtableManualResult')?.addEventListener('input', event => { local.drafts[promptKey] = event.target.value; });
+  container.querySelector('#roundtableResultForm')?.addEventListener('submit', event => { event.preventDefault(); handleRoundtableResult(task.id); });
+  bindRoundtableHandoffs(container, task);
+}
+function roundtableRequestId() {
+  return globalThis.crypto?.randomUUID ? crypto.randomUUID() : `rt-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+}
+async function roundtableRequest(taskId, action, payload, onSuccess) {
+  const local = roundtableLocal(taskId);
+  const mutation = ['runroundtablestep', 'submitroundtableresult', 'chooseroundtable', 'roundtablehandoff'].includes(action) && payload.live !== false;
+  if (local.busy || (mutation && local.uncertain)) return;
+  if (!APP_STATE.backendOnline) return showToast('请先连接本机服务；离线预览不会生成圆桌结果。', true);
+  const task = APP_STATE.tasks.find(t => t.id === taskId);
+  local.busy = true;
+  local.notice = '';
+  renderSelectedTaskThread();
+  try {
+    const result = await callOfficeAction(action, payload);
+    if (result == null) throw new Error('服务端未返回可确认的回执');
+    if (onSuccess) onSuccess(result);
+    if (mutation) local.notice = '已收到服务端响应。以阶段、成果及请求回执为准；没有自动发起下一步。';
+    return result;
+  } catch (error) {
+    local.notice = `${error.message}。操作已停止，不会自动重试。`;
+    if (mutation) local.uncertain = { action, request_id: payload.request_id || '', stage_before: task?.roundtable_state?.stage, child_id: action === 'roundtablehandoff' ? payload.task_id : '', target_id: payload.target_id || '' };
+  } finally {
+    local.busy = false;
+    renderSelectedTaskThread();
+  }
+}
+async function handleRoundtableAction(taskId, action) {
+  const local = roundtableLocal(taskId);
+  const task = APP_STATE.tasks.find(t => t.id === taskId);
+  if (!task || local.busy) return;
+  const gate = roundtableGate(task);
+  if (action === 'refresh') {
+    local.busy = true;
+    renderSelectedTaskThread();
+    try {
+      const response = await fetch('/api/state', { cache: 'no-store' });
+      if (!response.ok) throw new Error('读取状态失败；请检查本机连接与配对状态');
+      applySnapshot(await response.json());
+      for (const child of APP_STATE.tasks.filter(t => t.parent_task_id === taskId)) {
+        const receipt = child.roundtable_dispatch?.receipts?.[child.roundtable_dispatch.current];
+        if (receipt && ['completed', 'pending_manual'].includes(receipt.status)) roundtableChildUI.delete(child.id);
+      }
+      const current = APP_STATE.tasks.find(t => t.id === taskId);
+      const uncertain = local.uncertain;
+      if (uncertain && current && !roundtableGate(current).blocked && (uncertain.child_id
+        ? APP_STATE.tasks.find(t => t.id === uncertain.child_id)?.assigned_to === uncertain.target_id
+        : current.roundtable_state?.stage !== uncertain.stage_before || current.status === 'accepted_done' ||
+          (uncertain.action === 'submitroundtableresult' && roundtableAttempts(current.roundtable_state || {}).some(a => a.request_id === uncertain.request_id && a.status === 'pending_manual')))) local.uncertain = null;
+      local.notice = local.uncertain ? '已读取最新状态，但尚未确认上次请求完成。保留未知状态，请核对回执，不要重发。' : '已读取最新状态，未调用任何模型。';
+    } catch (error) { local.notice = error.message; }
+    finally { local.busy = false; renderSelectedTaskThread(); }
+    return;
+  }
+  if (action === 'plan') return roundtableRequest(taskId, 'runroundtablestep', { task_id: taskId, live: false }, result => { local.plan = result; });
+  if (action === 'copy') {
+    try { await navigator.clipboard.writeText(local.prompt?.prompt || ''); showToast('已复制本席提示词；请在对应外部模型运行后回填真实结果。'); }
+    catch (_) { showToast('剪贴板不可用，请选中只读提示词框手动复制。', true); }
+    return;
+  }
+  if (gate.waiting || gate.done || gate.blocked || gate.stage < 0 || !gate.basketReady || local.uncertain) return;
+  if (action === 'prompt' || (action === 'step' && gate.manual)) return roundtableRequest(taskId, 'getroundtableprompt', { task_id: taskId }, result => {
+    if (!result.stage_key || !result.request_id || typeof result.prompt !== 'string') throw new Error('服务端未返回 stage_key、request_id 与 prompt，不能回填');
+    local.prompt = { stage_key: result.stage_key, prompt: result.prompt, request_id: result.request_id };
+  });
+  if (action === 'step' && !gate.pendingManual) {
+    if (!window.confirm('只推进当前一阶段。API / CLI 席位会调用真实模型并消耗额度；网页 / 订阅席位停在人工交接。不会自动定稿或重试。继续？')) return;
+    return roundtableRequest(taskId, 'runroundtablestep', { task_id: taskId, live: true, request_id: roundtableRequestId() }, () => { local.prompt = null; });
+  }
+}
+async function handleRoundtableResult(taskId) {
+  const local = roundtableLocal(taskId);
+  if (!local.prompt || local.busy || local.uncertain || !document.getElementById('roundtableManualConfirmed')?.checked) return;
+  const task = APP_STATE.tasks.find(t => t.id === taskId);
+  const gate = roundtableGate(task);
+  if (gate.waiting || gate.done || gate.blocked) return;
+  let result;
+  try {
+    result = JSON.parse(local.drafts[local.prompt.stage_key] || '');
+    if (!result || Array.isArray(result) || typeof result !== 'object') throw new Error('必须为 JSON 对象，不能是数组、字符串或 null');
+  } catch (error) {
+    showToast(`JSON 未提交：${error.message}。请按本席提示词的格式修正。`, true);
+    return;
+  }
+  return roundtableRequest(taskId, 'submitroundtableresult', { task_id: taskId, stage_key: local.prompt.stage_key, result, request_id: local.prompt.request_id, provenance: 'manual' }, () => { local.prompt = null; });
+}
+async function handleRoundtableChoice(taskId, decision) {
+  const task = APP_STATE.tasks.find(t => t.id === taskId);
+  const local = roundtableLocal(taskId);
+  if (!task || task.roundtable_state?.stage !== 'awaiting_owner' || !['B', 'C', 'revise'].includes(decision) || local.busy || local.uncertain) return;
+  if (decision === 'revise' && !local.comment.trim()) return showToast('请写明重修要求；不会自动开启下一轮。', true);
+  if (!window.confirm(decision === 'revise' ? '确认退回重修并停止本轮？不会自动重跑。' : `确认采纳 ${decision} 版？另一版和全部回执仍会保留。`)) return;
+  return roundtableRequest(taskId, 'chooseroundtable', { task_id: taskId, decision, comment: local.comment.trim() });
 }
 
 // =========================================================================
@@ -1274,14 +1661,18 @@ async function handleWorkerPrivateReport(event, taskId) {
   if (!conclusion) return;
   const changed_files = filesRaw ? filesRaw.split(/[,，\n]/).map(s => s.trim()).filter(Boolean) : ["无"];
   const task = APP_STATE.tasks.find(t => t.id === taskId);
-  await callOfficeAction("postmessage", {
+  const payload = {
     task_id: taskId,
     sender_id: task ? task.assigned_to : "",
     conclusion,
     changed_files,
     test_result: testResult || "未运行测试",
     is_delivery: true,
-  });
+  };
+  if (roundtableChildParent(taskId)) {
+    const result = await roundtableChildAction(taskId, 'postmessage', payload);
+    if (!result) return;
+  } else await callOfficeAction('postmessage', payload);
   delete APP_STATE.reportDrafts[taskId];
   await openTaskPrivateThread(taskId);
   document.querySelector('#taskThreadContent details[data-section=report]').open = false;
@@ -1334,13 +1725,15 @@ async function handleSubmitCodeReview(taskId, passed, simulateReject = false) {
   const reviewerId = (document.getElementById("reviewAgentSelect") || {}).value || "";
   const rawIssues = (document.getElementById("reviewIssuesInput") || {}).value || "";
   const issues = rawIssues.split(/\r?\n/).map(s => s.trim()).filter(Boolean);
+  const roundtableChild = Boolean(roundtableChildParent(taskId));
+  if (roundtableChild && !window.confirm('确认独立审查者已实际审阅本次代码改动？此处记录真实人工审查，不是干跑结果。')) return;
   await callOfficeAction("submitcodereview", {
     task_id: taskId,
     reviewer_id: reviewerId,
     passed,
     issues,
-    dry_run: true,
-    simulate_reject: Boolean(simulateReject && issues.length === 0),
+    dry_run: !roundtableChild,
+    simulate_reject: Boolean(!roundtableChild && simulateReject && issues.length === 0),
   });
   await openTaskPrivateThread(taskId);
   showToast(passed ? "✅ 独立审查通过，可交付！" : "↩ 已退回问题清单给写代码员工重做！");
@@ -1362,32 +1755,92 @@ async function handleAutoCodeReview(taskId, live = false) {
   }
 }
 
+const roundtableIdentity = value => String(value || '').trim().toLowerCase();
+function usableRoundtableManagers() {
+  return APP_STATE.agents.filter(a => a.floor === 'manager' && a.paid === true &&
+    !['exhausted', 'disabled'].includes(a.status) && ['api', 'cli', 'web', 'subscription', 'desktop'].includes(a.access_kind) &&
+    roundtableIdentity(a.vendor) && roundtableIdentity(a.model) && !/待|unknown|unverified/i.test(a.model));
+}
+
+function validateRoundtableSeats(ids) {
+  const managers = usableRoundtableManagers();
+  const seats = ids.map(id => managers.find(a => a.id === id));
+  return seats.every(Boolean) && new Set(ids).size === 3 &&
+    new Set(seats.map(a => roundtableIdentity(a.vendor))).size === 3 &&
+    new Set(seats.map(a => roundtableIdentity(a.model))).size === 3;
+}
+
+function updateBigTaskRoundtableMode() {
+  const enabled = document.getElementById('bigTaskRoundtable').checked;
+  document.getElementById('bigTaskRoundtableSeats').classList.toggle('hidden', !enabled);
+  const selectors = ['A', 'B', 'C'].map(seat => document.getElementById(`bigTaskSeat${seat}`));
+  selectors.forEach(select => { select.disabled = !enabled; select.required = enabled; });
+  const valid = validateRoundtableSeats(selectors.map(select => select.value));
+  const guidance = document.getElementById('bigTaskSeatGuidance');
+  guidance.textContent = valid
+    ? '三席厂商与模型均不同。API / CLI 需你确认才真调；付费网页、订阅与桌面席位只走复制提示词和人工 JSON 回填。'
+    : '请选择三位不同厂商、不同模型的付费经理。席位不足？先到团队接入或调岗，也可添加跨厂商付费网页/订阅经理做半自动席位；免费、1F 员工和未绑定模型不可入席。';
+  guidance.classList.toggle('roundtable-warning', !valid);
+  document.querySelector('#bigTaskForm button[type="submit"]').disabled = enabled && !valid;
+}
+
 function openBigTaskModal() {
-  const mgrSel = document.getElementById("bigTaskManagerSelect");
-  const managers = APP_STATE.agents.filter(a => a.floor === "manager");
+  const mgrSel = document.getElementById('bigTaskManagerSelect');
+  const managers = APP_STATE.agents.filter(a => a.floor === 'manager');
   if (mgrSel) {
-    mgrSel.innerHTML = managers.map(m => `<option value="${m.id}">${escapeHTML(m.name)} (${escapeHTML(m.badge)})</option>`).join("");
+    mgrSel.innerHTML = managers.map(m => `<option value="${escapeHTML(m.id)}">${escapeHTML(m.name)} (${escapeHTML(m.badge)})</option>`).join('');
   }
-  document.getElementById("bigTaskModal").classList.remove("hidden");
+  document.getElementById('bigTaskRoundtable').checked = false;
+  const candidates = usableRoundtableManagers();
+  ['A', 'B', 'C'].forEach(seat => {
+    document.getElementById(`bigTaskSeat${seat}`).innerHTML = '<option value="">请选择经理</option>' + candidates.map(a =>
+      `<option value="${escapeHTML(a.id)}">${escapeHTML(a.name)} · ${escapeHTML(a.vendor)} / ${escapeHTML(a.model)} · ${['api', 'cli'].includes(a.access_kind) ? '真调' : '人工回填'}</option>`
+    ).join('');
+  });
+  updateBigTaskRoundtableMode();
+  document.getElementById('bigTaskModal').classList.remove('hidden');
 }
 
 function closeBigTaskModal() {
-  document.getElementById("bigTaskModal").classList.add("hidden");
+  document.getElementById('bigTaskModal').classList.add('hidden');
 }
 
 async function handleCreateBigTaskSubmit(event) {
   event.preventDefault();
-  const res = await callOfficeAction("createbigtask", {
-    title: document.getElementById("bigTaskTitle").value.trim(),
-    manager_id: document.getElementById("bigTaskManagerSelect").value,
-    goal: document.getElementById("bigTaskGoal").value.trim(),
-    raw_steps: document.getElementById("bigTaskSteps").value,
-  });
-  closeBigTaskModal();
-  if (res && res.parent) {
-    APP_STATE.selectedTaskId = res.parent.id;
-    await openTaskPrivateThread(res.parent.id);
-    showToast(`🧩 大任务已拆成 ${(res.subtasks || []).length} 张子单并跨厂商分派！`);
+  const form = event.currentTarget;
+  if (form.dataset.busy === 'true') return;
+  const mode = document.getElementById('bigTaskRoundtable').checked ? 'roundtable' : 'standard';
+  const ids = ['A', 'B', 'C'].map(seat => document.getElementById(`bigTaskSeat${seat}`).value);
+  if (mode === 'roundtable' && !validateRoundtableSeats(ids)) {
+    showToast('圆桌需要三个不同厂商、不同模型的付费经理；请调整席位。', true);
+    return;
+  }
+  const payload = {
+    title: document.getElementById('bigTaskTitle').value.trim(),
+    manager_id: document.getElementById('bigTaskManagerSelect').value,
+    goal: document.getElementById('bigTaskGoal').value.trim(),
+    raw_steps: document.getElementById('bigTaskSteps').value,
+    mode,
+    ...(mode === 'roundtable' ? { seat_a: ids[0], seat_b: ids[1], seat_c: ids[2] } : {}),
+  };
+  const controls = [...form.querySelectorAll('input, select, textarea, button')].map(el => [el, el.disabled]);
+  form.dataset.busy = 'true';
+  controls.forEach(([el]) => { el.disabled = true; });
+  try {
+    const res = await callOfficeAction('createbigtask', payload);
+    if (!res) return;
+    closeBigTaskModal();
+    if (res.parent) {
+      APP_STATE.selectedTaskId = res.parent.id;
+      await openTaskPrivateThread(res.parent.id);
+      showToast(mode === 'roundtable' ? '圆桌任务已创建。先收集 1F 子单结论，再逐步推进；不会自动调用经理。' : `大任务已拆成 ${(res.subtasks || []).length} 张子单并跨厂商分派。`);
+    }
+  } catch (error) {
+    showToast(`创建未确认：${error.message}。请检查任务列表，不要重复提交。`, true);
+  } finally {
+    form.dataset.busy = 'false';
+    controls.forEach(([el, wasDisabled]) => { el.disabled = wasDisabled; });
+    updateBigTaskRoundtableMode();
   }
 }
 
@@ -1412,7 +1865,11 @@ async function handleAggregateBigTask(parentId) {
 async function handleRunAdapterTask(taskId, live = false) {
   const wsInput = document.getElementById("customWorkspaceInput");
   const workspace_dir = wsInput ? wsInput.value.trim() : (APP_STATE.customWorkspaceDir || "");
-  const res = await callOfficeAction("runadaptertask", { task_id: taskId, live, workspace_dir });
+  const payload = { task_id: taskId, live, workspace_dir };
+  const res = roundtableChildParent(taskId)
+    ? await roundtableChildAction(taskId, 'runadaptertask', payload)
+    : await callOfficeAction('runadaptertask', payload);
+  if (!res) return;
   await openTaskPrivateThread(taskId);
   if (res) {
     showToast(`🔌 ${res.mode === 'dry_run' ? 'AgentAdapter 干跑完成 (0消耗)' : '🚀 真实调用完成，结果已写入私聊窗！'}`);
@@ -1430,7 +1887,27 @@ function _buildWorkerPromptText(task) {
   );
 }
 
+async function handleRoundtableChildPrompt(taskId, openWeb = false) {
+  const result = await roundtableChildAction(taskId, 'gettaskprompt', { task_id: taskId, mark_dispatched: true });
+  if (!result) return;
+  if (!result.dispatch_allowed || !result.prompt) {
+    showToast('已有子单派发回执，未再次打开或投喂。请检查原任务；卡住时在父单确认后单点转交。', true);
+    return;
+  }
+  try { await navigator.clipboard.writeText(result.prompt); showToast('已复制单次采集指令。手动执行后回填实际结论，不要重复投喂。'); }
+  catch (_) { showToast('剪贴板不可用；请展开「派发回执与已派出指令」手动复制。不要再次派发。', true); }
+  if (openWeb) {
+    const task = APP_STATE.tasks.find(t => t.id === taskId);
+    const worker = APP_STATE.agents.find(a => a.id === task?.assigned_to);
+    try {
+      const url = new URL(worker?.login_url || worker?.usage_url || '');
+      if (['https:', 'http:'].includes(url.protocol)) window.open(url.href, '_blank', 'noopener');
+    } catch (_) { showToast('未配置有效的厂商网页地址，请自行打开对应模型。'); }
+  }
+}
+
 async function handleCopyWorkerPrompt(taskId) {
+  if (roundtableChildParent(taskId)) return handleRoundtableChildPrompt(taskId);
   const task = APP_STATE.tasks.find(t => t.id === taskId);
   if (!task) return;
   const promptText = _buildWorkerPromptText(task);
@@ -1443,6 +1920,7 @@ async function handleCopyWorkerPrompt(taskId) {
 }
 
 async function handleOpenWebAndCopyPrompt(taskId) {
+  if (roundtableChildParent(taskId)) return handleRoundtableChildPrompt(taskId, true);
   const task = APP_STATE.tasks.find(t => t.id === taskId);
   if (!task) return;
   const promptText = _buildWorkerPromptText(task);

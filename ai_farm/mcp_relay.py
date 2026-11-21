@@ -10,21 +10,25 @@ This upgrades the closed-source ``mcp_bridge_private.py`` from "HTTP polling
 forward" into a first-class part of the in-office message bus:
   * Keeps the original 6 tool names + behavior compatible.
   * Adds bus / discussion tools backed by Core bus actions.
-  * Default backend is an in-process OfficeStore (Core). ``--office-url``
-    forwards to a running ``ai-farm office`` so external MCP clients join the
-    SAME live bus the web office uses.
+  * Production requires ``--office-url`` and a member Bearer credential read
+    from an environment variable (default ``AI_FARM_MEMBER_TOKEN``). The host
+    binds identity and task scope; owner browser cookies are never used.
+  * In-process OfficeStore is available only for isolated ``--dry-run`` fixtures.
 
 Red line (enforced in Core, not here): web / subscription free workers are NOT
 bus members — they keep using the browser courier extension / .md mailbox.
 
-Run:  python -m ai_farm.mcp_relay [--office-url http://127.0.0.1:8765]
+Run:  python -m ai_farm.mcp_relay --office-url http://127.0.0.1:8765
 """
 from __future__ import annotations
 
 import argparse
 import json
+import os
+import re
 import sys
 import tempfile
+import urllib.error
 import urllib.request
 from pathlib import Path
 from typing import Any
@@ -125,8 +129,21 @@ TOOLS: list[dict[str, Any]] = [
 ]
 
 
+# Compatibility identity arguments are assertions, never impersonation controls.
+for _tool in TOOLS:
+    _tool["description"] += (
+        " Requires server permission within this member credential's bound task scope; "
+        "identity is bound to the authenticated member, not chosen by arguments. "
+        "This tool grants no execution or wake permission."
+    )
+    for _field in ("sender_id", "from_id", "worker_id", "reviewer_id", "requested_by", "agent_id"):
+        _property = _tool["inputSchema"]["properties"].get(_field)
+        if _property is not None:
+            _property["description"] = "Must match the authenticated member; cannot impersonate another agent."
+
+
 class CoreBackend:
-    """In-process backend: the relay talks straight to the host Core store."""
+    """In-process backend for explicitly supplied test stores, never production."""
 
     def __init__(self, store: OfficeStore):
         self.store = store
@@ -142,27 +159,64 @@ class CoreBackend:
         }
 
 
-class HTTPBackend:
-    """Forward to a running `ai-farm office`; the remote Core computes state."""
+class _RejectRedirects(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        # Returning None makes urllib raise HTTPError; _request closes it.
+        return None
 
-    def __init__(self, office_url: str = "http://127.0.0.1:8765"):
-        self.office_url = office_url.rstrip("/")
+
+class HTTPBackend:
+    """Authenticated loopback transport; the server filters identity and scope."""
+
+    def __init__(self, office_url: str, member_token_env: str = "AI_FARM_MEMBER_TOKEN"):
+        # Match the complete input, rather than a parser that may discard controls
+        # or normalize userinfo, paths, escaped hosts, or empty query delimiters.
+        match = re.fullmatch(r"http://(localhost|127\.0\.0\.1):([0-9]{1,5})", office_url)
+        if not match or not 1 <= int(match[2]) <= 65535:
+            raise ValueError("Office URL must be http://localhost:PORT or http://127.0.0.1:PORT")
+        if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", member_token_env):
+            raise ValueError("Invalid member credential environment variable name")
+        token = os.environ.get(member_token_env, "")
+        if not token:
+            raise ValueError("Member credential environment variable is required")
+        if not re.fullmatch(r"[A-Za-z0-9._~+/-]+=*", token):
+            raise ValueError("Invalid member credential format")
+        self.office_url = office_url
+        self._token = token
+        # Do not inherit global cookie handlers or environment proxy settings.
+        self._opener = urllib.request.build_opener(
+            urllib.request.ProxyHandler({}), _RejectRedirects()
+        )
+
+    def _request(self, path: str, payload: dict[str, Any] | None = None) -> dict[str, Any]:
+        try:
+            req = urllib.request.Request(
+                f"{self.office_url}{path}",
+                data=None if payload is None else json.dumps(payload).encode("utf-8"),
+                headers={"Authorization": f"Bearer {self._token}", "Content-Type": "application/json"},
+                method="GET" if payload is None else "POST",
+            )
+            with self._opener.open(req, timeout=10 if payload is None else 20) as resp:
+                if not 200 <= resp.status < 300:
+                    raise RuntimeError("Unexpected office response")
+                data = json.loads(resp.read().decode("utf-8"))
+            if not isinstance(data, dict) or data.get("ok") is not True:
+                raise RuntimeError("Office rejected request")
+        except urllib.error.HTTPError as exc:
+            status = exc.code
+            exc.close()
+            raise RuntimeError(f"Office request rejected (HTTP {status})") from None
+        except Exception:
+            # Never forward response bodies, URLs, headers, or transport exception
+            # text into MCP: even an error response may reflect a credential.
+            raise RuntimeError("Office request failed; verify connection, member permission and task scope") from None
+        return data
 
     def action(self, name: str, payload: dict[str, Any]) -> Any:
-        req = urllib.request.Request(
-            f"{self.office_url}/api/action",
-            data=json.dumps({"action": name, "payload": payload}).encode("utf-8"),
-            headers={"Content-Type": "application/json"}, method="POST",
-        )
-        with urllib.request.urlopen(req, timeout=20) as resp:
-            data = json.loads(resp.read().decode("utf-8"))
-        if not data.get("ok"):
-            raise RuntimeError(data.get("error") or f"Action {name} failed")
-        return data.get("result")
+        return self._request("/api/action", {"action": name, "payload": payload}).get("result")
 
     def snapshot(self) -> dict[str, Any]:
-        with urllib.request.urlopen(f"{self.office_url}/api/state", timeout=10) as resp:
-            return json.loads(resp.read().decode("utf-8"))
+        return self._request("/api/state")
 
 
 class FarmMCPRelay:
@@ -189,7 +243,7 @@ class FarmMCPRelay:
             elif method == "tools/call":
                 result = self._call_tool(params.get("name", ""), params.get("arguments") or {})
             else:
-                return self._error(req_id, -32601, f"Method not found: {method}")
+                return self._error(req_id, -32601, "Method not found")
             return {"jsonrpc": "2.0", "id": req_id, "result": result}
         except Exception as exc:  # noqa: BLE001
             return self._error(req_id, -32000, str(exc))
@@ -253,7 +307,7 @@ class FarmMCPRelay:
         elif name == "farm_resolve_discussion":
             data = self.backend.action("resolvediscussion", args)
         else:
-            raise ValueError(f"Unknown MCP tool: {name}")
+            raise ValueError("Unknown MCP tool")
         return {"content": [{"type": "text", "text": json.dumps(data, ensure_ascii=False, indent=2)}], "isError": False}
 
     @staticmethod
@@ -267,21 +321,29 @@ def main() -> int:
     if hasattr(sys.stdout, "reconfigure"):
         sys.stdout.reconfigure(encoding="utf-8")
     parser = argparse.ArgumentParser(description="AI Farm public in-office MCP Relay (stdio)")
-    parser.add_argument("--office-url", default="", help="Forward to a running ai-farm office (join its live bus).")
-    parser.add_argument("--state-path", default="", help="In-process Core state file (default ~/.ai-farm/office_state.json).")
-    parser.add_argument("--dry-run", action="store_true", help="Use an ephemeral in-memory Core (no persistence).")
+    parser.add_argument("--office-url", default="", help="Required in production: authenticated loopback office URL.")
+    parser.add_argument("--member-token-env", default="AI_FARM_MEMBER_TOKEN",
+                        help="Name of the environment variable holding a member token (never pass the token itself).")
+    parser.add_argument("--dry-run", action="store_true", help="Use only an isolated temporary Core test fixture.")
     args = parser.parse_args()
 
     tmp_dir = None
-    if args.office_url:
-        backend: Any = HTTPBackend(args.office_url)
+    if args.dry_run:
+        if args.office_url:
+            parser.error("--dry-run cannot be combined with --office-url")
+        tmp_dir = tempfile.TemporaryDirectory()
+        try:
+            backend: Any = CoreBackend(OfficeStore(state_path=Path(tmp_dir.name) / "office.json"))
+        except Exception:
+            tmp_dir.cleanup()
+            raise
     else:
-        if args.dry_run:
-            tmp_dir = tempfile.TemporaryDirectory()
-            state_path = Path(tmp_dir.name) / "office.json"
-        else:
-            state_path = Path(args.state_path) if args.state_path else None
-        backend = CoreBackend(OfficeStore(state_path=state_path))
+        if not args.office_url:
+            parser.error("--office-url is required; local personal state is not an MCP backend")
+        try:
+            backend = HTTPBackend(args.office_url, member_token_env=args.member_token_env)
+        except ValueError as exc:
+            parser.error(str(exc))
 
     relay = FarmMCPRelay(backend)
     try:

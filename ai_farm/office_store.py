@@ -32,6 +32,7 @@ from typing import Any
 from .adapters.registry import get_adapter, registered_slugs
 from .adapters.web import session_dir
 from .skills import SKILLS, analyze_skill_assignments
+from .roundtable import RoundtableMixin, guard_parent, initial_state, is_roundtable, recover_running, validate_seats
 
 
 def _now_iso() -> str:
@@ -259,7 +260,7 @@ GENERIC_EXAMPLE_TASKS: list[dict[str, Any]] = [
 ]
 
 
-class OfficeStore:
+class OfficeStore(RoundtableMixin):
     """Persistent state store backing the office workbench + AgentAdapter execution."""
 
     def __init__(self, state_path: Path | None = None):
@@ -322,6 +323,8 @@ class OfficeStore:
                 if isinstance(loaded, dict) and loaded.get("agents"):
                     self.state = loaded
                     self._ensure_runtime_keys()
+                    if recover_running(self.state):
+                        self.save()
                     return
             except Exception:  # noqa: BLE001
                 pass
@@ -340,7 +343,10 @@ class OfficeStore:
                 f".{self.state_path.name}.{os.getpid()}.{threading.get_ident()}.tmp"
             )
             try:
-                tmp_path.write_text(payload, encoding="utf-8")
+                with tmp_path.open("w", encoding="utf-8") as stream:
+                    stream.write(payload)
+                    stream.flush()
+                    os.fsync(stream.fileno())
                 os.replace(tmp_path, self.state_path)
             finally:
                 if tmp_path.exists():
@@ -378,6 +384,11 @@ class OfficeStore:
 
     @_locked
     def reset_to_seed(self) -> dict[str, Any]:
+        if any(is_roundtable(t) for t in self.state.get("tasks", [])):
+            raise ValueError("圆桌回执不可通过重置清除；新轮次请显式新建任务。")
+        runtime = getattr(self, "_collaboration_runtime", None)
+        if (runtime is not None and not runtime._closed) or self.state.get("collaboration", {}).get("rooms"):
+            raise ValueError("协作记录不可通过重置清除；请使用独立测试状态文件。")
         self.state["agents"] = _default_agents()
         self.state["skills"] = [
             {
@@ -660,7 +671,16 @@ class OfficeStore:
     # Action 5: deleteagent
     # ------------------------------------------------------------------
     def deleteagent(self, payload: dict[str, Any]) -> dict[str, Any]:
+        runtime = getattr(self, "_collaboration_runtime", None)
+        if runtime is not None and not runtime._closed:
+            raise ValueError("请先关闭协作协调器，撤销运行期身份，再移除成员。")
         agent_id = payload.get("id") or payload.get("agent_id")
+        for task in self.state["tasks"]:
+            seats = task.get("roundtable_state", {}).get("seats", {}).values()
+            receipts = task.get("roundtable_dispatch", {}).get("receipts", {}).values()
+            if (any(s["id"] == agent_id for s in seats)
+                    or any(r["worker_id"] == agent_id for r in receipts)):
+                raise ValueError("成员存在圆桌席位/执行回执，不能删除来源身份。")
         if agent_id in ("chief", "muse"):
             raise ValueError("总管是唯一对接口，不能移除。")
         before = len(self.state["agents"])
@@ -936,6 +956,11 @@ class OfficeStore:
     # ------------------------------------------------------------------
     def claimtask(self, payload: dict[str, Any]) -> dict[str, Any]:
         task = self._find_task(payload.get("task_id") or payload.get("id"))
+        guard_parent(task)
+        if self._rt_child_parent(task):
+            self._rt_child_open(task)
+            if payload.get("worker_id") not in (None, "", task.get("assigned_to")):
+                raise ValueError("圆桌子单不能重新认领；请 roundtablehandoff 显式跨厂转交。")
         worker_id = payload.get("worker_id") or task.get("assigned_to")
         if not worker_id:
             ready_workers = [a for a in self.state["agents"] if a["floor"] == "worker" and a["status"] == "ready"]
@@ -1010,6 +1035,13 @@ class OfficeStore:
             sender = self._find_agent(sender_id)
 
         is_delivery = bool(payload.get("is_delivery", True))
+        rt_meta = None
+        if is_delivery:
+            guard_parent(task)
+            if self._rt_child_parent(task):
+                rt_meta, replay = self._rt_prepare_report(task, payload, sender["id"])
+                if replay:
+                    return replay
         conclusion = (payload.get("conclusion") or "").strip()
         changed_files = payload.get("changed_files")
         test_result = (payload.get("test_result") or "").strip()
@@ -1035,56 +1067,59 @@ class OfficeStore:
                 self._reject_full_conversation_paste(text)
             report_meta = None
 
-        msg = self._append_task_msg(
-            task["id"],
-            sender_id=sender["id"],
-            sender_name=sender["name"],
-            kind="worker_report" if is_delivery else "private_chat",
-            text=text,
-            usage=payload.get("usage"),
-        )
-        if report_meta:
-            msg["report_meta"] = report_meta
-
-        if is_delivery:
-            if sender["id"] not in ("owner", "gao"):
-                sender["session_count"] = int(sender.get("session_count") or 0) + 1
-            task["worker_reported"] = True
-            task["latest_report_summary"] = text[:320] + ("..." if len(text) > 320 else "")
-            if task.get("requires_code_review"):
-                task["status"] = "in_review"
-                task["review_status"] = "pending_review"
-                if not task.get("reviewer_id") or task.get("reviewer_id") == sender["id"]:
-                    mgr = self._find_agent(task["manager_id"]) if task.get("manager_id") else chief
-                    rev = self._pick_reviewer(assigned_id=sender["id"], manager=mgr)
-                    task["reviewer_id"] = rev["id"]
-                    task["reviewer_name"] = rev["name"]
-            elif task["status"] in ("assigned", "accepted"):
-                task["status"] = "working"
-
-            self._append_group_msg(
+        with self._rt_report_transaction(rt_meta is not None):
+            msg = self._append_task_msg(
+                task["id"],
                 sender_id=sender["id"],
                 sender_name=sender["name"],
-                sender_role="worker",
-                kind="private_report_lock",
-                task_id=task["id"],
-                text=(
-                    f"🔒 **{sender['name']}** 已向 **@{task['manager_name']}** 提交结论-only 汇报（`{task['id']}` · {len(text)} 字摘要已折叠，经理不重读对话）。"
-                    + (f" 已自动飞书交给独立审查 **@{task['reviewer_name']}** 挑刺。" if task.get("requires_code_review") else "")
-                ),
+                kind="worker_report" if is_delivery else "private_chat",
+                text=text,
+                usage=payload.get("usage"),
             )
-            self._record_flight(
-                from_id=sender["id"],
-                from_name=sender["name"],
-                to_id=task["reviewer_id"] if task.get("requires_code_review") else task["manager_id"],
-                to_name=task["reviewer_name"] if task.get("requires_code_review") else task["manager_name"],
-                kind="review_send" if task.get("requires_code_review") else "report",
-                task_id=task["id"],
-                summary=f"结论汇报 ({len(text)}字)" + (" → 等审查" if task.get("requires_code_review") else ""),
-                channel=self._channel_label(sender),
-            )
-        self.save()
-        return msg
+            if report_meta:
+                msg["report_meta"] = report_meta
+            if rt_meta is not None:
+                self._rt_finish_report(task, payload, msg, rt_meta)
+
+            if is_delivery:
+                if sender["id"] not in ("owner", "gao"):
+                    sender["session_count"] = int(sender.get("session_count") or 0) + 1
+                task["worker_reported"] = True
+                task["latest_report_summary"] = text[:320] + ("..." if len(text) > 320 else "")
+                if task.get("requires_code_review"):
+                    task["status"] = "in_review"
+                    task["review_status"] = "pending_review"
+                    if not task.get("reviewer_id") or task.get("reviewer_id") == sender["id"]:
+                        mgr = self._find_agent(task["manager_id"]) if task.get("manager_id") else chief
+                        rev = self._pick_reviewer(assigned_id=sender["id"], manager=mgr)
+                        task["reviewer_id"] = rev["id"]
+                        task["reviewer_name"] = rev["name"]
+                elif task["status"] in ("assigned", "accepted"):
+                    task["status"] = "working"
+
+                self._append_group_msg(
+                    sender_id=sender["id"],
+                    sender_name=sender["name"],
+                    sender_role="worker",
+                    kind="private_report_lock",
+                    task_id=task["id"],
+                    text=(
+                        f"🔒 **{sender['name']}** 已向 **@{task['manager_name']}** 提交结论-only 汇报（`{task['id']}` · {len(text)} 字摘要已折叠，经理不重读对话）。"
+                        + (f" 已自动飞书交给独立审查 **@{task['reviewer_name']}** 挑刺。" if task.get("requires_code_review") else "")
+                    ),
+                )
+                self._record_flight(
+                    from_id=sender["id"],
+                    from_name=sender["name"],
+                    to_id=task["reviewer_id"] if task.get("requires_code_review") else task["manager_id"],
+                    to_name=task["reviewer_name"] if task.get("requires_code_review") else task["manager_name"],
+                    kind="review_send" if task.get("requires_code_review") else "report",
+                    task_id=task["id"],
+                    summary=f"结论汇报 ({len(text)}字)" + (" → 等审查" if task.get("requires_code_review") else ""),
+                    channel=self._channel_label(sender),
+                )
+            self.save()
+            return msg
 
     # ------------------------------------------------------------------
     # Action 13b: submitcodereview (Write -> Review -> Revise Loop)
@@ -1092,6 +1127,14 @@ class OfficeStore:
     def submitcodereview(self, payload: dict[str, Any]) -> dict[str, Any]:
         """Independent reviewer submits ONLY an issue checklist (or pass) for code_change tasks."""
         task = self._find_task(payload.get("task_id") or payload.get("id"))
+        guard_parent(task)
+        rt_receipt = None
+        if self._rt_child_parent(task):
+            self._rt_child_open(task)
+            dispatch = task.get("roundtable_dispatch", {})
+            rt_receipt = dispatch.get("receipts", {}).get(dispatch.get("current"), {})
+            if rt_receipt.get("status") != "completed":
+                raise ValueError("圆桌代码子单必须先有真实执行结论，再独立审查。")
         if not task.get("requires_code_review"):
             raise ValueError("该任务属于小活，未开启写—审—改闭环（避免空耗审查 Token）。")
 
@@ -1126,105 +1169,111 @@ class OfficeStore:
         if not passed and not issues:
             raise ValueError("审查不通过打回时，必须给出至少 1 条精简问题清单。")
 
-        task["reviewer_id"] = reviewer["id"]
-        task["reviewer_name"] = reviewer["name"]
-        reviewer["session_count"] = int(reviewer.get("session_count") or 0) + 1
+        with self._rt_report_transaction(rt_receipt is not None):
+            if rt_receipt is not None:
+                task["roundtable_review"] = {"message_id": rt_receipt["message_id"],
+                                             "reviewer_id": reviewer["id"], "passed": passed,
+                                             "dry_run": dry_run}
+            task["reviewer_id"] = reviewer["id"]
+            task["reviewer_name"] = reviewer["name"]
+            reviewer["session_count"] = int(reviewer.get("session_count") or 0) + 1
 
-        if passed:
-            task["review_status"] = "approved"
-            task["review_issues"] = []
-            task["circuit_breaker"] = ""
-            task["status"] = "working"
-            msg_text = (
-                f"✅ **独立代码审查通过**（审查者：{reviewer['name']} · 写代码与审查已分开）\n"
-                f"• 问题清单：无阻断问题（可由经理统筹交付）"
-            )
-            self._append_task_msg(task["id"], sender_id=reviewer["id"], sender_name=reviewer["name"], kind="code_review_pass", text=msg_text)
-            self._append_group_msg(
-                sender_id=reviewer["id"],
-                sender_name=reviewer["name"],
-                sender_role=reviewer.get("floor", "manager"),
-                kind="review_notice",
-                task_id=task["id"],
-                text=f"✅ **审查通过** `{task['id']}`（{reviewer['name']} 只读摘要+diff 确认无阻断项，可交付）。",
-            )
-            self._record_flight(
-                from_id=reviewer["id"],
-                from_name=reviewer["name"],
-                to_id=task["manager_id"],
-                to_name=task["manager_name"],
-                kind="review_pass",
-                task_id=task["id"],
-                summary="审查通过 (0阻断)",
-                channel=self._channel_label(reviewer),
-            )
-        else:
-            max_rounds = int(self.state.get("settings", {}).get("max_revision_rounds", MAX_REVISION_ROUNDS))
-            current_round = int(task.get("revision_round") or 0)
-            task["review_status"] = "changes_requested"
-            task["review_issues"] = issues
-            checklist_md = "\n".join(f"  {idx + 1}. {item}" for idx, item in enumerate(issues))
-            if current_round >= max_rounds:
-                # Pass circuit breaker: stop the write->review->revise ping-pong
-                # so two models never burn quota arguing forever. Escalate to the
-                # 2F manager / owner instead of looping again.
-                task["circuit_breaker"] = "revision_limit"
-                task["status"] = "rejected"
-                esc_name = task.get("manager_name") or "总管"
-                breaker_text = (
-                    f"⛔ **写—审—改熔断（已达 {max_rounds} 轮打回上限）** `{task['id']}`\n"
-                    f"• 审查者 {reviewer['name']} 第 {current_round + 1} 次打回被拦截，自动停下。\n"
-                    f"• 升级给 **@{esc_name}** / 主人裁决，不再继续烧额度互改。\n"
-                    f"• 遗留问题清单：\n{checklist_md}"
+            if passed:
+                task["review_status"] = "approved"
+                task["review_issues"] = []
+                task["circuit_breaker"] = ""
+                task["status"] = "working"
+                msg_text = (
+                    f"✅ **独立代码审查通过**（审查者：{reviewer['name']} · 写代码与审查已分开）\n"
+                    f"• 问题清单：无阻断问题（可由经理统筹交付）"
                 )
-                self._append_task_msg(task["id"], sender_id=reviewer["id"], sender_name=reviewer["name"], kind="circuit_breaker", text=breaker_text)
+                self._append_task_msg(task["id"], sender_id=reviewer["id"], sender_name=reviewer["name"], kind="code_review_pass", text=msg_text)
                 self._append_group_msg(
-                    sender_id=reviewer["id"], sender_name=reviewer["name"],
-                    sender_role=reviewer.get("floor", "manager"), kind="circuit_breaker",
-                    task_id=task["id"], text=breaker_text,
+                    sender_id=reviewer["id"],
+                    sender_name=reviewer["name"],
+                    sender_role=reviewer.get("floor", "manager"),
+                    kind="review_notice",
+                    task_id=task["id"],
+                    text=f"✅ **审查通过** `{task['id']}`（{reviewer['name']} 只读摘要+diff 确认无阻断项，可交付）。",
                 )
                 self._record_flight(
-                    from_id=reviewer["id"], from_name=reviewer["name"],
-                    to_id=task.get("manager_id") or "owner", to_name=esc_name,
-                    kind="circuit_breaker", task_id=task["id"],
-                    summary=f"打回超限熔断 ({max_rounds}轮)", channel=self._channel_label(reviewer),
+                    from_id=reviewer["id"],
+                    from_name=reviewer["name"],
+                    to_id=task["manager_id"],
+                    to_name=task["manager_name"],
+                    kind="review_pass",
+                    task_id=task["id"],
+                    summary="审查通过 (0阻断)",
+                    channel=self._channel_label(reviewer),
                 )
-                self.save()
-                return task
-            task["revision_round"] = current_round + 1
-            task["status"] = "rejected"
-            msg_text = (
-                f"↩ **独立审查打回重做（第 {task['revision_round']} 轮 · 只回问题清单，不回全文）**\n"
-                f"• 审查者：{reviewer['name']} → 退回给：{task['assigned_name']}\n"
-                f"• 问题清单：\n{checklist_md}"
-            )
-            self._append_task_msg(task["id"], sender_id=reviewer["id"], sender_name=reviewer["name"], kind="code_review_reject", text=msg_text)
-            self._append_group_msg(
-                sender_id=reviewer["id"],
-                sender_name=reviewer["name"],
-                sender_role=reviewer.get("floor", "manager"),
-                kind="review_notice",
-                task_id=task["id"],
-                text=f"↩ **审查打回重做** `{task['id']}`：{reviewer['name']} 列出 {len(issues)} 条问题清单，飞回给 **@{task['assigned_name']}** 修改。",
-            )
-            self._record_flight(
-                from_id=reviewer["id"],
-                from_name=reviewer["name"],
-                to_id=task.get("assigned_to") or "workers",
-                to_name=task["assigned_name"],
-                kind="review_reject",
-                task_id=task["id"],
-                summary=f"打回 ({len(issues)} 项问题)",
-                channel=self._channel_label(reviewer),
-            )
-        self.save()
-        return task
+            else:
+                max_rounds = int(self.state.get("settings", {}).get("max_revision_rounds", MAX_REVISION_ROUNDS))
+                current_round = int(task.get("revision_round") or 0)
+                task["review_status"] = "changes_requested"
+                task["review_issues"] = issues
+                checklist_md = "\n".join(f"  {idx + 1}. {item}" for idx, item in enumerate(issues))
+                if current_round >= max_rounds:
+                    # Pass circuit breaker: stop the write->review->revise ping-pong
+                    # so two models never burn quota arguing forever. Escalate to the
+                    # 2F manager / owner instead of looping again.
+                    task["circuit_breaker"] = "revision_limit"
+                    task["status"] = "rejected"
+                    esc_name = task.get("manager_name") or "总管"
+                    breaker_text = (
+                        f"⛔ **写—审—改熔断（已达 {max_rounds} 轮打回上限）** `{task['id']}`\n"
+                        f"• 审查者 {reviewer['name']} 第 {current_round + 1} 次打回被拦截，自动停下。\n"
+                        f"• 升级给 **@{esc_name}** / 主人裁决，不再继续烧额度互改。\n"
+                        f"• 遗留问题清单：\n{checklist_md}"
+                    )
+                    self._append_task_msg(task["id"], sender_id=reviewer["id"], sender_name=reviewer["name"], kind="circuit_breaker", text=breaker_text)
+                    self._append_group_msg(
+                        sender_id=reviewer["id"], sender_name=reviewer["name"],
+                        sender_role=reviewer.get("floor", "manager"), kind="circuit_breaker",
+                        task_id=task["id"], text=breaker_text,
+                    )
+                    self._record_flight(
+                        from_id=reviewer["id"], from_name=reviewer["name"],
+                        to_id=task.get("manager_id") or "owner", to_name=esc_name,
+                        kind="circuit_breaker", task_id=task["id"],
+                        summary=f"打回超限熔断 ({max_rounds}轮)", channel=self._channel_label(reviewer),
+                    )
+                    self.save()
+                    return task
+                task["revision_round"] = current_round + 1
+                task["status"] = "rejected"
+                msg_text = (
+                    f"↩ **独立审查打回重做（第 {task['revision_round']} 轮 · 只回问题清单，不回全文）**\n"
+                    f"• 审查者：{reviewer['name']} → 退回给：{task['assigned_name']}\n"
+                    f"• 问题清单：\n{checklist_md}"
+                )
+                self._append_task_msg(task["id"], sender_id=reviewer["id"], sender_name=reviewer["name"], kind="code_review_reject", text=msg_text)
+                self._append_group_msg(
+                    sender_id=reviewer["id"],
+                    sender_name=reviewer["name"],
+                    sender_role=reviewer.get("floor", "manager"),
+                    kind="review_notice",
+                    task_id=task["id"],
+                    text=f"↩ **审查打回重做** `{task['id']}`：{reviewer['name']} 列出 {len(issues)} 条问题清单，飞回给 **@{task['assigned_name']}** 修改。",
+                )
+                self._record_flight(
+                    from_id=reviewer["id"],
+                    from_name=reviewer["name"],
+                    to_id=task.get("assigned_to") or "workers",
+                    to_name=task["assigned_name"],
+                    kind="review_reject",
+                    task_id=task["id"],
+                    summary=f"打回 ({len(issues)} 项问题)",
+                    channel=self._channel_label(reviewer),
+                )
+            self.save()
+            return task
 
     # ------------------------------------------------------------------
     # Action 14: updatetaskstatus
     # ------------------------------------------------------------------
     def updatetaskstatus(self, payload: dict[str, Any]) -> dict[str, Any]:
         task = self._find_task(payload.get("task_id") or payload.get("id"))
+        guard_parent(task)
         new_status = payload.get("status")
         valid = ("assigned", "accepted", "working", "in_review", "delivered", "accepted_done", "rejected")
         if new_status not in valid:
@@ -1246,6 +1295,7 @@ class OfficeStore:
     # ------------------------------------------------------------------
     def reassigntask(self, payload: dict[str, Any]) -> dict[str, Any]:
         task = self._find_task(payload.get("task_id") or payload.get("id"))
+        self._rt_guard_execution(task)
         to_worker_id = payload.get("to_worker_id") or payload.get("worker_id")
         target = self._find_agent(to_worker_id)
         reason = (payload.get("reason") or "当前员工今日额度累了/限流，轮换给别家免费员工").strip()
@@ -1306,6 +1356,11 @@ class OfficeStore:
     # ------------------------------------------------------------------
     def deletetask(self, payload: dict[str, Any]) -> dict[str, Any]:
         task_id = payload.get("task_id") or payload.get("id")
+        for task in self.state["tasks"]:
+            if task["id"] == task_id:
+                self._rt_guard_execution(task)
+        if any(room["task_id"] == task_id for room in self.state.get("collaboration", {}).get("rooms", {}).values()):
+            raise ValueError("任务存在协作账本记录，不能直接删除。")
         self.state["tasks"] = [t for t in self.state["tasks"] if t["id"] != task_id]
         self.state["task_messages"].pop(task_id, None)
         self.save()
@@ -1316,6 +1371,7 @@ class OfficeStore:
     # ------------------------------------------------------------------
     def deliverfinalresult(self, payload: dict[str, Any]) -> dict[str, Any]:
         task = self._find_task(payload.get("task_id") or payload.get("id"))
+        guard_parent(task)
         if task.get("requires_code_review") and task.get("review_status") != "approved":
             raise ValueError(
                 f"写—审—改闭环拦截：改代码任务 `{task['id']}` 必须先经独立审查 Agent（{task.get('reviewer_name') or '待指定'}）审查通过，当前审查状态：{task.get('review_status')}。"
@@ -1371,6 +1427,7 @@ class OfficeStore:
     # ------------------------------------------------------------------
     def reviewfinalresult(self, payload: dict[str, Any]) -> dict[str, Any]:
         task = self._find_task(payload.get("task_id") or payload.get("id"))
+        guard_parent(task)
         decision = (payload.get("decision") or "verified").strip().lower()
         comment = (payload.get("comment") or "").strip()
         if decision in ("verified", "accepted", "pass", "accept"):
@@ -1533,6 +1590,9 @@ class OfficeStore:
     # ------------------------------------------------------------------
     def runadaptertask(self, payload: dict[str, Any]) -> dict[str, Any]:
         task = self._find_task(payload.get("task_id"))
+        guard_parent(task)
+        if self._rt_child_parent(task):
+            return self._rt_run_child(payload)
         live = bool(payload.get("live", False))
         worker_id = payload.get("worker_id") or task.get("assigned_to")
         if not worker_id:
@@ -1826,6 +1886,7 @@ class OfficeStore:
 
     def exporttaskmd(self, payload: dict[str, Any]) -> dict[str, Any]:
         task = self._find_task(payload.get("task_id") or payload.get("id"))
+        self._rt_guard_execution(task)  # Roundtable desktop work uses the single-use prompt receipt.
         custom_ws = (payload.get("workspace_dir") or "").strip()
         if custom_ws:
             safe_ws = self._validate_safe_workspace(custom_ws)
@@ -1889,6 +1950,9 @@ class OfficeStore:
             task = self.state["tasks"][-1]
         if task is None:
             raise ValueError("当前办公室还没有待执行的工单。")
+        guard_parent(task)
+        if self._rt_child_parent(task):
+            return self._rt_child_prompt(task, payload)
 
         if payload.get("mark_dispatched"):
             self.state["last_web_task_id"] = task["id"]
@@ -2001,6 +2065,7 @@ class OfficeStore:
         """
         self._ensure_runtime_keys()
         task = self._find_task(payload.get("task_id") or payload.get("id"))
+        self._rt_guard_execution(task)  # Untagged old mailbox files cannot prove assignment provenance.
         custom_ws = (payload.get("workspace_dir") or "").strip()
         if custom_ws:
             base = Path(self._validate_safe_workspace(custom_ws))
@@ -2612,11 +2677,18 @@ class OfficeStore:
         return picked
 
     def createbigtask(self, payload: dict[str, Any]) -> dict[str, Any]:
-        """Split a large goal into child subtasks across distinct-vendor free workers."""
+        """Split standard work, or initialize an explicitly seated five-stage roundtable."""
+        mode = (payload.get("mode") or "standard").strip().lower()
+        if mode not in ("standard", "roundtable", "split", "solo", "critic", "pipeline", "swarm"):
+            raise ValueError("mode 必须为 standard/roundtable（兼容旧拆单模式）。")
+        # Validate every seat before creating parent, child, message or receipt.
+        seats = validate_seats(self, payload) if mode == "roundtable" else None
         title = (payload.get("title") or "").strip()
         if not title:
             raise ValueError("大任务标题不能为空。")
         goal = (payload.get("goal") or title).strip()
+        if seats and len(goal) > 8000:
+            raise ValueError("圆桌总目标最多8000字；只传任务目标，不传聊天历史。")
         chief = self._chief_agent()
         manager_id = payload.get("manager_id") or chief["id"]
         try:
@@ -2625,7 +2697,8 @@ class OfficeStore:
             manager = chief
 
         big_fp = self._request_fingerprint("createbigtask", {
-            "title": title, "goal": goal,
+            "title": title, "goal": goal, "mode": mode, "seats": seats,
+            "seat_ids": [payload.get("seat_" + key) or "" for key in "abc"],
             "raw_steps": (payload.get("raw_steps") or "").strip(),
             "subtasks": payload.get("subtasks") or [],
             "manager_id": manager["id"],
@@ -2686,13 +2759,26 @@ class OfficeStore:
                 },
             ]
 
+        if seats:
+            if len(specs) > 24:
+                raise ValueError("圆桌每单最多24张采集子单。")
+            workers = [w for w in self._distinct_vendor_workers() if not w.get("paid")]
+            for idx, spec in enumerate(specs):
+                assigned_id = spec.get("assigned_to") or (workers[idx % len(workers)]["id"] if workers else "")
+                worker = self._find_agent(assigned_id)
+                if worker.get("floor") != "worker" or worker.get("paid"):
+                    raise ValueError("圆桌资料采集必须交给 1F 免费员工。")
+                spec["assigned_to"] = assigned_id
+                if spec.get("task_kind") == "code_change" or spec.get("skill_slug") in CODE_REVIEW_SKILL_SLUGS:
+                    self._pick_reviewer(assigned_id, manager, spec.get("reviewer_id") or "")
+
         base_id = f"EPIC-{int(time.time() * 1000) % 1000000}"
         existing_ids = {t["id"] for t in self.state["tasks"]}
         parent_id = base_id if base_id not in existing_ids else f"{base_id}-{len(self.state['tasks']) + 1}"
 
         parent_task: dict[str, Any] = {
             "id": parent_id,
-            "title": f"🧩 [大任务] {title}",
+            "title": title if mode == "roundtable" else f"🧩 [大任务] {title}",
             "manager_id": manager["id"],
             "manager_name": manager["name"],
             "assigned_to": "",
@@ -2714,7 +2800,7 @@ class OfficeStore:
             "parent_task_id": "",
             "is_parent": True,
             "subtask_ids": [],
-            "mode": (payload.get("mode") or "split").strip().lower(),
+            "mode": mode,
             "circuit_breaker": "",
             "depends_on": [],
             "status": "working",
@@ -2724,6 +2810,8 @@ class OfficeStore:
             "usage_log": [],
             "created_at": _now_iso(),
         }
+        if seats:
+            parent_task["roundtable_state"] = initial_state(seats)
         self.state["tasks"].append(parent_task)
         self.state["task_messages"][parent_id] = [
             {
@@ -2814,6 +2902,17 @@ class OfficeStore:
         by_id = {s["id"]: s for s in subtasks}
         results: list[dict[str, Any]] = []
         done: set[str] = {s["id"] for s in subtasks if s["status"] in ("delivered", "accepted_done")}
+        if is_roundtable(parent):
+            if parent["roundtable_state"]["stage"] != "collecting":
+                raise ValueError("圆桌资料篮已冻结，不能重新派发采集子单。")
+            # Public legacy status flags cannot manufacture dependency completion;
+            # conversely a genuine manual receipt must unblock its dependents.
+            done = set()
+            for sub in subtasks:
+                dispatch = sub.get("roundtable_dispatch", {})
+                receipt = dispatch.get("receipts", {}).get(dispatch.get("current"), {})
+                if receipt.get("status") == "completed":
+                    done.add(sub["id"])
         stalled: dict[str, str] = {}
         remaining = [s for s in subtasks if s["id"] not in done]
 
@@ -2880,6 +2979,13 @@ class OfficeStore:
     def runautocodereview(self, payload: dict[str, Any]) -> dict[str, Any]:
         """Auto-collect local git diff (0 tokens) and run independent reviewer (dry-run or live API/CLI)."""
         task = self._find_task(payload.get("task_id") or payload.get("id"))
+        guard_parent(task)
+        if self._rt_child_parent(task):
+            self._rt_child_open(task)
+            dispatch = task.get("roundtable_dispatch", {})
+            receipt = dispatch.get("receipts", {}).get(dispatch.get("current"), {})
+            if receipt.get("status") != "completed":
+                raise ValueError("圆桌子单尚无真实结论，不调用审查模型。")
         if not task.get("requires_code_review"):
             raise ValueError("该任务为小活，未开启写—审—改闭环。")
         chief = self._chief_agent()
@@ -2923,6 +3029,8 @@ class OfficeStore:
                     f"独立审查者 {reviewer['name']}（{reviewer['badge']}）不是 API/CLI 通道，无法自动真调；"
                     "请切换 API/CLI 审查者，或用干跑/手动填入审查问题清单。"
                 )
+        if self._rt_child_parent(task) and reviewer.get("floor") != "worker":
+            raise ValueError("圆桌经理预算仅限五阶段；采集代码请指定独立1F审查者或手动 submitcodereview。")
         safe_ws = self._validate_safe_workspace(workspace_dir)
         adapter = self._build_adapter(reviewer, workspace_dir=safe_ws)
         review_prompt = (
@@ -2958,6 +3066,7 @@ class OfficeStore:
     def aggregatebigtask(self, payload: dict[str, Any]) -> dict[str, Any]:
         """Aggregate all completed & reviewed child subtasks into one parent executive delivery."""
         parent = self._find_task(payload.get("parent_task_id") or payload.get("task_id") or payload.get("id"))
+        guard_parent(parent)
         if not parent.get("is_parent") or not parent.get("subtask_ids"):
             raise ValueError("该任务不是大任务，请使用普通交付。")
 
@@ -3043,13 +3152,14 @@ class OfficeStore:
         same proposal (real model calls), chief aggregates and adopts. Bounded
         rounds via the discussion bus. No usable model -> stop honestly."""
         task = self._find_task(payload.get("task_id") or payload.get("id"))
+        self._rt_guard_execution(task)
         live = bool(payload.get("live", False))
         workspace_dir = (payload.get("workspace_dir") or "").strip()
         chief = self._chief_agent()
         requested = [str(p).strip() for p in (payload.get("participants") or []) if str(p).strip()]
         debaters = self._roundtable_debaters(requested, chief)
         with self._lock:
-            if not payload.get("as_step"):
+            if not payload.get("as_step") and not task.get("is_parent"):
                 task["mode"] = "roundtable"
 
         if len(debaters) < 2:
@@ -3172,6 +3282,7 @@ class OfficeStore:
         chief picks the best (real model) and delivers to owner. No usable
         model -> stop honestly, never fabricate a winner."""
         task = self._find_task(payload.get("task_id") or payload.get("id"))
+        self._rt_guard_execution(task)
         live = bool(payload.get("live", False))
         workspace_dir = (payload.get("workspace_dir") or "").strip()
         chief = self._chief_agent()
@@ -3459,6 +3570,9 @@ class OfficeStore:
             payload.get("test_result") or "未运行测试", payload.get("diff_summary") or "",
         )
         task_id = (payload.get("task_id") or "").strip()
+        if (task_id and (payload.get("dry_run") or (payload.get("usage") or {}).get("dry_run"))
+                and self._rt_child_parent(self._find_task(task_id))):
+            raise ValueError("干跑汇报不能进入真实圆桌资料篮。")
         env = self.bussend({
             "from_id": sender_id, "to_id": to_id, "text": text,
             "kind": "conclusion", "task_id": task_id, "tokens": int(payload.get("tokens") or 0),
@@ -3470,6 +3584,7 @@ class OfficeStore:
                 "changed_files": payload.get("changed_files"),
                 "test_result": payload.get("test_result") or "未运行测试",
                 "diff_summary": payload.get("diff_summary") or "", "is_delivery": True,
+                "dry_run": payload.get("dry_run"), "usage": payload.get("usage"),
             })
         return {"bus": env, "report": report}
 
@@ -3831,6 +3946,7 @@ class OfficeStore:
         existing engines. Stops honestly at any step that lacks a real model or
         trips a breaker; never fabricates progress."""
         parent = self._find_task(payload.get("parent_task_id") or payload.get("task_id") or payload.get("id"))
+        self._rt_guard_execution(parent)
         live = bool(payload.get("live", False))
         workspace_dir = (payload.get("workspace_dir") or "").strip()
         discuss = bool(payload.get("discuss", True))
@@ -4127,7 +4243,23 @@ class OfficeStore:
             "getsettings", "listhudflights", "listapprovals",
             "listbusmessages", "busledger", "listdiscussions",
         }
-        if not hasattr(self, name):
+        payload_actions = {
+            "createagent", "updateagent", "moveagent", "deleteagent", "setagentquota",
+            "postgroupmessage", "createtask", "claimtask", "listmessages", "postmessage",
+            "submitcodereview", "updatetaskstatus", "reassigntask", "deletetask",
+            "deliverfinalresult", "reviewfinalresult", "createskill", "updateskill",
+            "deleteskill", "setagentskill", "analyzeskillassignments", "applyskillassignments",
+            "runadaptertask", "checklivequota", "exporttaskmd", "gettaskprompt",
+            "courierstatus", "checkdesktopreceipt", "collectgitdiff", "toggleautoexecute",
+            "setapprovaltimeout", "requestapproval", "resolveapproval", "executecriticalop",
+            "rollbackcriticalop", "createbigtask", "runbigtasksubtasks", "runautocodereview",
+            "aggregatebigtask", "runroundtable", "runswarm", "bussend", "businbox",
+            "runroundtablestep", "getroundtableprompt", "submitroundtableresult",
+            "chooseroundtable", "roundtablehandoff",
+            "sendconclusion", "busflush", "listdiscussion", "startdiscussion",
+            "postdiscussionmessage", "resolvediscussion", "savingsledger", "autopublish", "autorun",
+        }
+        if name not in no_arg_actions | payload_actions:
             raise ValueError(f"未知的办公室动作: {action_name}")
         fn = getattr(self, name)
         return fn() if name in no_arg_actions else fn(payload)

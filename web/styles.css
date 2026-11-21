@@ -1,3 +1,12 @@
+.auth-dialog { width: min(560px, calc(100vw - 32px)); max-height: calc(100dvh - 48px); overflow: auto; margin: auto; padding: 28px; border: 1px solid var(--border-strong); border-radius: 12px; background: var(--bg-card); color: var(--text-main); }
+.auth-dialog::backdrop { background: var(--scrim); }
+.auth-dialog h2 { margin: 0 0 16px; font-size: 24px; }
+.auth-dialog p { margin: 12px 0; color: var(--text-secondary); line-height: 1.6; overflow-wrap: anywhere; }
+.auth-dialog form { display: grid; gap: 12px; }
+.auth-dialog input, .auth-dialog select, .auth-dialog textarea { width: 100%; min-width: 0; padding: 10px; background: var(--bg-app); color: var(--text-main); border: 1px solid var(--border-strong); border-radius: 6px; font: inherit; font-size: 16px; }
+.auth-dialog [role="alert"] { color: var(--danger); }
+.auth-dialog textarea { min-height: 80px; }
+
 :root {
   color-scheme: light;
   --bg-app: #fbfbf9;
@@ -441,6 +450,72 @@ input::placeholder, textarea::placeholder { color: var(--text-muted); opacity: 1
 .savings-bar { flex: 1; display: flex; flex-direction: column; align-items: center; gap: 4px; }
 .savings-bar .bar { width: 100%; background: var(--success); border-radius: 3px 3px 0 0; }
 .bar-label, .bar-val { color: var(--text-muted); font-size: 11px; }
+
+/* Roundtable extends the existing detail sheet; the Operate shell is unchanged. */
+.roundtable-mode { padding: 20px 0; margin-bottom: 20px; border-block: 1px solid var(--border); }
+.roundtable-mode h3 { margin-bottom: 12px; font-size: var(--fs-base); }
+.roundtable-check { display: flex; align-items: flex-start; gap: 10px; font-size: var(--fs-sm); line-height: 1.7; cursor: pointer; }
+.roundtable-check input { flex: none; margin-top: 5px; accent-color: var(--accent); width: 16px; height: 16px; }
+.roundtable-check small { display: block; color: var(--text-muted); margin-top: 4px; font-size: var(--fs-xs); }
+.roundtable-seat-fields { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; margin-top: 20px; }
+.roundtable-seat-fields .form-group { margin-bottom: 0; }
+.roundtable-warning { color: #795018; }
+.right-rail.roundtable-detail:has(#panelThread.active) { width: min(900px, 100%); }
+.roundtable-panel { min-width: 0; }
+.roundtable-panel .detail-header { padding-bottom: 20px; }
+.roundtable-progress { list-style: none; display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 10px; padding: 0; }
+.roundtable-progress li { padding-top: 10px; border-top: 3px solid var(--border); color: var(--text-muted); }
+.roundtable-progress li.current { border-color: var(--accent); color: var(--accent); }
+.roundtable-progress li.done { border-color: var(--success); color: var(--success); }
+.roundtable-progress span { font-size: 11px; font-variant-numeric: tabular-nums; }
+.roundtable-progress strong { display: block; font-size: var(--fs-xs); line-height: 1.6; margin-top: 5px; }
+.roundtable-pass { margin-top: 20px; font-variant-numeric: tabular-nums; }
+.roundtable-seats { margin-block: 20px; display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 16px; font-size: var(--fs-xs); }
+.roundtable-seats dt { color: var(--text-muted); margin-bottom: 4px; }
+.roundtable-seats dd { margin: 0; overflow-wrap: anywhere; }
+.roundtable-seats small { display: block; margin-top: 4px; color: var(--text-muted); line-height: 1.7; }
+.roundtable-notice { background: var(--bg-inset); padding: 14px 16px; border-radius: var(--radius-sm); color: var(--text-secondary); font-size: var(--fs-sm); line-height: 1.8; overflow-wrap: anywhere; }
+.roundtable-notice p + p { margin-top: 8px; }
+.roundtable-controls { border: 0; padding: 0; min-width: 0; }
+.roundtable-controls > .detail-meta { margin-bottom: 22px; }
+.roundtable-sr-only { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); }
+.roundtable-section { margin-top: 28px; padding-bottom: 24px; border-bottom: 1px solid var(--border); min-width: 0; }
+.roundtable-section > h3 { font-size: var(--fs-lg); margin-bottom: 14px; }
+.roundtable-comparison { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 24px; }
+.roundtable-version, .roundtable-opinion { min-width: 0; }
+.roundtable-opinion ul { padding-left: 20px; font-size: var(--fs-sm); }
+.roundtable-opinion li { margin-top: 8px; overflow-wrap: anywhere; white-space: pre-wrap; }
+.roundtable-opinion h4 { margin-bottom: 8px; }
+.roundtable-materials { list-style: none; padding: 0; }
+.roundtable-materials li { margin-block: 16px; padding-bottom: 16px; border-bottom: 1px solid var(--border-soft); }
+.roundtable-materials p { white-space: pre-wrap; overflow-wrap: anywhere; font-size: var(--fs-sm); margin-top: 6px; }
+.roundtable-version h3 { font-size: var(--fs-base); }
+.roundtable-source { color: var(--text-muted); font-size: 11px; margin: 6px 0 12px; overflow-wrap: anywhere; }
+.roundtable-output { margin: 12px 0; padding: 14px; font: var(--fs-sm)/1.85 var(--font-ui); color: var(--text-main); background: var(--bg-inset); border-radius: var(--radius-sm); white-space: pre-wrap; overflow-wrap: anywhere; max-height: 480px; overflow-y: auto; tab-size: 2; }
+.roundtable-issues { padding-left: 22px; font-size: var(--fs-sm); }
+.roundtable-issues li { padding: 8px 0; white-space: pre-wrap; overflow-wrap: anywhere; }
+.roundtable-owner > .detail-meta { margin-bottom: 16px; }
+.roundtable-child { padding-bottom: 12px; border-bottom: 1px solid var(--border-soft); }
+.roundtable-child .subtask-row { width: 100%; border-bottom: 0; }
+.roundtable-handoff { display: flex; flex-wrap: wrap; align-items: flex-end; gap: 12px; padding: 12px 0; }
+.roundtable-handoff > p { flex-basis: 100%; margin: 0; }
+.roundtable-handoff label { display: flex; flex-direction: column; gap: 6px; flex: 1; min-width: 180px; font-size: var(--fs-xs); color: var(--text-secondary); }
+.roundtable-handoff .btn { font-size: var(--fs-xs); }
+#roundtableResultForm { margin-top: 20px; }
+#roundtableResultForm > .btn { margin-top: 16px; }
+#roundtableManualResult { font-family: var(--font-mono); }
+.roundtable-panel details .form-group:first-of-type { margin-top: 16px; }
+@media (max-width: 600px) {
+  .roundtable-seat-fields, .roundtable-seats, .roundtable-comparison { grid-template-columns: 1fr; }
+  .roundtable-seat-fields { gap: 16px; }
+  .roundtable-seats { gap: 10px; }
+  .roundtable-seats > div { display: grid; grid-template-columns: 64px minmax(0, 1fr); gap: 8px; }
+  .roundtable-progress { gap: 6px; }
+  .roundtable-progress strong { font-size: 11px; }
+  .roundtable-progress span { font-size: 10px; }
+  .roundtable-output { max-height: 360px; padding: 12px; }
+  .roundtable-panel textarea, .roundtable-panel select { font-size: 16px; }
+}
 
 @media (min-width: 1600px) {
   .center-stage, .left-rail { max-width: 1280px; padding-top: 50px; }

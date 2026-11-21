@@ -261,16 +261,19 @@ def test_security_cors_and_workspace_guard():
             except urllib.error.HTTPError as e:
                 assert e.code == 403
 
-            # 2. Chrome extension origin must be allowed
+            # 2. Anonymous Chrome extension requests must be rejected
             ext_req = urllib.request.Request(
                 f"http://127.0.0.1:{port}/api/action",
                 data=json.dumps({"action": "listagents", "payload": {}}).encode("utf-8"),
                 headers={"Content-Type": "application/json", "Origin": "chrome-extension://abcdefghijklmnop"},
                 method="POST",
             )
-            with urllib.request.urlopen(ext_req, timeout=5) as resp:
-                assert resp.status == 200
-                assert resp.headers.get("Access-Control-Allow-Origin") == "chrome-extension://abcdefghijklmnop"
+            try:
+                urllib.request.urlopen(ext_req, timeout=5)
+                raise AssertionError("Anonymous extension request must be rejected")
+            except urllib.error.HTTPError as e:
+                assert e.code in (401, 403)
+                assert e.headers.get("Access-Control-Allow-Origin") is None
         finally:
             srv.shutdown()
             srv.server_close()

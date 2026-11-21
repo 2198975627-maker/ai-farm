@@ -39,6 +39,7 @@
       <details class="topbar-dropdown" id="toolsDropdown">
         <summary class="btn btn-ghost dropdown-trigger">更多 <svg class="icon icon-sm" viewBox="0 0 24 24" aria-hidden="true"><path d="M6 9l6 6 6-6"/></svg></summary>
         <div class="dropdown-menu dropdown-menu-tools">
+          <button type="button" class="btn btn-ghost dropdown-item" onclick="closeTopbarDropdown('toolsDropdown'); openConnections()">任务范围连接与撤销</button>
           <button type="button" class="btn btn-ghost dropdown-item" onclick="closeTopbarDropdown('toolsDropdown'); openBigTaskModal()">拆分大任务</button>
           <button type="button" class="btn btn-ghost dropdown-item" id="autoExecuteToggleBtn" onclick="handleToggleAutoExecute()" title="低风险任务自动执行开关（默认关闭；关键操作永远先人工授权）">自动执行低风险: 关</button>
           <button type="button" class="btn btn-ghost dropdown-item" onclick="closeTopbarDropdown('toolsDropdown'); handleSeedExampleTask()">塞入示例任务</button>
@@ -485,6 +486,22 @@
             <label for="bigTaskGoal">总目标（一句话说清）*</label>
             <input type="text" id="bigTaskGoal" required placeholder="例：先梳理验收清单，再修复空密码登录 Bug 并补单测，最后生成变更摘要" />
           </div>
+          <section class="roundtable-mode" aria-labelledby="bigTaskModeHeading">
+            <h3 id="bigTaskModeHeading">执行模式</h3>
+            <label class="roundtable-check" for="bigTaskRoundtable">
+              <input type="checkbox" id="bigTaskRoundtable" onchange="updateBigTaskRoundtableMode()" aria-controls="bigTaskRoundtableSeats" />
+              <span>开启圆桌精雕模式<small>默认不勾选：普通省钱模式。高价值任务才启用三经理对抗，最终由你定稿。</small></span>
+            </label>
+            <div id="bigTaskRoundtableSeats" class="hidden">
+              <p class="detail-meta">1F 员工只采集资料，不入席。A 出策、B 产出、C 批判改良；A/B 对比后停止。固定 1 轮对抗 + 1 轮对比，不自动续轮。</p>
+              <div class="roundtable-seat-fields">
+                <div class="form-group"><label for="bigTaskSeatA">经理 A · 出策</label><select id="bigTaskSeatA" onchange="updateBigTaskRoundtableMode()" disabled></select></div>
+                <div class="form-group"><label for="bigTaskSeatB">经理 B · 产出</label><select id="bigTaskSeatB" onchange="updateBigTaskRoundtableMode()" disabled></select></div>
+                <div class="form-group"><label for="bigTaskSeatC">经理 C · 红队改良</label><select id="bigTaskSeatC" onchange="updateBigTaskRoundtableMode()" disabled></select></div>
+              </div>
+              <p id="bigTaskSeatGuidance" class="detail-meta" role="status"></p>
+            </div>
+          </section>
           <div class="form-group">
             <label for="bigTaskSteps">子单拆分清单（每行一条；写 <code>[代码]</code> 自动开写-审-改闭环；留空则自动拆 3 张标准子单）</label>
             <textarea id="bigTaskSteps" rows="4" placeholder="1. 梳理登录接口边界用例清单&#10;2. [代码] 修复空密码校验并补 3 个单元测试&#10;3. 汇总改动结论与发布说明"></textarea>

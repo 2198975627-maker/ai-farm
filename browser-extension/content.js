@@ -1,14 +1,9 @@
-/* AI Farm Browser Extension & Universal Web Bridge - Content Script
- * Runs on free AI web chat pages (Kimi, Doubao, Qwen, Dola, ChatGPT, Gemini, Grok).
- * Works both as a Chrome/Edge Manifest V3 Extension (via background service worker)
- * and as a direct injected bridge script (via direct CORS fetch to http://127.0.0.1:8765).
- */
+/* Task-scoped courier; credentials remain in extension session storage. */
 
 (function () {
   if (window.__AI_FARM_BRIDGE_LOADED__) return;
   window.__AI_FARM_BRIDGE_LOADED__ = true;
 
-  const OFFICE_ORIGIN = "http://127.0.0.1:8765";
   let currentTask = null;
   let autoFilledOnce = false;
 
@@ -29,41 +24,7 @@
         });
       });
     }
-    // Direct fetch fallback when loaded via /bridge.js or bookmarklet
-    try {
-      const action =
-        type === "GET_TASK_PROMPT" ? "gettaskprompt" :
-        type === "COURIER_STATUS" ? "courierstatus" : "postmessage";
-      const bodyPayload =
-        type === "GET_TASK_PROMPT"
-          ? { task_id: payload.taskId || "" }
-          : type === "COURIER_STATUS"
-          ? {
-              task_id: payload.taskId || "",
-              agent_id: payload.agentId || "",
-              status: payload.status,
-              detail: payload.detail || "",
-              url: payload.url || window.location.href,
-            }
-          : {
-              task_id: payload.taskId,
-              sender_id: payload.workerId || "",
-              text: payload.text,
-              is_delivery: true,
-            };
-      const resp = await fetch(`${OFFICE_ORIGIN}/api/action`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ action, payload: bodyPayload }),
-      });
-      const data = await resp.json();
-      if (!resp.ok || !data.ok) {
-        return { ok: false, error: data.error || `HTTP ${resp.status}` };
-      }
-      return { ok: true, result: data.result };
-    } catch (err) {
-      return { ok: false, error: err.message || String(err) };
-    }
+    return { ok: false, error: "请使用已安装的传令兵扩展；不允许匿名网页直连办公室。" };
   }
 
   function detectCaptcha() {
@@ -254,7 +215,11 @@
     el.style.color = isError ? "#fca5a5" : "#bae6fd";
   }
 
-  function handleAutoFillAndSend(autoSend = true) {
+  async function handleAutoFillAndSend(autoSend = true) {
+    if (currentTask?.dispatch_allowed === false) {
+      setStatus("此子单已派发、状态未知或已回收，不可重复发送；请主人核查回执。", true);
+      return;
+    }
     if (!currentTask || !currentTask.prompt) {
       setStatus("尚未加载到工单，请先点「同步工单」", true);
       return;
@@ -269,6 +234,11 @@
     if (!inputEl) {
       setStatus("选择器失效：未找到聊天输入框（网页可能改版或未登录）", true);
       reportCourier("selector_failed", "未找到聊天输入框，可能网页改版或未登录");
+      return;
+    }
+    const reservation = await callOfficeBridge("CLAIM_WORKER_SEND", { taskId: currentTask.task_id });
+    if (!reservation.ok || !reservation.result?.claimed) {
+      setStatus(reservation.error || "工单派发状态未确认，停止重复发送", true);
       return;
     }
     fillPromptIntoElement(inputEl, currentTask.prompt);
@@ -390,6 +360,7 @@
       <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px;gap:6px;">
         <strong style="color:#38bdf8;font-size:12px;">AI 农场传令兵</strong>
         <span style="display:flex;gap:4px;">
+          <button id="ai-farm-btn-bind" style="background:#1e293b;color:#cbd5e1;border:1px solid #334155;border-radius:4px;padding:2px 6px;font-size:11px;cursor:pointer;">绑定工单</button>
           <button id="ai-farm-btn-check" style="background:#1e293b;color:#cbd5e1;border:1px solid #334155;border-radius:4px;padding:2px 6px;font-size:11px;cursor:pointer;">自检</button>
           <button id="ai-farm-btn-sync" style="background:#1e293b;color:#cbd5e1;border:1px solid #334155;border-radius:4px;padding:2px 6px;font-size:11px;cursor:pointer;">同步工单</button>
         </span>
@@ -413,14 +384,27 @@
     `;
     document.body.appendChild(box);
 
-    document.getElementById("ai-farm-btn-check").addEventListener("click", runSelfCheck);
-    document.getElementById("ai-farm-btn-sync").addEventListener("click", () => loadTaskFromOffice(false));
-    document.getElementById("ai-farm-btn-fill").addEventListener("click", () => handleAutoFillAndSend(true));
-    document.getElementById("ai-farm-btn-report").addEventListener("click", handleSendReplyToOffice);
+    document.getElementById("ai-farm-btn-bind").addEventListener("click", async event => {
+      if (!event.isTrusted) return;
+      const taskId = window.prompt("工单编号", parseTaskIdFromUrl());
+      if (!taskId) return;
+      let token = window.prompt("粘贴此工单的传令兵凭据（不是主人配对码或 API Key）");
+      if (!token) return;
+      const response = await callOfficeBridge("BIND_TASK", { taskId: taskId.trim(), token: token.trim() });
+      token = "";
+      if (!response.ok) return setStatus(response.error, true);
+      currentTask = response.result;
+      document.getElementById("ai-farm-bridge-task").textContent = `${currentTask.task_id} · ${currentTask.title}`;
+      setStatus("工单已绑定；请核对后点击自动填入并发送。");
+    });
+    document.getElementById("ai-farm-btn-check").addEventListener("click", event => { if (event.isTrusted) runSelfCheck(); });
+    document.getElementById("ai-farm-btn-sync").addEventListener("click", event => { if (event.isTrusted) loadTaskFromOffice(false); });
+    document.getElementById("ai-farm-btn-fill").addEventListener("click", event => { if (event.isTrusted) handleAutoFillAndSend(true); });
+    document.getElementById("ai-farm-btn-report").addEventListener("click", event => { if (event.isTrusted) handleSendReplyToOffice(); });
   }
 
   mountFloatingWidget();
-  loadTaskFromOffice(true);
+  loadTaskFromOffice(false);
   // one-shot self-check on load (event-driven, no polling): surface captcha /
   // selector failure immediately so the office knows the web channel is stuck.
   setTimeout(runSelfCheck, 1500);
