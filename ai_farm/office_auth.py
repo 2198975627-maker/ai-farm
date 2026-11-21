@@ -69,8 +69,10 @@ class OfficeAccess:
                 raise AccessDenied("传令兵凭据只绑定一张网页员工工单。")
             for task_id in tasks:
                 task = self.store._find_task(task_id)
-                if agent["id"] not in (task.get("assigned_to"), task.get("reviewer_id")):
-                    raise AccessDenied("成员必须是授权工单的执行者或审查者。")
+                seat_ids = {s.get("id") for s in (task.get("roundtable_state") or {}).get("seats", {}).values() if isinstance(s, dict)}
+                is_rt_seat = role == "member" and task.get("mode") == "roundtable" and task.get("is_parent") and agent["id"] in seat_ids
+                if agent["id"] not in (task.get("assigned_to"), task.get("reviewer_id")) and not is_rt_seat:
+                    raise AccessDenied("成员必须是授权工单的执行者、审查者或圆桌席位经理。")
                 if role == "courier" and task.get("assigned_to") != agent["id"]:
                     raise AccessDenied("传令兵只能绑定本工单执行者。")
             return self._issue({"role": role, "agent_id": agent["id"], "identity": self._identity(agent),
@@ -126,7 +128,9 @@ class OfficeAccess:
             if principal["role"] == "courier":
                 raise AccessDenied("传令兵不能读取办公室快照。")
             tasks = [t for t in self.store.state["tasks"] if t["id"] in principal["task_ids"]
-                     and principal["agent_id"] in (t.get("assigned_to"), t.get("reviewer_id"))]
+                     and (principal["agent_id"] in (t.get("assigned_to"), t.get("reviewer_id"))
+                          or (t.get("mode") == "roundtable" and t.get("is_parent")
+                              and principal["agent_id"] in {s.get("id") for s in (t.get("roundtable_state") or {}).get("seats", {}).values() if isinstance(s, dict)}))]
             agent_keys = ("id", "name", "vendor", "floor", "access_kind", "quota_percent", "tokens_used", "session_count")
             task_keys = ("id", "title", "status", "task_kind", "mode", "requires_code_review", "assigned_to", "assigned_name", "reviewer_id", "review_status", "circuit_breaker", "goal")
             agent_ids = {a for t in tasks for a in (t.get("assigned_to"), t.get("reviewer_id"))}
@@ -167,7 +171,8 @@ class OfficeAccess:
         agent_id = principal["agent_id"]
         courier = principal["role"] == "courier"
         allowed = {"gettaskprompt", "courierstatus", "courierclaim", "postmessage"} if courier else {
-            "claimtask", "gettaskprompt", "postmessage", "submitcodereview", "requestapproval", "sendconclusion", "bussend", "businbox"}
+            "claimtask", "gettaskprompt", "postmessage", "submitcodereview", "requestapproval",
+            "sendconclusion", "bussend", "businbox", "getroundtableprompt", "submitroundtableresult"}
         if name not in allowed:
             raise AccessDenied("此连接没有该操作权限；发消息不等于获得执行授权。")
         payload = copy.deepcopy(payload)
@@ -187,6 +192,25 @@ class OfficeAccess:
             raise AccessDenied("必须指定此连接获准访问的工单。")
         with self.store._lock:
             task = self.store._find_task(task_id)
+            if name in ("getroundtableprompt", "submitroundtableresult"):
+                if task.get("mode") != "roundtable" or not task.get("is_parent"):
+                    raise AccessDenied("仅圆桌父单可执行该操作。")
+                stage_key = payload.get("stage_key")
+                if not isinstance(stage_key, str) or stage_key not in ("A", "B", "C", "A-comparison", "B-comparison"):
+                    raise ValueError("无效的圆桌阶段。")
+                seat = (task.get("roundtable_state") or {}).get("seats", {}).get(stage_key[0])
+                if not seat or seat.get("id") != agent_id:
+                    raise AccessDenied("成员只能领取或提交自己所属圆桌席位的阶段任务。")
+                if name == "getroundtableprompt":
+                    return self.store.getroundtableprompt({
+                        "task_id": task_id, "stage_key": stage_key, "request_id": payload.get("request_id"),
+                    })
+                if payload.get("dry_run") or (payload.get("usage") or {}).get("dry_run"):
+                    raise ValueError("成员凭据不能把干跑结果作为真实圆桌结果提交。")
+                return self.store.submitroundtableresult({
+                    "task_id": task_id, "stage_key": stage_key, "request_id": payload.get("request_id"),
+                    "provenance": "manual", "result": payload.get("result"),
+                })
             reviewer = name == "submitcodereview"
             if (task.get("reviewer_id") if reviewer else task.get("assigned_to")) != agent_id:
                 raise AccessDenied("工单负责人已变更，或此成员不是该工单的审查者。")

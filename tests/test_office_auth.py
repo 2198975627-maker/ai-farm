@@ -715,6 +715,70 @@ class OfficeAuthTests(unittest.TestCase):
             time.sleep(0.02)
         self.assertEqual(self.server.event_clients, 0)
 
+    def test_roundtable_seat_member_scoped_prompt_and_submit_only_own_seat(self):
+        self.pair()
+        seat_a = self.store.createagent({
+            "name": "Seat A Mgr", "vendor": "VendorA", "model": "m-a",
+            "access_kind": "api", "key_env": "UNUSED_A", "base_url": "https://unused.invalid/v1", "floor": "manager",
+        })
+        seat_b = self.store.createagent({
+            "name": "Seat B Mgr", "vendor": "VendorB", "model": "m-b",
+            "access_kind": "desktop", "floor": "manager",
+        })
+        seat_c = self.store.createagent({
+            "name": "Seat C Mgr", "vendor": "VendorC", "model": "m-c",
+            "access_kind": "api", "key_env": "UNUSED_C", "base_url": "https://unused.invalid/v1", "floor": "manager",
+        })
+        big = self.store.createbigtask({
+            "title": "RT auth test", "goal": "RT auth test", "mode": "roundtable",
+            "seat_a": seat_a["id"], "seat_b": seat_b["id"], "seat_c": seat_c["id"],
+            "subtasks": [{"title": "Collect", "goal": "Collect", "assigned_to": self.worker["id"]}],
+        })
+        parent = big["parent"]
+        child = big["subtasks"][0]
+        self.store.postmessage({
+            "task_id": child["id"], "sender_id": self.worker["id"], "is_delivery": True,
+            "conclusion": "done", "changed_files": ["a.py"], "test_result": "ok",
+        })
+
+        # Non-seat worker cannot be issued for roundtable parent.
+        resp_bad = self.request("POST", "/api/connections", {
+            "agent_id": self.worker["id"], "task_ids": [parent["id"]], "role": "member",
+        }, headers=self.owner_headers)
+        self.assertEqual(resp_bad[0], 403)
+
+        # Courier cannot be issued for roundtable parent.
+        resp_cour = self.request("POST", "/api/connections", {
+            "agent_id": self.web["id"], "task_ids": [parent["id"]], "role": "courier",
+        }, headers=self.owner_headers)
+        self.assertEqual(resp_cour[0], 403)
+
+        # Seat A completes stage A so stage B is active; Seat B member fetches & submits ONLY stage B.
+        req_a = self.store.getroundtableprompt({"task_id": parent["id"], "stage_key": "A", "request_id": "req-a"})
+        self.store.submitroundtableresult({
+            "task_id": parent["id"], "stage_key": "A", "request_id": req_a["request_id"], "provenance": "manual",
+            "result": {"prompt": "do B", "constraints": ["keep small"], "acceptance": ["passes"]},
+        })
+
+        hdr_b, _ = self.issue(seat_b, [parent["id"]], "member")
+        # Seat B cannot access Seat A or Seat C.
+        self.assert_denied(self.action("getroundtableprompt", {"task_id": parent["id"], "stage_key": "A", "request_id": "x"}, headers=hdr_b))
+        self.assert_denied(self.action("submitroundtableresult", {
+            "task_id": parent["id"], "stage_key": "C", "request_id": "x", "result": {},
+        }, headers=hdr_b))
+
+        # Seat B can get and submit Seat B.
+        prompt_b = self.assert_ok(self.action("getroundtableprompt", {
+            "task_id": parent["id"], "stage_key": "B", "request_id": "req-b",
+        }, headers=hdr_b))["result"]
+        self.assertEqual(prompt_b["stage_key"], "B")
+        sub_b = self.assert_ok(self.action("submitroundtableresult", {
+            "task_id": parent["id"], "stage_key": "B", "request_id": "req-b",
+            "result": {"draft": "Draft from B"},
+        }, headers=hdr_b))["result"]
+        self.assertEqual(sub_b["status"], "completed")
+        self.assertEqual(parent["roundtable_state"]["stage"], "C")
+
 
 if __name__ == "__main__":
     unittest.main()
