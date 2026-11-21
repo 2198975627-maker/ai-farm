@@ -903,6 +903,17 @@ function renderGroupChat() {
 // =========================================================================
 // 右栏 Tab 1：成员独立身份档案 (Profile)
 // =========================================================================
+async function handleOpenWebLogin(agentId) {
+  try {
+    const res = await callOfficeAction('openweblogin', { agent_id: agentId });
+    if (res && res.opened) {
+      showToast('已打开专属后台登录窗口，请登录一次后关闭窗口即可开启自动抓取。');
+    }
+  } catch (err) {
+    showToast(`打开登录窗口失败：${err.message}`, true);
+  }
+}
+
 function selectAgent(agentId) {
   APP_STATE.selectedAgentId = agentId;
   switchRightTab("profile");
@@ -960,6 +971,7 @@ function renderSelectedAgentProfile() {
       <div class="kv-row"><span>模型</span><span><code>${escapeHTML(agent.model)}</code> ${agent.verified_version ? icon('check') + '已核实' : icon('alert') + '待核实'}</span></div>
       <div class="kv-row"><span>通道</span><span data-preserve-text>${escapeHTML(agent.access_kind)} · ${escapeHTML(agent.badge)}</span></div>
       <div class="kv-row"><span>剩余额度</span><strong>${hasPct ? `${pct}%` : '额度未填'}</strong></div>
+      ${agent.login_url ? `<div class="detail-actions" style="margin-top:10px;"><button type="button" class="btn btn-xs btn-primary" onclick="handleOpenWebLogin('${escapeHTML(agent.id)}')">后台登录一次（开启自动抓网页）</button></div>` : ''}
       <p class="detail-meta" data-preserve-text>${escapeHTML(agent.quota_note || '未实查，不推测可用额度。')}</p>
       ${hasPct && pct <= 10 ? `<p class="detail-meta quota-warning" role="status">${icon('alert')}剩余额度 ≤10%。${agent.access_kind === 'subscription' ? '订阅到限额可能降级，请核对下方降级规则。' : pct === 0 && agent.access_kind === 'api' ? 'API 额度已归零，请调至休息并轮换其他员工。' : '请核实用量，必要时轮换其他员工。'}</p>` : ''}
     </section>

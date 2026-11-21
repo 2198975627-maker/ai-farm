@@ -4283,6 +4283,16 @@ class OfficeStore(AutomationMixin, RoundtableMixin):
                 workspace=workspace_dir,
                 paid=bool(agent.get("paid", False)),
             )
+        if kind == "web" and agent.get("login_url"):
+            from .adapters.web import WebAdapter
+            return WebAdapter(
+                vendor=agent.get("vendor"),
+                model_id=agent.get("model"),
+                access_kind="web",
+                login_url=agent.get("login_url"),
+                usage_url=agent.get("usage_url") or "",
+                slug=agent.get("slug") or agent.get("id") or agent.get("vendor") or "web",
+            )
         if slug in registered_slugs():
             return get_adapter(slug)
         raise RuntimeError(f"{agent['name']} 尚未绑定可执行的 Adapter。")
@@ -4387,6 +4397,16 @@ class OfficeStore(AutomationMixin, RoundtableMixin):
     _IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".webp", ".gif"}
     _TEXT_EXTS = {".txt", ".md", ".py", ".js", ".ts", ".json", ".csv", ".log", ".yaml", ".yml", ".html", ".css"}
 
+    def openweblogin(self, payload: dict[str, Any]) -> dict[str, Any]:
+        from .adapters.web import open_web_login_browser
+        agent = self._find_agent(payload.get("agent_id"))
+        url = (agent.get("login_url") or "").strip()
+        if not url:
+            raise ValueError("该成员未配置登录页地址 (login_url)。")
+        slug = agent.get("slug") or agent.get("id") or agent.get("vendor") or "web"
+        open_web_login_browser(url, slug, agent.get("vendor", "web"))
+        return {"agent_id": agent["id"], "slug": slug, "login_url": url, "opened": True}
+
     def uploadattachment(self, payload: dict[str, Any]) -> dict[str, Any]:
         import base64
         import binascii
@@ -4481,7 +4501,7 @@ class OfficeStore(AutomationMixin, RoundtableMixin):
             "chooseroundtable", "roundtablehandoff",
             "sendconclusion", "busflush", "listdiscussion", "startdiscussion",
             "postdiscussionmessage", "resolvediscussion", "savingsledger", "autopublish", "autorun",
-            "startautomation", "stopautomation", "automationstatus",
+            "startautomation", "stopautomation", "automationstatus", "openweblogin",
         }
         if name not in no_arg_actions | payload_actions:
             raise ValueError(f"未知的办公室动作: {action_name}")

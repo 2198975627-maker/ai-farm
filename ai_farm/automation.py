@@ -44,7 +44,13 @@ def _identity(agent):
 
 
 def _probe(agent):
-    """Capability probe only: managed/desktop/web channels remain manual."""
+    """Capability probe only: managed/desktop/web channels remain manual unless Playwright web session is ready."""
+    if agent.get("access_kind") == "web":
+        from .adapters.web import is_web_auto_ready
+        slug = agent.get("slug") or agent.get("id") or agent.get("vendor") or ""
+        if is_web_auto_ready(slug):
+            return "automatic"
+        return "manual"
     if (agent.get("managedCodex") or agent.get("managed_codex")
             or agent.get("connection_mode") == "managed_codex"
             or "mcp" in str(agent.get("adapter_slug", "")).lower()

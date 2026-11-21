@@ -21,14 +21,147 @@ Rules that implementers must follow:
 from __future__ import annotations
 
 import json
+import threading
+import time
 from pathlib import Path
 
 from .base import AgentAdapter, AgentReply, Quota
+
+_WEB_PLAYWRIGHT_LOCK = threading.Lock()
 
 
 def session_dir(slug: str) -> Path:
     """Local-only session directory (~/.ai-farm/sessions/<slug>/), never in repo."""
     return Path.home() / ".ai-farm" / "sessions" / slug.strip().lower()
+
+
+def is_web_auto_ready(slug: str) -> bool:
+    meta_file = session_dir(slug) / "session_meta.json"
+    if not meta_file.exists():
+        return False
+    try:
+        data = json.loads(meta_file.read_text(encoding="utf-8"))
+        return bool(data.get("auto_ready")) and (session_dir(slug) / "browser_profile").exists()
+    except Exception:
+        return False
+
+
+def open_web_login_browser(login_url: str, slug: str, vendor: str = "web") -> Path:
+    """Launch a headed persistent Playwright window so the user can log in once."""
+    from playwright.sync_api import sync_playwright
+
+    sdir = session_dir(slug)
+    profile = sdir / "browser_profile"
+    profile.mkdir(parents=True, exist_ok=True)
+    meta = sdir / "session_meta.json"
+    meta.write_text(json.dumps({
+        "vendor": vendor,
+        "login_url": login_url,
+        "status": "login_opened_in_user_browser",
+        "auto_ready": True,
+        "note": "Session cookies stay in local browser_profile; no password stored here.",
+    }, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    def _run():
+        with _WEB_PLAYWRIGHT_LOCK:
+            with sync_playwright() as p:
+                ctx = p.chromium.launch_persistent_context(str(profile), headless=False)
+                page = ctx.pages[0] if ctx.pages else ctx.new_page()
+                page.goto(login_url, wait_until="domcontentloaded", timeout=30000)
+                # Keep open until user closes the browser window (max 10 min).
+                deadline = time.monotonic() + 600
+                while time.monotonic() < deadline and ctx.pages:
+                    time.sleep(0.5)
+                ctx.close()
+
+    threading.Thread(target=_run, name=f"web-login-{slug}", daemon=True).start()
+    return meta
+
+
+def playwright_chat(login_url: str, slug: str, prompt: str, timeout_sec: int = 120) -> AgentReply:
+    """Drive a logged-in persistent Playwright profile to send prompt & read reply."""
+    from playwright.sync_api import sync_playwright
+
+    profile = session_dir(slug) / "browser_profile"
+    if not profile.exists():
+        raise RuntimeError(f"网页通道 {slug} 尚未完成一次登录，请先点「后台登录一次」。")
+
+    input_selectors = [
+        "rich-textarea div[contenteditable='true']",
+        "div[contenteditable='true'][role='textbox']",
+        "textarea#prompt-textarea",
+        "textarea",
+        "div[contenteditable='true']",
+    ]
+    reply_selectors = [
+        "message-content",
+        "[data-message-author-role='assistant']",
+        ".markdown-body",
+        ".prose",
+        "article",
+    ]
+    with _WEB_PLAYWRIGHT_LOCK:
+        with sync_playwright() as p:
+            ctx = p.chromium.launch_persistent_context(str(profile), headless=True)
+            try:
+                page = ctx.pages[0] if ctx.pages else ctx.new_page()
+                page.goto(login_url, wait_until="domcontentloaded", timeout=30000)
+                box = None
+                deadline = time.monotonic() + 20
+                while time.monotonic() < deadline and box is None:
+                    for sel in input_selectors:
+                        loc = page.locator(sel).first
+                        try:
+                            if loc.count() > 0 and loc.is_visible():
+                                box = loc
+                                break
+                        except Exception:
+                            pass
+                    if box is None:
+                        time.sleep(0.5)
+                if box is None:
+                    raise RuntimeError("网页未就绪（可能需要重新登录或通过人机验证），已停下交由你处理。")
+
+                before_count = 0
+                active_reply_sel = None
+                for rsel in reply_selectors:
+                    cnt = page.locator(rsel).count()
+                    if cnt > 0:
+                        active_reply_sel = rsel
+                        before_count = cnt
+                        break
+
+                box.click()
+                box.fill(prompt)
+                page.keyboard.press("Enter")
+
+                # Wait for assistant reply to stabilize.
+                last_text = ""
+                stable_since = None
+                end_at = time.monotonic() + timeout_sec
+                while time.monotonic() < end_at:
+                    time.sleep(0.8)
+                    text = ""
+                    for rsel in ([active_reply_sel] if active_reply_sel else []) + reply_selectors:
+                        try:
+                            loc = page.locator(rsel)
+                            cnt = loc.count()
+                            if cnt > before_count or (cnt > 0 and not active_reply_sel):
+                                text = loc.nth(cnt - 1).inner_text().strip()
+                                if text:
+                                    break
+                        except Exception:
+                            pass
+                    if text and text != last_text:
+                        last_text = text
+                        stable_since = time.monotonic()
+                    elif text and stable_since and (time.monotonic() - stable_since) >= 2.5:
+                        return AgentReply(text=text, dry_run=False, usage={"live": True, "channel": "web_playwright"})
+                if last_text:
+                    return AgentReply(text=last_text, dry_run=False, usage={"live": True, "channel": "web_playwright"})
+                raise RuntimeError("网页回复超时或未检测到新回答（请检查是否掉登录/遇验证码）。")
+            finally:
+                ctx.close()
 
 
 class WebAdapter:
@@ -75,6 +208,9 @@ class WebAdapter:
         return meta
 
     def chat(self, prompt: str, max_tokens: int = 1000) -> AgentReply:
+        slug = self.slug or self.vendor
+        if is_web_auto_ready(slug) and self.login_url:
+            return playwright_chat(self.login_url, slug, prompt)
         raise NotImplementedError(
             f"{self.vendor} ({self.model_id}) 走网页/订阅通道，需由浏览器串行代管执行 "
             f"(登录页: {self.login_url})；当前未挂载活动浏览器驱动，不伪造回复，自动触发降级换员工。"
