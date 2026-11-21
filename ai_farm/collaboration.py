@@ -372,6 +372,17 @@ class CollaborationRuntime:
         return grant
 
     @_change
+    def fail_unconfirmed(self, owner_token: str, grant_id: str, reason: str) -> dict[str, Any]:
+        self._owner(owner_token)
+        grant = self._data["grants"].get(grant_id)
+        if grant is None:
+            raise CollaborationDenied("Execution is not accessible")
+        if grant["state"] != "running":
+            return grant
+        grant.update(state="unknown", reason=_text(reason, "reason", 1000))
+        return grant
+
+    @_change
     def resolve_unknown(self, owner_token: str, grant_id: str, evidence: str) -> dict[str, Any]:
         self._owner(owner_token)
         grant = self._data["grants"].get(grant_id)

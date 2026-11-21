@@ -81,14 +81,29 @@ class OfficeAccess:
         if principal["role"] != "owner":
             raise AccessDenied("仅主人可管理连接、授权执行和最终验收。")
 
+    def _stop_active_automations(self):
+        if any(p["role"] == "owner" and p["expires"] > time.monotonic() for p in self.credentials.values()):
+            return
+        with self.store._lock:
+            for task in self.store.state.get("tasks", []):
+                if task.get("automation", {}).get("status") in ("authorized", "running"):
+                    self.store.stopautomation({"task_id": task["id"]})
+
     def revoke(self, principal, credential_id):
         self.require_owner(principal)
         with self.lock, self.store._lock:
             self._revalidate(principal)
             self.collaboration.revoke(credential_id)
+            revoked_owner = False
             for key, value in list(self.credentials.items()):
                 if value["id"] == credential_id:
+                    if value.get("role") == "owner":
+                        revoked_owner = True
                     del self.credentials[key]
+            if revoked_owner:
+                self._stop_active_automations()
+            with self.store._state_events:
+                self.store._state_events.notify_all()
             return {"revoked": credential_id}
 
     def connections(self, principal):
@@ -106,7 +121,8 @@ class OfficeAccess:
                     "hud_flights": self.store.listhudflights(), "pending_approvals": self.store.listapprovals(),
                     "bus_messages": self.store.listbusmessages(), "discussions": self.store.listdiscussions(),
                     "savings_ledger": self.store.savingsledger(), "courier_log": self.store.state.get("courier_log", []),
-                    "settings": self.store.getsettings()})
+                    "settings": self.store.getsettings(),
+                    "managed_connections": self.collaboration.managed_snapshot()})
             if principal["role"] == "courier":
                 raise AccessDenied("传令兵不能读取办公室快照。")
             tasks = [t for t in self.store.state["tasks"] if t["id"] in principal["task_ids"]
@@ -120,6 +136,8 @@ class OfficeAccess:
     def _revalidate(self, principal):
         current = next((p for p in self.credentials.values() if p["id"] == principal["id"]), None)
         if current is None or current["expires"] <= time.monotonic():
+            if principal.get("role") == "owner":
+                self._stop_active_automations()
             raise AccessDenied("连接已撤销或过期。")
         if current["role"] != "owner":
             agent = self.store._find_agent(current["agent_id"])

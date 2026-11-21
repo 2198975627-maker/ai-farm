@@ -33,6 +33,7 @@ from typing import Any
 from .adapters.registry import get_adapter, registered_slugs
 from .adapters.web import session_dir
 from .skills import SKILLS, analyze_skill_assignments
+from .automation import AutomationMixin, recover_running as recover_automation_running
 from .roundtable import RoundtableMixin, guard_parent, initial_state, is_roundtable, recover_running, validate_seats
 
 
@@ -267,7 +268,7 @@ GENERIC_EXAMPLE_TASKS: list[dict[str, Any]] = [
 ]
 
 
-class OfficeStore(RoundtableMixin):
+class OfficeStore(AutomationMixin, RoundtableMixin):
     """Persistent state store backing the office workbench + AgentAdapter execution."""
 
     def __init__(self, state_path: Path | None = None):
@@ -332,7 +333,9 @@ class OfficeStore(RoundtableMixin):
                 if isinstance(loaded, dict) and loaded.get("agents"):
                     self.state = loaded
                     self._ensure_runtime_keys()
-                    if recover_running(self.state):
+                    recovered_rt = recover_running(self.state)
+                    recovered_auto = recover_automation_running(self.state)
+                    if recovered_rt or recovered_auto:
                         self.save()
                     return
             except Exception:  # noqa: BLE001
@@ -694,6 +697,18 @@ class OfficeStore(RoundtableMixin):
             member_ids.update(seat["id"] for seat in seats)
             if agent_id in member_ids:
                 raise ValueError("成员仍关联未验收任务；请在具体任务中替换成员，不能直接换楼层。")
+
+    def _guard_manual_replacement(self, task: dict[str, Any], *, allow_reported: bool = False) -> None:
+        parent = self._find_task(task["parent_task_id"]) if task.get("parent_task_id") else task
+        if parent.get("automation", {}).get("status") in ("running", "waiting_manual"):
+            raise ValueError("请先停止本任务的自动编排，再更换成员。")
+        if ((not allow_reported and task.get("worker_reported"))
+                or task.get("courier_dispatch")
+                or task.get("roundtable_dispatch", {}).get("current")):
+            raise ValueError("本任务已有派发或结果回执，需按单点转交机制核查，不能直接替换。")
+        if any(a.get("status") in ("running", "unknown")
+               for a in parent.get("automation", {}).get("attempts", {}).values()):
+            raise ValueError("任务存在运行中或未知回执，请先核查。")
 
     def replaceagent(self, payload):
         task = self._find_task(payload.get("task_id"))
@@ -1206,6 +1221,7 @@ class OfficeStore(RoundtableMixin):
                     summary=f"结论汇报 ({len(text)}字)" + (" → 等审查" if task.get("requires_code_review") else ""),
                     channel=self._channel_label(sender),
                 )
+            self._automation_record_report(task, payload, msg)
             self.save()
             return msg
 
@@ -1325,6 +1341,7 @@ class OfficeStore(RoundtableMixin):
                         kind="circuit_breaker", task_id=task["id"],
                         summary=f"打回超限熔断 ({max_rounds}轮)", channel=self._channel_label(reviewer),
                     )
+                    self._automation_record_review(task, payload, reviewer["id"])
                     self.save()
                     return task
                 task["revision_round"] = current_round + 1
@@ -1353,6 +1370,7 @@ class OfficeStore(RoundtableMixin):
                     summary=f"打回 ({len(issues)} 项问题)",
                     channel=self._channel_label(reviewer),
                 )
+            self._automation_record_review(task, payload, reviewer["id"])
             self.save()
             return task
 
@@ -1384,6 +1402,10 @@ class OfficeStore(RoundtableMixin):
     def reassigntask(self, payload: dict[str, Any]) -> dict[str, Any]:
         task = self._find_task(payload.get("task_id") or payload.get("id"))
         self._rt_guard_execution(task)
+        self._guard_manual_replacement(task, allow_reported=True)
+        for grant in self.state.get("collaboration", {}).get("grants", {}).values():
+            if grant["target"] == task.get("assigned_to") and grant["state"] in ("pending", "running", "unknown"):
+                raise ValueError("成员有未决执行授权，禁止并发替换或重复派发。")
         to_worker_id = payload.get("to_worker_id") or payload.get("worker_id")
         target = self._find_agent(to_worker_id)
         reason = (payload.get("reason") or "当前员工今日额度累了/限流，轮换给别家免费员工").strip()
@@ -4354,6 +4376,7 @@ class OfficeStore(RoundtableMixin):
             "chooseroundtable", "roundtablehandoff",
             "sendconclusion", "busflush", "listdiscussion", "startdiscussion",
             "postdiscussionmessage", "resolvediscussion", "savingsledger", "autopublish", "autorun",
+            "startautomation", "stopautomation", "automationstatus",
         }
         if name not in no_arg_actions | payload_actions:
             raise ValueError(f"未知的办公室动作: {action_name}")

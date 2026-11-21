@@ -237,6 +237,13 @@ def create_server(host: str = "127.0.0.1", port: int = 8765, state_path: Path | 
     class OfficeServer(ThreadingHTTPServer):
         def server_close(self):
             # Revoke/wake waiters before ThreadingMixIn joins request threads.
+            with store._state_events:
+                self.events_closed = True
+                store._state_events.notify_all()
+            try:
+                store.closeautomation()
+            except AttributeError:
+                pass
             try:
                 BoundHandler.access.collaboration.close()
             finally:
@@ -244,6 +251,8 @@ def create_server(host: str = "127.0.0.1", port: int = 8765, state_path: Path | 
 
     server = OfficeServer((host, port), BoundHandler)
     server.access = BoundHandler.access
+    server.event_clients = 0
+    server.events_closed = False
     return server
 
 

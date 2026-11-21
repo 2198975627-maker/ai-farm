@@ -539,5 +539,129 @@ class AutomationTests(unittest.TestCase):
         self.assertFalse(self.runner._thread.is_alive())
 
 
+class OfficeAutomationIntegrationTests(unittest.TestCase):
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.state_path = Path(tmp.name) / "office.json"
+        from ai_farm.office_server import create_server
+        self.server = create_server("127.0.0.1", 0, state_path=self.state_path)
+        self.addCleanup(self.server.server_close)
+        self.thread = threading.Thread(target=self.server.serve_forever, kwargs={"poll_interval": 0.01}, daemon=True)
+        self.thread.start()
+        self.addCleanup(self.thread.join, 5)
+        self.addCleanup(self.server.shutdown)
+        self.port = self.server.server_address[1]
+        self.store = self.server.access.store
+        self.worker = self.store.createagent({
+            "name": "API Worker", "vendor": "Fake", "model": "fake-w",
+            "access_kind": "api", "key_env": "UNUSED_KEY", "base_url": "https://unused.invalid/v1", "floor": "worker",
+        })
+        self.reviewer = self.store.createagent({
+            "name": "API Reviewer", "vendor": "Fake", "model": "fake-r",
+            "access_kind": "api", "key_env": "UNUSED_KEY", "base_url": "https://unused.invalid/v1", "floor": "manager",
+        })
+
+    def _req(self, method, path, data=None, headers=None):
+        import http.client
+        conn = http.client.HTTPConnection("127.0.0.1", self.port, timeout=5)
+        try:
+            body = json.dumps(data).encode("utf-8") if data is not None else b""
+            hdrs = {"Host": f"127.0.0.1:{self.port}", "Origin": f"http://127.0.0.1:{self.port}"}
+            if method == "POST":
+                hdrs["Content-Type"] = "application/json"
+            if headers:
+                hdrs.update(headers)
+            conn.request(method, path, body=body if method == "POST" else None, headers=hdrs)
+            resp = conn.getresponse()
+            raw = resp.read().decode("utf-8")
+            return resp.status, resp.getheader("Set-Cookie", ""), json.loads(raw) if raw else {}
+        finally:
+            conn.close()
+
+    def _pair_owner(self):
+        from http.cookies import SimpleCookie
+        code = self.server.access.pair_code
+        status, set_cookie, data = self._req("POST", "/api/pair", {"code": code})
+        self.assertEqual(status, 200)
+        cookie = SimpleCookie()
+        cookie.load(set_cookie)
+        return {
+            "Cookie": f"farm_session={cookie['farm_session'].value}",
+            "X-Farm-CSRF": data["csrf"],
+            "Origin": f"http://127.0.0.1:{self.port}",
+        }
+
+    def test_real_office_store_automation_actions_hooks_and_logout_stop(self):
+        owner = self._pair_owner()
+        child = self.store.createtask({
+            "title": "Hooked child", "goal": "Hooked child",
+            "assigned_to": self.worker["id"], "reviewer_id": self.reviewer["id"],
+            "requires_code_review": True, "task_kind": "code_change",
+        })
+        msg = self.store.postmessage({
+            "task_id": child["id"], "sender_id": self.worker["id"], "is_delivery": True,
+            "conclusion": "done", "changed_files": ["a.py"], "test_result": "1 passed",
+        })
+        self.assertIn("automation_report", msg)
+        self.assertTrue(msg["automation_report"]["valid"])
+        reviewed = self.store.submitcodereview({
+            "task_id": child["id"], "reviewer_id": self.reviewer["id"], "passed": True, "issues": [],
+        })
+        self.assertIn("automation_review", reviewed)
+        self.assertTrue(reviewed["automation_review"]["passed"])
+
+        # Non-owner cannot start/stop/check automation.
+        st, _, member = self._req("POST", "/api/connections", {
+            "agent_id": self.worker["id"], "task_ids": [child["id"]], "role": "member",
+        }, headers=owner)
+        self.assertEqual(st, 200)
+        member_hdrs = {"Authorization": f"Bearer {member['token']}", "Origin": f"http://127.0.0.1:{self.port}"}
+        for act in ("startautomation", "stopautomation", "automationstatus"):
+            status, _, _ = self._req("POST", "/api/action", {"action": act, "payload": {"task_id": child["id"]}}, headers=member_hdrs)
+            self.assertEqual(status, 403)
+        _, _, conns = self._req("GET", "/api/connections", headers=owner)
+        member_id = next(c["id"] for c in conns["connections"] if not c["current"])
+        st, _, _ = self._req("POST", "/api/revoke", {"credential_id": member_id}, headers=owner)
+        self.assertEqual(st, 200)
+
+        # Create a small manual/parent task for HTTP startautomation -> logout stop -> stopautomation.
+        parent = self.store.createbigtask({
+            "title": "Auto parent", "goal": "Auto parent", "workspace_dir": str(self.state_path.parent),
+            "subtasks": [{"title": "Wait web", "goal": "Wait web", "assigned_to": self.worker["id"]}],
+        })["parent"]
+        # Use patch on run_until_blocked so no real adapter runs during HTTP lifecycle test.
+        with patch.object(self.store.automation_runner(), "run_until_blocked"):
+            st, _, res = self._req("POST", "/api/action", {
+                "action": "startautomation",
+                "payload": {
+                    "task_id": parent["id"], "confirmed": True, "live": True,
+                    "request_id": "http-start-1", "max_calls": 2,
+                    "workspace_dir": str(self.state_path.parent),
+                },
+            }, headers=owner)
+            self.assertEqual(st, 200)
+            self.assertEqual(res["result"]["status"], "running")
+
+            st, _, status_res = self._req("POST", "/api/action", {
+                "action": "automationstatus",
+                "payload": {"task_id": parent["id"]},
+            }, headers=owner)
+            self.assertEqual(st, 200)
+            self.assertEqual(status_res["result"]["status"], "running")
+
+            # Owner logout must stop active automation.
+            st, _, _ = self._req("POST", "/api/logout", {}, headers=owner)
+            self.assertEqual(st, 200)
+            self.assertEqual(self.store.automationstatus({"task_id": parent["id"]})["status"], "stopped")
+
+        # Reloading store recovers running automation as unknown.
+        parent["automation"]["status"] = "running"
+        self.store.save()
+        reloaded = OfficeStore(state_path=self.state_path)
+        self.assertEqual(reloaded.automationstatus({"task_id": parent["id"]})["status"], "unknown")
+        reloaded.closeautomation()
+
+
 if __name__ == "__main__":
     unittest.main()

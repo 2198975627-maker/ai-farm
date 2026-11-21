@@ -24,6 +24,7 @@ let APP_STATE = {
   exampleCursor: 0,
   customWorkspaceDir: "",
   reportDrafts: {},
+  draftMode: "standard",
 };
 
 // =========================================================================
@@ -61,6 +62,63 @@ const SEED_SKILLS = [
 // 初始化与 API 通信
 // =========================================================================
 let officeCsrf = "";
+let officeEventSource = null;
+let snapshotRefreshInFlight = false;
+let snapshotRefreshQueued = false;
+
+function connectOfficeEvents() {
+  if (officeEventSource) {
+    officeEventSource.close();
+    officeEventSource = null;
+  }
+  if (!APP_STATE.backendOnline || typeof EventSource === "undefined") return;
+  const es = new EventSource("/api/events");
+  officeEventSource = es;
+  es.addEventListener("state", () => {
+    scheduleSnapshotRefresh();
+  });
+  es.onerror = () => {
+    if (es.readyState === EventSource.CLOSED) {
+      const badge = document.getElementById("connModeBadge");
+      if (badge) {
+        badge.textContent = "连接已断开 · 请刷新配对";
+        badge.classList.remove("connected");
+      }
+      es.close();
+      if (officeEventSource === es) officeEventSource = null;
+    }
+  };
+}
+
+async function scheduleSnapshotRefresh() {
+  if (snapshotRefreshInFlight) {
+    snapshotRefreshQueued = true;
+    return;
+  }
+  snapshotRefreshInFlight = true;
+  try {
+    do {
+      snapshotRefreshQueued = false;
+      const resp = await fetch("/api/state", { cache: "no-store" });
+      if (resp.status === 401 || resp.status === 403) {
+        if (officeEventSource) {
+          officeEventSource.close();
+          officeEventSource = null;
+        }
+        APP_STATE.backendOnline = false;
+        showPairingForm();
+        return;
+      }
+      if (resp.ok) {
+        applySnapshot(await resp.json());
+      }
+    } while (snapshotRefreshQueued);
+  } catch (_) {
+    // Wait for next SSE event rather than polling.
+  } finally {
+    snapshotRefreshInFlight = false;
+  }
+}
 
 async function initOffice() {
   try {
@@ -79,6 +137,7 @@ async function initOffice() {
       document.getElementById("connModeBadge").textContent = "本地服务已连接";
       document.getElementById("connModeBadge").classList.add("connected");
       applySnapshot(data);
+      connectOfficeEvents();
       applyShotParams();
       return;
     }
@@ -184,6 +243,17 @@ async function openConnections() {
 }
 
 function applySnapshot(snap) {
+  const active = document.activeElement;
+  const activeId = active && active.id ? active.id : null;
+  const activeVal = active && ("value" in active) ? active.value : null;
+  const activeStart = active && typeof active.selectionStart === "number" ? active.selectionStart : null;
+  const activeEnd = active && typeof active.selectionEnd === "number" ? active.selectionEnd : null;
+  const scrollState = {};
+  for (const id of ["paneRoster", "groupChatStream", "panelThread", "panelProfile", "taskBoard"]) {
+    const el = document.getElementById(id);
+    if (el) scrollState[id] = el.scrollTop;
+  }
+
   if (snap.agents && snap.agents.agents) {
     APP_STATE.agents = snap.agents.agents;
   }
@@ -224,6 +294,21 @@ function applySnapshot(snap) {
     APP_STATE.selectedTaskId = APP_STATE.tasks[0].id;
   }
   renderAll();
+
+  for (const [id, top] of Object.entries(scrollState)) {
+    const el = document.getElementById(id);
+    if (el) el.scrollTop = top;
+  }
+  if (activeId) {
+    const restored = document.getElementById(activeId);
+    if (restored) {
+      if (activeVal !== null && "value" in restored && restored.value !== activeVal) restored.value = activeVal;
+      restored.focus({ preventScroll: true });
+      if (activeStart !== null && typeof restored.setSelectionRange === "function") {
+        try { restored.setSelectionRange(activeStart, activeEnd ?? activeStart); } catch (_) {}
+      }
+    }
+  }
 }
 
 async function callOfficeAction(action, payload = {}) {
@@ -576,16 +661,31 @@ function renderRoster() {
   }
 }
 
+function getTruthfulAgentState(agent) {
+  const related = (APP_STATE.tasks || []).filter(t => t.assigned_to === agent.id || t.reviewer_id === agent.id || t.manager_id === agent.id);
+  const running = related.some(t => t.automation?.status === "running" || Object.values(t.roundtable_dispatch?.receipts || {}).some(r => r.status === "running"));
+  if (running) return "运行中";
+  const unknown = related.some(t => t.status === "unknown" || t.automation?.status === "unknown" || t.courier_dispatch?.state === "unknown");
+  if (unknown) return "结果未知";
+  const waitingManual = related.some(t => t.automation?.status === "waiting_manual" || Object.values(t.roundtable_dispatch?.receipts || {}).some(r => r.status === "pending_manual"));
+  if (waitingManual) return "待手动回执";
+  if (related.some(t => t.assigned_to === agent.id && t.status === "assigned")) return "已分配";
+  if (agent.status === "exhausted") return "额度耗尽";
+  if (agent.floor === "rest") return "待命/休息";
+  return "就绪";
+}
+
 function renderAgentCardHTML(agent) {
   const hasQuota = agent.quota_percent !== null && agent.quota_percent !== undefined;
   const quotaClass = hasQuota ? Number(agent.quota_percent) <= 10 ? 'quota-low' : 'quota-known' : '';
   const selected = agent.id === APP_STATE.selectedAgentId && !document.getElementById('paneDetail').classList.contains('hidden');
+  const truthStatus = getTruthfulAgentState(agent);
   return `<div class="agent-card ${selected ? 'selected' : ''}" draggable="true" role="button" tabindex="0"
     ondragstart="onAgentDragStart(event, '${escapeHTML(agent.id)}')" onclick="selectAgent('${escapeHTML(agent.id)}')"
     onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();selectAgent('${escapeHTML(agent.id)}')}"
     aria-label="查看 ${escapeHTML(agent.name)} 的档案">
     <div class="agent-row-top">${renderAvatarHTML(agent)}<div class="agent-meta">
-      <span class="agent-name">${escapeHTML(agent.name)}</span><div class="agent-subline">${escapeHTML(agent.model)}</div>
+      <span class="agent-name">${escapeHTML(agent.name)}</span><div class="agent-subline">${escapeHTML(agent.model)} · ${escapeHTML(truthStatus)}</div>
     </div></div>
     <div class="agent-summary">${escapeHTML(agent.specialty || '尚未填写擅长的工作')}</div>
     <div class="agent-card-footer"><span>${escapeHTML(agent.badge || agent.access_kind)}</span><span class="${quotaClass}">${hasQuota ? '剩余 ' + escapeHTML(agent.quota_percent) + '%' : '额度未填'}</span></div>
@@ -2157,7 +2257,7 @@ function openNewTaskModal() {
     revSel.innerHTML = allOnline.map(a => `<option value="${a.id}">${escapeHTML(a.name)} (${escapeHTML(a.badge)})</option>`).join("");
   }
   toggleReviewerField();
-  selectTaskMode("solo");
+  selectTaskMode(APP_STATE.draftMode === "roundtable" ? "roundtable" : "solo");
   document.getElementById("newTaskModal").classList.remove("hidden");
 }
 
@@ -2269,35 +2369,146 @@ document.addEventListener("click", (ev) => {
   });
 });
 
-function switchMainView(view) {
-  closeDetailPanel();
-  for (const [key, id] of Object.entries({ workspace: 'tabBtnWorkspace', team: 'tabBtnTeam', skills: 'tabBtnSkills' })) {
-    const button = document.getElementById(id);
-    button.classList.toggle('active', key === view);
-    if (key === view) button.setAttribute('aria-current', 'page');
-    else button.removeAttribute('aria-current');
+function setDraftMode(mode) {
+  APP_STATE.draftMode = mode === "roundtable" ? "roundtable" : "standard";
+  const stdBtn = document.getElementById("topModeStandard");
+  const rtBtn = document.getElementById("topModeRoundtable");
+  if (stdBtn) {
+    stdBtn.classList.toggle("active", APP_STATE.draftMode === "standard");
+    stdBtn.setAttribute("aria-pressed", String(APP_STATE.draftMode === "standard"));
   }
-  document.getElementById('currentViewLabel').textContent = ({ workspace: '工作台', team: '团队', skills: '技能库' })[view];
-  document.querySelector('.new-task-trigger').classList.toggle('btn-primary', view === 'workspace');
-  document.getElementById('workspaceView').classList.toggle('hidden', view === 'skills');
-  document.getElementById('skillsView').classList.toggle('hidden', view !== 'skills');
-  document.getElementById('paneRoster').classList.toggle('hidden', view !== 'team');
-  document.getElementById('paneChat').classList.toggle('hidden', view !== 'workspace');
+  if (rtBtn) {
+    rtBtn.classList.toggle("active", APP_STATE.draftMode === "roundtable");
+    rtBtn.setAttribute("aria-pressed", String(APP_STATE.draftMode === "roundtable"));
+  }
+}
+
+function toggleMobileRoster() {
+  const roster = document.getElementById("paneRoster");
+  const btn = document.getElementById("mobileRosterToggle");
+  if (!roster) return;
+  const open = roster.classList.toggle("mobile-open");
+  if (btn) btn.setAttribute("aria-expanded", String(open));
+}
+
+function onTaskPaneDragOver(event) {
+  event.preventDefault();
+  event.currentTarget.classList.add("drag-over");
+}
+
+function onTaskPaneDragLeave(event) {
+  event.currentTarget.classList.remove("drag-over");
+}
+
+function onTaskPaneDrop(event) {
+  event.preventDefault();
+  event.currentTarget.classList.remove("drag-over");
+  const toId = draggedAgentId || event.dataTransfer.getData("text/plain");
+  if (!toId) return;
+  openReplaceAgentDialog(toId);
+}
+
+function openReplaceAgentDialog(preselectedToId = "") {
+  const candidates = (APP_STATE.tasks || []).filter(t => !["delivered", "awaiting_owner", "accepted_done", "rejected"].includes(t.status));
+  if (candidates.length === 0) {
+    showToast("当前没有可替换成员的进行中/待分配任务", true);
+    return;
+  }
+  const activeAgents = (APP_STATE.agents || []).filter(a => a.access_kind !== "chief");
+  if (activeAgents.length === 0) {
+    showToast("请先添加可替换的目标成员", true);
+    return;
+  }
+  document.getElementById("replaceAgentDialog")?.remove();
+  const dialog = document.createElement("dialog");
+  dialog.id = "replaceAgentDialog";
+  dialog.className = "auth-dialog";
+  const defaultTaskId = candidates.length === 1 ? candidates[0].id : "";
+  dialog.innerHTML = `<form id="replaceAgentForm">
+    <h2>替换任务成员</h2>
+    <p>仅支持未开跑且无未决回执的任务；跨厂商替换，经理换人需二次确认。</p>
+    <label for="replaceTaskSelect">选择目标任务${candidates.length > 1 ? "（多任务关联，请明确选择）" : ""}</label>
+    <select id="replaceTaskSelect" required>
+      ${candidates.length > 1 ? '<option value="">-- 请选择要替换的任务 --</option>' : ''}
+      ${candidates.map(t => `<option value="${escapeHTML(t.id)}" ${t.id === defaultTaskId ? "selected" : ""}>${escapeHTML(t.title)} (${escapeHTML(t.assigned_name || "未指派")})</option>`).join("")}
+    </select>
+    <label for="replaceFromSelect">被替换的原成员</label>
+    <select id="replaceFromSelect" required></select>
+    <label for="replaceToSelect">替换为新成员</label>
+    <select id="replaceToSelect" required>${activeAgents.map(a => `<option value="${escapeHTML(a.id)}" ${a.id === preselectedToId ? "selected" : ""}>${escapeHTML(a.name)} (${escapeHTML(a.vendor)} · ${escapeHTML(a.floor)})</option>`).join("")}</select>
+    <label id="replaceManagerConfirmWrap" class="hidden" style="display:flex;align-items:center;gap:8px;">
+      <input type="checkbox" id="replaceManagerConfirm" /> <span>确认替换经理/圆桌席位（二次确认）</span>
+    </label>
+    <p id="replaceAgentError" role="alert"></p>
+    <div style="display:flex;gap:10px;justify-content:flex-end;">
+      <button type="button" class="btn" id="replaceCancelBtn">取消</button>
+      <button type="submit" class="btn btn-primary">确认替换</button>
+    </div>
+  </form>`;
+  document.body.appendChild(dialog);
+  const taskSel = dialog.querySelector("#replaceTaskSelect");
+  const fromSel = dialog.querySelector("#replaceFromSelect");
+  const mgrWrap = dialog.querySelector("#replaceManagerConfirmWrap");
+  const mgrChk = dialog.querySelector("#replaceManagerConfirm");
+  const syncFromOptions = () => {
+    const task = candidates.find(t => t.id === taskSel.value);
+    const ids = [];
+    if (task) {
+      if (task.assigned_to) ids.push(task.assigned_to);
+      if (task.manager_id && !ids.includes(task.manager_id)) ids.push(task.manager_id);
+      Object.values(task.roundtable_state?.seats || {}).forEach(s => { if (s?.id && !ids.includes(s.id)) ids.push(s.id); });
+    }
+    fromSel.innerHTML = ids.map(id => {
+      const a = APP_STATE.agents.find(x => x.id === id);
+      return `<option value="${escapeHTML(id)}">${escapeHTML(a ? `${a.name} (${a.floor})` : id)}</option>`;
+    }).join("") || '<option value="">-- 请先选任务 --</option>';
+    const fromAgent = APP_STATE.agents.find(x => x.id === fromSel.value);
+    const isMgr = Boolean(fromAgent && fromAgent.floor === "manager");
+    mgrWrap.classList.toggle("hidden", !isMgr);
+    if (!isMgr) mgrChk.checked = false;
+  };
+  taskSel.addEventListener("change", syncFromOptions);
+  fromSel.addEventListener("change", () => {
+    const fromAgent = APP_STATE.agents.find(x => x.id === fromSel.value);
+    const isMgr = Boolean(fromAgent && fromAgent.floor === "manager");
+    mgrWrap.classList.toggle("hidden", !isMgr);
+    if (!isMgr) mgrChk.checked = false;
+  });
+  syncFromOptions();
+  dialog.querySelector("#replaceCancelBtn").addEventListener("click", () => { dialog.close(); dialog.remove(); });
+  dialog.querySelector("#replaceAgentForm").addEventListener("submit", async ev => {
+    ev.preventDefault();
+    const fromAgent = APP_STATE.agents.find(x => x.id === fromSel.value);
+    const isMgr = Boolean(fromAgent && fromAgent.floor === "manager");
+    if (isMgr && !mgrChk.checked) {
+      dialog.querySelector("#replaceAgentError").textContent = "替换经理必须勾选二次确认。";
+      return;
+    }
+    try {
+      await callOfficeAction("replaceagent", {
+        task_id: taskSel.value, from_id: fromSel.value, to_id: dialog.querySelector("#replaceToSelect").value,
+        confirm_manager: isMgr ? true : false,
+      });
+      dialog.close();
+      dialog.remove();
+      showToast("已替换任务成员");
+    } catch (err) {
+      dialog.querySelector("#replaceAgentError").textContent = err.message;
+    }
+  });
+  dialog.showModal();
+}
+
+function switchMainView(view) {
+  const showSkills = view === 'skills';
+  document.getElementById('workspaceView').classList.toggle('hidden', showSkills);
+  document.getElementById('skillsView').classList.toggle('hidden', !showSkills);
 }
 
 function switchWorkspaceTab(tab) {
   const activity = tab === 'activity';
-  document.getElementById('taskBoard').classList.toggle('hidden', activity);
-  document.getElementById('groupChatStream').classList.toggle('hidden', !activity);
-  document.getElementById('groupComposer').classList.toggle('hidden', !activity);
-  for (const [id, active] of [['workTabTasks', !activity], ['workTabActivity', activity]]) {
-    document.getElementById(id).classList.toggle('active', active);
-    document.getElementById(id).setAttribute('aria-pressed', String(active));
-  }
-  if (activity) {
-    const stream = document.getElementById('groupChatStream');
-    stream.scrollTop = stream.scrollHeight;
-  }
+  const stream = document.getElementById('groupChatStream');
+  if (activity && stream) stream.scrollTop = stream.scrollHeight;
 }
 
 function toggleWorkspaceOverview() {
@@ -2306,24 +2517,12 @@ function toggleWorkspaceOverview() {
   document.getElementById('overviewToggle').setAttribute('aria-expanded', String(!hidden));
 }
 
-let detailReturnFocus = null;
 function openDetailPanel() {
   if (document.getElementById('workspaceView').classList.contains('hidden')) switchMainView('workspace');
-  const panel = document.getElementById('paneDetail');
-  if (panel.classList.contains('hidden')) detailReturnFocus = document.activeElement;
-  panel.classList.remove('hidden');
-  document.getElementById('detailBackdrop').classList.remove('hidden');
-  panel.querySelector('.close-btn').focus();
 }
 
 function closeDetailPanel() {
-  const panel = document.getElementById('paneDetail');
-  if (panel.classList.contains('hidden')) return;
-  panel.classList.add('hidden');
-  document.getElementById('detailBackdrop').classList.add('hidden');
-  if (detailReturnFocus?.isConnected) detailReturnFocus.focus();
-  else document.getElementById('tabBtnWorkspace').focus();
-  document.querySelectorAll('.task-pill.active').forEach(el => el.classList.remove('active'));
+  // 右侧当前任务对话区在桌面端常驻，不遮挡主区
 }
 
 function switchRightTab(tab) {

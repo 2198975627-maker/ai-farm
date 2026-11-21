@@ -606,6 +606,115 @@ class OfficeAuthTests(unittest.TestCase):
                     "task_id": self.web_task["id"], "status": "ok", "text": "Stale courier report",
                 }, headers=courier))
 
+    def _open_sse(self, headers=None, timeout=2.5):
+        conn = http.client.HTTPConnection("127.0.0.1", self.port, timeout=timeout)
+        conn.request("GET", "/api/events", headers=headers or {})
+        resp = conn.getresponse()
+        return conn, resp
+
+    def _read_sse_event(self, resp):
+        lines = []
+        while True:
+            raw = resp.fp.readline()
+            if not raw:
+                return None
+            line = raw.decode("utf-8", errors="replace").rstrip("\r\n")
+            if line == "":
+                if lines:
+                    return "\n".join(lines)
+                continue
+            lines.append(line)
+
+    def test_events_owner_only_and_single_event_without_leak(self):
+        self.pair()
+        member, _ = self.issue(self.worker, [self.task["id"]], "member")
+        courier, _ = self.issue(self.web, [self.web_task["id"]], "courier")
+        for hdrs in ({}, member, courier):
+            conn, resp = self._open_sse(hdrs)
+            try:
+                self.assertIn(resp.status, (401, 403))
+            finally:
+                conn.close()
+
+        conn, resp = self._open_sse(self.owner_headers)
+        try:
+            self.assertEqual(resp.status, 200)
+            self.assertIn("text/event-stream", resp.getheader("Content-Type", ""))
+            first = self._read_sse_event(resp)
+            self.assertIsNotNone(first)
+            self.assertTrue(first.startswith("event: state\ndata: "), first)
+            rev0 = int(first.split("data: ", 1)[1])
+
+            secret_title = "SSE_SECRET_BODY_DO_NOT_LEAK"
+            self.make_task(secret_title, self.worker)
+            second = self._read_sse_event(resp)
+            self.assertEqual(second, f"event: state\ndata: {rev0 + 1}")
+            self.assertNotIn(secret_title, second)
+            self.assertNotIn("token", second.lower())
+        finally:
+            conn.close()
+
+    def test_events_wakes_immediately_on_owner_logout(self):
+        self.pair()
+        conn, resp = self._open_sse(self.owner_headers, timeout=2.0)
+        try:
+            self.assertEqual(resp.status, 200)
+            self._read_sse_event(resp)
+            started = time.monotonic()
+            status, _, _ = self.request("POST", "/api/logout", {}, headers=self.owner_headers)
+            self.assertEqual(status, 200)
+            eof = self._read_sse_event(resp)
+            self.assertIsNone(eof)
+            self.assertLess(time.monotonic() - started, 2.0)
+        finally:
+            conn.close()
+
+    def test_events_wakes_immediately_on_owner_revoke(self):
+        self.pair()
+        conn, resp = self._open_sse(self.owner_headers, timeout=2.0)
+        try:
+            self.assertEqual(resp.status, 200)
+            self._read_sse_event(resp)
+            conns = self.request("GET", "/api/connections", headers=self.owner_headers)[2]["connections"]
+            owner_id = next(c["id"] for c in conns if c["current"])
+            started = time.monotonic()
+            status, _, _ = self.request("POST", "/api/revoke", {"credential_id": owner_id}, headers=self.owner_headers)
+            self.assertEqual(status, 200)
+            self.assertIsNone(self._read_sse_event(resp))
+            self.assertLess(time.monotonic() - started, 2.0)
+        finally:
+            conn.close()
+
+    def test_events_wakes_on_server_close_and_enforces_cap(self):
+        self.pair()
+        streams = []
+        try:
+            for _ in range(8):
+                conn, resp = self._open_sse(self.owner_headers, timeout=2.0)
+                self.assertEqual(resp.status, 200)
+                self._read_sse_event(resp)
+                streams.append((conn, resp))
+            conn9, resp9 = self._open_sse(self.owner_headers, timeout=2.0)
+            try:
+                self.assertEqual(resp9.status, 429)
+            finally:
+                conn9.close()
+
+            started = time.monotonic()
+            self.server.shutdown()
+            self.server.server_close()
+            for _, resp in streams:
+                self.assertIsNone(self._read_sse_event(resp))
+            self.assertLess(time.monotonic() - started, 2.0)
+        finally:
+            for conn, _ in streams:
+                conn.close()
+        # Wait briefly for handler finally blocks to decrement event_clients.
+        deadline = time.monotonic() + 2.0
+        while self.server.event_clients > 0 and time.monotonic() < deadline:
+            time.sleep(0.02)
+        self.assertEqual(self.server.event_clients, 0)
+
 
 if __name__ == "__main__":
     unittest.main()

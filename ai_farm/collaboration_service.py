@@ -398,7 +398,10 @@ class CollaborationService:
                 try:
                     self.runtime.fail(self._tokens.get(member["id"], ""), grant_id, "managed_outcome_unknown")
                 except Exception:
-                    pass
+                    try:
+                        self.runtime.fail_unconfirmed(self.runtime.owner_token, grant_id, "managed_outcome_unknown")
+                    except Exception:
+                        pass
                 connection["connected"] = False
             self._dispose(connection["client"])
             return {"grant_id": grant_id, "state": "unknown"}
@@ -407,6 +410,23 @@ class CollaborationService:
                 connection["busy"] = False
                 if not any(p["id"] == member["id"] for p in self.access.credentials.values()):
                     self._managed.pop(member["agent_id"], None)
+
+    def managed_snapshot(self):
+        with self.access.lock, self.store._lock:
+            return [
+                {
+                    "agent_id": agent_id,
+                    "credential_id": conn["principal"]["id"],
+                    "connected": bool(conn.get("connected")),
+                    "busy": bool(conn.get("busy")),
+                    "model": conn.get("model"),
+                    "sandbox": conn.get("sandbox"),
+                    "approval_policy": conn.get("approval_policy"),
+                    "task_ids": list(conn["principal"].get("task_ids", [])),
+                    "room_threads": {rid: tid for rid, tid in conn.get("threads", {}).items()},
+                }
+                for agent_id, conn in self._managed.items()
+            ]
 
     @staticmethod
     def _result(text):
