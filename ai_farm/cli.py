@@ -184,7 +184,7 @@ def _quota(args) -> int:
 
 def _office(args) -> int:
     from .office_server import run_office_server
-    run_office_server(host=args.host, port=args.port)
+    run_office_server(host=args.host, port=args.port, open_browser=not args.no_open)
     return 0
 
 
@@ -206,6 +206,7 @@ def main(argv=None) -> int:
     office = sub.add_parser("office", help="启动 AI 农场办公室网页端")
     office.add_argument("--host", default="127.0.0.1")
     office.add_argument("--port", type=int, default=8765)
+    office.add_argument("--no-open", action="store_true", help="仅启动服务，不自动打开浏览器")
 
     args = p.parse_args(argv)
     if args.cmd == "recruit":

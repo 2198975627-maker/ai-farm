@@ -169,9 +169,20 @@ function showPairingForm() {
   const dialog = document.createElement("dialog");
   dialog.id = "officePairing";
   dialog.className = "auth-dialog";
-  dialog.innerHTML = `<form id="officePairForm"><h2>连接你的本机农场</h2><p>从启动服务的终端粘贴一次性配对码。它不是模型 API Key，也不要分享给员工。</p><label for="officePairCode">本机配对码</label><input id="officePairCode" type="password" autocomplete="off" required maxlength="128"><p id="officePairError" role="alert"></p><button type="submit" class="btn btn-primary">配对并进入</button><p>配对码 10 分钟有效，只能使用一次；会话失效时请在本机重启服务。</p></form>`;
+  dialog.innerHTML = `<form id="officePairForm"><h2>连接你的本机农场</h2><p>启动服务时配对码已自动复制到剪贴板，也可从终端粘贴（10 分钟有效，不存入网址）。</p><label for="officePairCode">本机配对码</label><input id="officePairCode" type="password" autocomplete="off" required maxlength="128"><p id="officePairError" role="alert"></p><div style="display:flex;gap:10px;flex-wrap:wrap;"><button type="button" class="btn btn-primary" id="officePastePairBtn">从剪贴板一键配对</button><button type="submit" class="btn">手动输入并进入</button></div></form>`;
   document.body.appendChild(dialog);
   dialog.addEventListener("cancel", event => event.preventDefault());
+  document.getElementById("officePastePairBtn").addEventListener("click", async () => {
+    try {
+      const clip = (await navigator.clipboard.readText()).trim();
+      if (!clip) throw new Error("剪贴板为空，请从终端复制配对码或按 Ctrl+V");
+      document.getElementById("officePairCode").value = clip;
+      document.getElementById("officePairForm").requestSubmit();
+    } catch (err) {
+      document.getElementById("officePairError").textContent = err.message || "无法读取剪贴板，请直接 Ctrl+V 粘贴";
+      document.getElementById("officePairCode").focus();
+    }
+  });
   document.getElementById("officePairForm").addEventListener("submit", async event => {
     event.preventDefault();
     const button = event.target.querySelector("button");

@@ -261,11 +261,40 @@ def create_server(host: str = "127.0.0.1", port: int = 8765, state_path: Path | 
     return server
 
 
-def run_office_server(host: str = "127.0.0.1", port: int = 8765, state_path: Path | None = None) -> None:
+def _copy_to_clipboard(text: str) -> bool:
+    import subprocess
+    import sys
+    try:
+        if sys.platform == "win32":
+            proc = subprocess.run(["clip"], input=text, text=True, check=False, timeout=3)
+            return proc.returncode == 0
+        if sys.platform == "darwin":
+            proc = subprocess.run(["pbcopy"], input=text, text=True, check=False, timeout=3)
+            return proc.returncode == 0
+        for cmd in (["xclip", "-selection", "clipboard"], ["xsel", "--clipboard", "--input"]):
+            proc = subprocess.run(cmd, input=text, text=True, check=False, timeout=3)
+            if proc.returncode == 0:
+                return True
+    except Exception:
+        pass
+    return False
+
+
+def run_office_server(host: str = "127.0.0.1", port: int = 8765, state_path: Path | None = None, open_browser: bool = True) -> None:
+    import webbrowser
     server = create_server(host, port, state_path)
-    print(f"AI 农场办公室已启动: http://{host}:{server.server_address[1]}")
-    print(f"本机一次性配对码（10 分钟有效，不要分享）: {server.access.pair_code}")
-    print("按 Ctrl+C 停止服务。")
+    url = f"http://{host}:{server.server_address[1]}"
+    copied = _copy_to_clipboard(server.access.pair_code)
+    print(f"AI 农场办公室已启动: {url}", flush=True)
+    print(f"本机一次性配对码（10 分钟有效，不要分享）: {server.access.pair_code}", flush=True)
+    if copied:
+        print("配对码已自动复制到剪贴板，打开网页后点击「从剪贴板一键配对」或直接 Ctrl+V 即可进入。", flush=True)
+    print("按 Ctrl+C 停止服务。", flush=True)
+    if open_browser:
+        try:
+            webbrowser.open(url)
+        except Exception:
+            pass
     try:
         server.serve_forever()
     except KeyboardInterrupt:
