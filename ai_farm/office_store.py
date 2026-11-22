@@ -1843,8 +1843,11 @@ class OfficeStore(AutomationMixin, RoundtableMixin):
                 reply.usage.get("total_tokens")
                 or (int(reply.usage.get("prompt_tokens") or 0) + int(reply.usage.get("completion_tokens") or 0))
             )
+        clean_reply = (reply.text or "").strip()
+        if not clean_reply:
+            raise RuntimeError(f"{chosen_agent['name']} ({reply.model}) 返回空内容（可能推理 token 耗尽），未生成有效成果")
         fallback_trace = (" | ".join(attempts_log)) if attempts_log else "直调命中"
-        conc_line = (reply.text or "").strip().splitlines()[0][:200] if (reply.text or "").strip() else "已完成"
+        conc_line = clean_reply[:1200]
         # Brief critical section: the network call above ran lock-free so parallel
         # subtasks stay concurrent; only the shared-state writes are serialized.
         with self._lock:

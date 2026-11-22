@@ -41,7 +41,7 @@ class OpenAICompatibleAdapter:
             )
         return key
 
-    def chat(self, prompt: str, max_tokens: int = 1000) -> AgentReply:
+    def chat(self, prompt: str, max_tokens: int = 4096) -> AgentReply:
         body = json.dumps({
             "model": self.model_id,
             "messages": [{"role": "user", "content": prompt}],
