@@ -1898,8 +1898,23 @@ class OfficeStore(AutomationMixin, RoundtableMixin):
             q = adapter.check_quota()
             if q.percent_remaining is not None:
                 agent["quota_percent"] = q.percent_remaining
+                agent.pop("quota_balance", None)
+            elif getattr(q, "kind", "") == "balance":
+                agent["quota_percent"] = None
             if q.note:
                 agent["quota_note"] = q.note
+                bal_m = re.search(r"([0-9]+(?:\.[0-9]+)?)\s*(CNY|USD|RMB|EUR)", q.note, re.I)
+                if bal_m:
+                    val = float(bal_m.group(1))
+                    cur = bal_m.group(2).upper()
+                    agent["quota_balance"] = f"{bal_m.group(1)} {cur}"
+                    if val > 0 and agent.get("status") == "exhausted":
+                        agent["status"] = "ready"
+                        if agent.get("badge") == "已耗尽·API":
+                            agent["badge"] = "付费·API" if agent.get("paid") else "免费·API"
+                    elif val <= 0:
+                        agent["status"] = "exhausted"
+                        agent["quota_percent"] = 0
             if getattr(q, "available_models", None):
                 agent["available_models"] = q.available_models
             if getattr(q, "tier", None) and q.tier != "待核实" and not agent.get("tier"):
@@ -1936,7 +1951,7 @@ class OfficeStore(AutomationMixin, RoundtableMixin):
         now = _now_iso()
         for agent in self.state["agents"]:
             slug = agent.get("adapter_slug") or ""
-            if agent.get("access_kind") == "api" and slug in registered_slugs():
+            if agent.get("access_kind") == "api" and ((slug in registered_slugs()) or (agent.get("base_url") and agent.get("key_env"))):
                 key_env = agent.get("key_env") or ""
                 if key_env and os.environ.get(key_env, "").strip():
                     res = self.checklivequota({"id": agent["id"]})

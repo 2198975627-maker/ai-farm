@@ -687,9 +687,22 @@ function getTruthfulAgentState(agent) {
   return "就绪";
 }
 
+function parseAgentBalance(agent) {
+  if (agent.quota_balance) return agent.quota_balance;
+  const m = String(agent.quota_note || '').match(/([0-9]+(?:\.[0-9]+)?)\s*(CNY|USD|RMB|EUR)/i);
+  return m ? `${m[1]} ${m[2].toUpperCase()}` : '';
+}
+
 function renderAgentCardHTML(agent) {
-  const hasQuota = agent.quota_percent !== null && agent.quota_percent !== undefined;
-  const quotaClass = hasQuota ? Number(agent.quota_percent) <= 10 ? 'quota-low' : 'quota-known' : '';
+  const balance = parseAgentBalance(agent);
+  const balNum = balance ? parseFloat(balance) : NaN;
+  const hasQuota = !balance && agent.quota_percent !== null && agent.quota_percent !== undefined;
+  const quotaClass = balance
+    ? (balNum <= 0 ? 'quota-low' : 'quota-known')
+    : (hasQuota ? (Number(agent.quota_percent) <= 10 ? 'quota-low' : 'quota-known') : '');
+  const quotaLabel = balance
+    ? `余额 ${escapeHTML(balance)}`
+    : (hasQuota ? `剩余 ${escapeHTML(agent.quota_percent)}%` : (Number(agent.tokens_used || 0) > 0 ? `已用 ${escapeHTML(agent.tokens_used)} tok` : '额度未填'));
   const selected = agent.id === APP_STATE.selectedAgentId && !document.getElementById('paneDetail').classList.contains('hidden');
   const truthStatus = getTruthfulAgentState(agent);
   return `<div class="agent-card ${selected ? 'selected' : ''}" draggable="true" role="button" tabindex="0"
@@ -700,7 +713,7 @@ function renderAgentCardHTML(agent) {
       <span class="agent-name">${escapeHTML(agent.name)}</span><div class="agent-subline">${escapeHTML(agent.model)} · ${escapeHTML(truthStatus)}</div>
     </div></div>
     <div class="agent-summary">${escapeHTML(agent.specialty || '尚未填写擅长的工作')}</div>
-    <div class="agent-card-footer"><span>${escapeHTML(agent.badge || agent.access_kind)}</span><span class="${quotaClass}">${hasQuota ? '剩余 ' + escapeHTML(agent.quota_percent) + '%' : (Number(agent.tokens_used || 0) > 0 ? '已用 ' + escapeHTML(agent.tokens_used) + ' tok' : '额度未填')}</span></div>
+    <div class="agent-card-footer"><span>${escapeHTML(agent.badge || agent.access_kind)}</span><span class="${quotaClass}">${quotaLabel}</span></div>
   </div>`;
 }
 
@@ -981,10 +994,10 @@ function renderSelectedAgentProfile() {
       <div class="kv-row"><span>厂商</span><strong data-preserve-text>${escapeHTML(agent.vendor)} · ${escapeHTML(agent.brand)}</strong></div>
       <div class="kv-row"><span>模型</span><span><code>${escapeHTML(agent.model)}</code> ${agent.verified_version ? icon('check') + '已核实' : icon('alert') + '待核实'}</span></div>
       <div class="kv-row"><span>通道</span><span data-preserve-text>${escapeHTML(agent.access_kind)} · ${escapeHTML(agent.badge)}</span></div>
-      <div class="kv-row"><span>剩余额度</span><strong>${hasPct ? `${pct}%` : '额度未填'}</strong></div>
+      <div class="kv-row"><span>剩余额度</span><strong>${parseAgentBalance(agent) ? escapeHTML(parseAgentBalance(agent)) : (hasPct ? `${pct}%` : '额度未填')}</strong></div>
       ${agent.login_url ? `<div class="detail-actions" style="margin-top:10px;"><button type="button" class="btn btn-xs btn-primary" onclick="handleOpenWebLogin('${escapeHTML(agent.id)}')">后台登录一次（开启自动抓网页）</button></div>` : ''}
       <p class="detail-meta" data-preserve-text>${escapeHTML(agent.quota_note || '未实查，不推测可用额度。')}</p>
-      ${hasPct && pct <= 10 ? `<p class="detail-meta quota-warning" role="status">${icon('alert')}剩余额度 ≤10%。${agent.access_kind === 'subscription' ? '订阅到限额可能降级，请核对下方降级规则。' : pct === 0 && agent.access_kind === 'api' ? 'API 额度已归零，请调至休息并轮换其他员工。' : '请核实用量，必要时轮换其他员工。'}</p>` : ''}
+      ${(!parseAgentBalance(agent) && hasPct && pct <= 10) || (parseAgentBalance(agent) && parseFloat(parseAgentBalance(agent)) <= 0) ? `<p class="detail-meta quota-warning" role="status">${icon('alert')}额度已偏低或归零，请核实余额并考虑轮换其他成员。</p>` : ''}
     </section>
 
     <details class="detail-section" data-section="account"${sectionOpen('account')}>
