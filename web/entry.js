@@ -98,10 +98,10 @@ function createStageDOM() {
 
       <div class="fe-home-content" id="feHomeContent">
         <div class="fe-eyebrow">AI FARM · MULTI-MODEL STUDIO</div>
-        <h1 class="fe-title">AI FARM · 农场</h1>
+        <h1 class="fe-title">AI FARM</h1>
         <p class="fe-subtitle">把想法，变成能用的东西。</p>
-        <button id="farmEntryPortalBtn" type="button" aria-label="进入农场 3D 空间">
-          <span class="fe-portal-zh">进入农场</span>
+        <button id="farmEntryPortalBtn" type="button" aria-label="进入 AI Farm 3D 空间">
+          <span class="fe-portal-zh">进入 AI Farm</span>
           <span class="fe-portal-en">ENTER</span>
         </button>
       </div>
@@ -110,7 +110,7 @@ function createStageDOM() {
     <section id="farmEntryWorld" aria-label="Farm World 全球模型矩阵">
       <div class="fe-world-header">
         <h2 class="fe-world-title">FARM WORLD</h2>
-        <p class="fe-world-hint" id="feWorldHint">长按拖动探索 · 点击地心进入农场</p>
+        <p class="fe-world-hint" id="feWorldHint">长按拖动探索 · 点击地心进入 AI Farm</p>
       </div>
       <button class="fe-hud-btn" id="farmEntryBackBtn" type="button">← 回首页</button>
       <button class="fe-hud-btn" id="farmEntryWorldSkipBtn" type="button">跳过入场 →</button>
@@ -795,7 +795,7 @@ function launchFarmEntry() {
         if (worldHintEl) {
           worldHintEl.textContent = hoveredCore
             ? "点击地心 · 进入 AI Farm 工作台"
-            : "长按拖动探索 · 点击地心进入农场";
+            : "长按拖动探索 · 点击地心进入 AI Farm";
         }
       }
 
