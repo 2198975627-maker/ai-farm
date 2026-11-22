@@ -808,6 +808,36 @@ function onFloorDragLeave(event) {
   event.currentTarget.classList.remove("drag-over");
 }
 
+function confirmManagerMoveDialog(titleText, bodyText) {
+  return new Promise(resolve => {
+    document.getElementById("moveManagerConfirmDialog")?.remove();
+    const dialog = document.createElement("dialog");
+    dialog.id = "moveManagerConfirmDialog";
+    dialog.className = "auth-dialog";
+    dialog.innerHTML = `<form method="dialog">
+      <h2>${escapeHTML(titleText)}</h2>
+      <p>${escapeHTML(bodyText)}</p>
+      <div style="display:flex;gap:10px;justify-content:flex-end;margin-top:16px;">
+        <button type="button" class="btn btn-ghost" id="mmCancelBtn">取消</button>
+        <button type="submit" class="btn btn-primary" id="mmConfirmBtn">确认调动</button>
+      </div>
+    </form>`;
+    document.body.appendChild(dialog);
+    let settled = false;
+    const finish = val => {
+      if (settled) return;
+      settled = true;
+      dialog.close();
+      dialog.remove();
+      resolve(val);
+    };
+    dialog.querySelector("#mmCancelBtn").addEventListener("click", () => finish(false));
+    dialog.addEventListener("cancel", () => finish(false));
+    dialog.querySelector("form").addEventListener("submit", ev => { ev.preventDefault(); finish(true); });
+    dialog.showModal();
+  });
+}
+
 async function moveAgentWithConfirm(agentId, targetFloor) {
   const agent = APP_STATE.agents.find(a => a.id === agentId);
   const oldFloor = agent ? agent.floor : '';
@@ -815,7 +845,10 @@ async function moveAgentWithConfirm(agentId, targetFloor) {
   const floorLabel = { manager: '经理层', worker: '员工层', rest: '休息区' };
   const involvesManager = oldFloor === 'manager' || targetFloor === 'manager';
   if (involvesManager) {
-    const ok = window.confirm(`确认将「${agent ? agent.name : agentId}」从「${floorLabel[oldFloor] || oldFloor}」调至「${floorLabel[targetFloor] || targetFloor}」吗？\n\n涉及经理层换岗，请再次确认。`);
+    const ok = await confirmManagerMoveDialog(
+      '确认经理层换岗',
+      `确认将「${agent ? agent.name : agentId}」从「${floorLabel[oldFloor] || oldFloor}」调至「${floorLabel[targetFloor] || targetFloor}」吗？`
+    );
     if (!ok) return;
   }
   await callOfficeAction("moveagent", {
