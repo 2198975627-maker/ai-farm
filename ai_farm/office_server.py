@@ -185,6 +185,7 @@ class OfficeHTTPHandler(BaseHTTPRequestHandler):
             auto_cookie = None
             if (path in ("/", "/index.html")
                     and getattr(self.server, "auto_pair", False)
+                    and self.client_address[0] in ("127.0.0.1", "::1")
                     and self.headers.get("Sec-Fetch-Site") != "cross-site"):
                 has_valid_session = False
                 try:
@@ -192,12 +193,9 @@ class OfficeHTTPHandler(BaseHTTPRequestHandler):
                     has_valid_session = True
                 except AccessDenied:
                     pass
-                if not has_valid_session and self.access.pair_code:
-                    try:
-                        session = self.access.pair_owner(self.access.pair_code)
-                        auto_cookie = f"farm_session={session['token']}; HttpOnly; SameSite=Strict; Path=/; Max-Age=28800"
-                    except AccessDenied:
-                        pass
+                if not has_valid_session:
+                    session = self.access.auto_pair_owner()
+                    auto_cookie = f"farm_session={session['token']}; HttpOnly; SameSite=Strict; Path=/; Max-Age=28800"
             self.send_response(200)
             ct = mime or "application/octet-stream"
             if ct.startswith("text/") or ct in ("application/javascript", "application/json"):
@@ -228,14 +226,22 @@ class OfficeHTTPHandler(BaseHTTPRequestHandler):
                 return
             if length < 0 or self.headers.get_content_type() != "application/json":
                 raise ValueError("Expected a JSON request")
-            principal = None if path == "/api/pair" else self._principal(mutate=True)
+            principal = None if path in ("/api/pair", "/api/auto-pair") else self._principal(mutate=True)
             self.connection.settimeout(15)
             request = json.loads(self.rfile.read(length).decode("utf-8"))
             if not isinstance(request, dict):
                 raise ValueError("Expected a JSON object")
-            if path != "/api/pair":
+            if path not in ("/api/pair", "/api/auto-pair"):
                 principal = self._principal(mutate=True)
-            if path == "/api/pair":
+            if path == "/api/auto-pair":
+                if (not getattr(self.server, "auto_pair", False)
+                        or self.client_address[0] not in ("127.0.0.1", "::1")
+                        or self.headers.get("Sec-Fetch-Site") == "cross-site"):
+                    raise AccessDenied("自动配对仅限本机回环访问。")
+                session = self.access.auto_pair_owner()
+                self._json(200, {"ok": True, "csrf": session["csrf"]},
+                           f"farm_session={session['token']}; HttpOnly; SameSite=Strict; Path=/; Max-Age=28800")
+            elif path == "/api/pair":
                 session = self.access.pair_owner(request.get("code"))
                 self._json(200, {"ok": True, "csrf": session["csrf"]},
                            f"farm_session={session['token']}; HttpOnly; SameSite=Strict; Path=/; Max-Age=28800")

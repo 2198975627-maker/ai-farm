@@ -123,14 +123,24 @@ async function scheduleSnapshotRefresh() {
 
 async function initOffice() {
   try {
-    const session = await fetch("/api/session", { cache: "no-store" });
+    let session = await fetch("/api/session", { cache: "no-store" });
     if (session.status === 401 || session.status === 403) {
-      APP_STATE.backendOnline = false;
-      document.getElementById("connModeBadge").textContent = "等待本机配对";
-      showPairingForm();
-      return;
+      const autoPair = await fetch("/api/auto-pair", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: "{}",
+      });
+      if (autoPair.ok) {
+        officeCsrf = (await autoPair.json()).csrf;
+      } else {
+        APP_STATE.backendOnline = false;
+        document.getElementById("connModeBadge").textContent = "等待本机配对";
+        showPairingForm();
+        return;
+      }
+    } else if (session.ok) {
+      officeCsrf = (await session.json()).csrf;
     }
-    if (session.ok) officeCsrf = (await session.json()).csrf;
     const resp = await fetch("/api/state", { cache: "no-store" });
     if (resp.ok) {
       const data = await resp.json();
@@ -166,6 +176,10 @@ async function initOffice() {
 }
 
 function showPairingForm() {
+  if (window.__farmEntryActive) {
+    window.addEventListener("farmEntryClosed", () => showPairingForm(), { once: true });
+    return;
+  }
   if (document.getElementById("officePairing")) return;
   const dialog = document.createElement("dialog");
   dialog.id = "officePairing";

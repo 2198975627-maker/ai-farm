@@ -779,7 +779,7 @@ class OfficeAuthTests(unittest.TestCase):
         self.assertEqual(sub_b["status"], "completed")
         self.assertEqual(parent["roundtable_state"]["stage"], "C")
 
-    def test_auto_pair_issues_single_use_cookie_on_loopback_get_and_blocks_cross_site(self):
+    def test_auto_pair_issues_cookie_on_loopback_get_and_blocks_cross_site(self):
         tmp = tempfile.TemporaryDirectory()
         self.addCleanup(tmp.cleanup)
         srv = create_server("127.0.0.1", 0, state_path=Path(tmp.name) / "auto.json", auto_pair=True)
@@ -814,14 +814,16 @@ class OfficeAuthTests(unittest.TestCase):
         finally:
             conn1.close()
 
-        # Second unauthenticated GET / must NOT receive another Set-Cookie (single-use pair_code consumed).
+        # Second unauthenticated loopback GET / also auto-pairs cleanly when auto_pair=True.
         conn2 = http.client.HTTPConnection("127.0.0.1", port, timeout=5)
         try:
             conn2.request("GET", "/", headers={"Host": f"127.0.0.1:{port}", "Sec-Fetch-Site": "none"})
             r2 = conn2.getresponse()
             r2.read()
             self.assertEqual(r2.status, 200)
-            self.assertIsNone(r2.getheader("Set-Cookie"))
+            sc2 = r2.getheader("Set-Cookie") or ""
+            self.assertIn("farm_session=", sc2)
+            self.assertIn("HttpOnly", sc2)
         finally:
             conn2.close()
 

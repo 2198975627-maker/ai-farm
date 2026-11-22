@@ -37,6 +37,11 @@ class OfficeAccess:
             self.pair_code = ""
             return self._issue({"role": "owner", "csrf": secrets.token_urlsafe(32)})
 
+    def auto_pair_owner(self):
+        """Issue an owner session for trusted loopback auto-pair requests."""
+        with self.lock:
+            return self._issue({"role": "owner", "csrf": secrets.token_urlsafe(32)})
+
     def authenticate(self, token):
         with self.lock, self.store._lock:
             principal = self.credentials.get(hashlib.sha256(token.encode()).hexdigest()) if isinstance(token, str) else None
