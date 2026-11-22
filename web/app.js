@@ -2708,6 +2708,7 @@ document.addEventListener("click", (ev) => {
 
 function setDraftMode(mode) {
   APP_STATE.draftMode = mode === "roundtable" ? "roundtable" : "standard";
+  document.body.classList.toggle("roundtable-active", APP_STATE.draftMode === "roundtable");
   const stdBtn = document.getElementById("topModeStandard");
   const rtBtn = document.getElementById("topModeRoundtable");
   if (stdBtn) {
