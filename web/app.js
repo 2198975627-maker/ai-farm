@@ -808,13 +808,30 @@ function onFloorDragLeave(event) {
   event.currentTarget.classList.remove("drag-over");
 }
 
+async function moveAgentWithConfirm(agentId, targetFloor) {
+  const agent = APP_STATE.agents.find(a => a.id === agentId);
+  const oldFloor = agent ? agent.floor : '';
+  if (oldFloor === targetFloor) return;
+  const floorLabel = { manager: '经理层', worker: '员工层', rest: '休息区' };
+  const involvesManager = oldFloor === 'manager' || targetFloor === 'manager';
+  if (involvesManager) {
+    const ok = window.confirm(`确认将「${agent ? agent.name : agentId}」从「${floorLabel[oldFloor] || oldFloor}」调至「${floorLabel[targetFloor] || targetFloor}」吗？\n\n涉及经理层换岗，请再次确认。`);
+    if (!ok) return;
+  }
+  await callOfficeAction("moveagent", {
+    id: agentId,
+    floor: targetFloor,
+    ...(involvesManager ? { confirm_manager: true } : {}),
+  });
+  showToast(`已将成员调动至 ${floorLabel[targetFloor] || targetFloor}`);
+}
+
 async function onFloorDrop(event, targetFloor) {
   event.preventDefault();
   event.currentTarget.classList.remove("drag-over");
   const agentId = draggedAgentId || event.dataTransfer.getData("text/plain");
   if (!agentId) return;
-  await callOfficeAction("moveagent", { id: agentId, floor: targetFloor });
-  showToast(`🔄 已将成员调动至 ${targetFloor === 'manager' ? '2楼经理层' : targetFloor === 'worker' ? '1楼员工层' : '院子休息'}`);
+  await moveAgentWithConfirm(agentId, targetFloor);
 }
 
 // =========================================================================
@@ -1191,9 +1208,9 @@ function renderSelectedAgentProfile() {
       <div class="section-body">
         <p class="detail-meta">更改成员岗位，也可拖拽成员到对应楼层。</p>
         <div class="detail-actions">
-          <button type="button" class="btn btn-ghost" onclick="callOfficeAction('moveagent', {id:${agentArg}, floor:'manager'})">${icon('users')}调至经理</button>
-          <button type="button" class="btn btn-ghost" onclick="callOfficeAction('moveagent', {id:${agentArg}, floor:'worker'})">${icon('user')}调至员工</button>
-          <button type="button" class="btn btn-ghost" onclick="callOfficeAction('moveagent', {id:${agentArg}, floor:'rest'})">${icon('refresh')}调至休息</button>
+          <button type="button" class="btn btn-ghost" onclick="moveAgentWithConfirm(${agentArg}, 'manager')">${icon('users')}调至经理</button>
+          <button type="button" class="btn btn-ghost" onclick="moveAgentWithConfirm(${agentArg}, 'worker')">${icon('user')}调至员工</button>
+          <button type="button" class="btn btn-ghost" onclick="moveAgentWithConfirm(${agentArg}, 'rest')">${icon('refresh')}调至休息</button>
         </div>
       </div>
     </details>
