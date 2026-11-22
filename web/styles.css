@@ -302,7 +302,12 @@ code { font-family: var(--font-mono); font-size: .88em; background: var(--bg-ins
 .agent-avatar:hover { transform: scale(1.65); z-index: 20; box-shadow: var(--shadow-pop); }
 .agent-avatar img.vendor-favicon { position: absolute; inset: 0; width: 100%; height: 100%; border-radius: 50%; object-fit: cover; background: rgba(255, 255, 255, .95); }
 .agent-avatar.muse-official-icon { background: rgba(255, 255, 255, .94); border: 1px solid var(--accent-border); }
-.role-corner { position: absolute; right: -3px; bottom: -3px; width: 15px; height: 15px; border-radius: 50%; border: 1.5px solid var(--bg-card); font-size: 9px; font-weight: 700; line-height: 1; display: grid; place-items: center; color: var(--on-accent); background: var(--accent); }
+#listManager .agent-avatar,
+.agent-avatar:has(.role-manager) {
+  border: 1.5px solid rgba(226, 52, 70, .86);
+  box-shadow: 0 0 11px rgba(196, 30, 48, .42), 0 0 0 1px rgba(245, 96, 112, .22);
+}
+.role-corner { position: absolute; right: -3px; bottom: -3px; width: 15px; height: 15px; border-radius: 50%; border: 1.5px solid var(--bg-card); font-size: 9px; font-weight: 700; line-height: 1; display: grid; place-items: center; color: #fff7f7; background: #c92a3b; }
 .role-corner.role-worker { background: var(--info); color: var(--on-info); }
 .role-corner.role-rest { background: var(--text-muted); color: #fff; }
 .status-dot { position: absolute; left: -1px; top: -1px; width: 8px; height: 8px; border: 1.5px solid var(--bg-card); border-radius: 50%; background: var(--text-muted); }
