@@ -170,6 +170,13 @@ function launchFarmEntry() {
   }
   window.addEventListener("pointermove", onWindowPointerMove, { passive: true });
 
+  function teardownStage() {
+    window.__farmEntryActive = false;
+    window.removeEventListener("pointermove", onWindowPointerMove);
+    stage.remove();
+    window.dispatchEvent(new Event("farmEntryClosed"));
+  }
+
   // Three.js Setup (with graceful fallback if WebGL is unavailable)
   let renderer;
   try {
@@ -180,10 +187,7 @@ function launchFarmEntry() {
       alpha: false
     });
   } catch (_) {
-    window.__farmEntryActive = false;
-    window.removeEventListener("pointermove", onWindowPointerMove);
-    stage.remove();
-    window.dispatchEvent(new Event("farmEntryClosed"));
+    teardownStage();
     return;
   }
   renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
@@ -642,8 +646,7 @@ function launchFarmEntry() {
     setTimeout(() => {
       if (rafId) cancelAnimationFrame(rafId);
       renderer.dispose();
-      stage.remove();
-      window.dispatchEvent(new Event("farmEntryClosed"));
+      teardownStage();
     }, 580);
   }
 

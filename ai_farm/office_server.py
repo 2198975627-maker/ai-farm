@@ -41,6 +41,18 @@ class OfficeHTTPHandler(BaseHTTPRequestHandler):
                 raise AccessDenied("Forbidden Origin")
         return origin
 
+    def _can_auto_pair(self) -> bool:
+        """Allow automatic pairing only for non-cross-site loopback requests."""
+        return (
+            bool(getattr(self.server, "auto_pair", False))
+            and self.client_address[0] in ("127.0.0.1", "::1")
+            and self.headers.get("Sec-Fetch-Site") != "cross-site"
+        )
+
+    @staticmethod
+    def _session_cookie(session) -> str:
+        return f"farm_session={session['token']}; HttpOnly; SameSite=Strict; Path=/; Max-Age=28800"
+
     def _principal(self, mutate=False):
         authorization = self.headers.get("Authorization", "")
         if authorization:
@@ -183,10 +195,7 @@ class OfficeHTTPHandler(BaseHTTPRequestHandler):
             content = target.read_bytes()
             mime, _ = mimetypes.guess_type(str(target))
             auto_cookie = None
-            if (path in ("/", "/index.html")
-                    and getattr(self.server, "auto_pair", False)
-                    and self.client_address[0] in ("127.0.0.1", "::1")
-                    and self.headers.get("Sec-Fetch-Site") != "cross-site"):
+            if path in ("/", "/index.html") and self._can_auto_pair():
                 has_valid_session = False
                 try:
                     self._principal()
@@ -194,8 +203,7 @@ class OfficeHTTPHandler(BaseHTTPRequestHandler):
                 except AccessDenied:
                     pass
                 if not has_valid_session:
-                    session = self.access.auto_pair_owner()
-                    auto_cookie = f"farm_session={session['token']}; HttpOnly; SameSite=Strict; Path=/; Max-Age=28800"
+                    auto_cookie = self._session_cookie(self.access.auto_pair_owner())
             self.send_response(200)
             ct = mime or "application/octet-stream"
             if ct.startswith("text/") or ct in ("application/javascript", "application/json"):
@@ -231,20 +239,14 @@ class OfficeHTTPHandler(BaseHTTPRequestHandler):
             request = json.loads(self.rfile.read(length).decode("utf-8"))
             if not isinstance(request, dict):
                 raise ValueError("Expected a JSON object")
-            if path not in ("/api/pair", "/api/auto-pair"):
-                principal = self._principal(mutate=True)
             if path == "/api/auto-pair":
-                if (not getattr(self.server, "auto_pair", False)
-                        or self.client_address[0] not in ("127.0.0.1", "::1")
-                        or self.headers.get("Sec-Fetch-Site") == "cross-site"):
+                if not self._can_auto_pair():
                     raise AccessDenied("自动配对仅限本机回环访问。")
                 session = self.access.auto_pair_owner()
-                self._json(200, {"ok": True, "csrf": session["csrf"]},
-                           f"farm_session={session['token']}; HttpOnly; SameSite=Strict; Path=/; Max-Age=28800")
+                self._json(200, {"ok": True, "csrf": session["csrf"]}, self._session_cookie(session))
             elif path == "/api/pair":
                 session = self.access.pair_owner(request.get("code"))
-                self._json(200, {"ok": True, "csrf": session["csrf"]},
-                           f"farm_session={session['token']}; HttpOnly; SameSite=Strict; Path=/; Max-Age=28800")
+                self._json(200, {"ok": True, "csrf": session["csrf"]}, self._session_cookie(session))
             elif path == "/api/connections":
                 self._json(200, {"ok": True, **self.access.issue_member(principal, request)})
             elif path == "/api/revoke":
