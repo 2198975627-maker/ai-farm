@@ -626,7 +626,6 @@ function launchFarmEntry() {
     if (currentScene === "closed") return;
     currentScene = "closed";
     window.__farmEntryActive = false;
-    sessionStorage.setItem("ai_farm_entered", "1");
     stage.classList.add("entry-closing");
     window.removeEventListener("pointermove", onWindowPointerMove);
     window.removeEventListener("resize", onResize);
@@ -837,10 +836,7 @@ function launchFarmEntry() {
 }
 
 window.replayFarmEntry = function () {
-  sessionStorage.removeItem("ai_farm_entered");
   launchFarmEntry();
 };
 
-if (!sessionStorage.getItem("ai_farm_entered")) {
-  launchFarmEntry();
-}
+launchFarmEntry();
