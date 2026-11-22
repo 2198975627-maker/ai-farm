@@ -1375,21 +1375,18 @@ function renderSelectedTaskThread() {
   const call = (handler, ...args) => `${handler}(${args.map(arg => JSON.stringify(arg)).join(', ')})`;
   const actions = {
     claim: { label: '领取任务', icon: 'check', code: call('handleClaimTask', task.id, task.assigned_to || '') },
-    run: { label: channel === 'cli' ? '通过 CLI 执行' : channel === 'api' ? '通过 API 执行' : 'API / CLI 真调执行', icon: 'send', code: call('handleRunAdapterTask', task.id, true) },
+    run: { label: '开始任务', icon: 'send', code: call('handleRunAdapterTask', task.id, true) },
     dryrun: { label: '干跑演练（0 消耗）', icon: 'refresh', code: call('handleRunAdapterTask', task.id, false) },
-    web: { label: '打开网页并复制指令', icon: 'external', code: call('handleOpenWebAndCopyPrompt', task.id) },
-    export: { label: '导出 .md 并复制触发句', icon: 'box', code: call('handleExportTaskMd', task.id) },
-    copy: { label: '仅复制任务指令', icon: 'chat', code: call('handleCopyWorkerPrompt', task.id), readOnly: true },
     diff: { label: '抓取本地 git diff 摘要', icon: 'search', code: call('handleCollectGitDiff', task.id), readOnly: true },
     deliver: { label: '经理统筹交付', icon: 'box', code: call('handleDeliverFinalResult', task.id) },
     accept: { label: '验收通过', icon: 'check', code: call('handleReviewFinalResult', task.id, 'verified') },
     reject: { label: '打回重做', icon: 'undo', code: call('handleReviewFinalResult', task.id, 'rejected') },
-    parentRun: { label: '并行执行 API / CLI 子单', icon: 'send', code: call('handleRunBigTaskSubtasks', task.id, true) },
+    parentRun: { label: '开始全部子单', icon: 'send', code: call('handleRunBigTaskSubtasks', task.id, true) },
     parentDryrun: { label: '批量干跑子单（0 消耗）', icon: 'refresh', code: call('handleRunBigTaskSubtasks', task.id, false) },
     aggregate: { label: '汇总全部子单交付', icon: 'box', code: call('handleAggregateBigTask', task.id) },
     review: { label: '审阅代码与问题清单', icon: 'eye', code: "document.querySelector('#taskThreadContent details[data-section=review]').open = true; document.getElementById('reviewAgentSelect').focus()", readOnly: true },
     reviewDryrun: { label: '干跑 diff 审查', icon: 'search', code: call('handleAutoCodeReview', task.id, false) },
-    reviewLive: { label: '真调审查者读 diff', icon: 'eye', code: call('handleAutoCodeReview', task.id, true) },
+    reviewLive: { label: '开始代码审查', icon: 'eye', code: call('handleAutoCodeReview', task.id, true) },
     reviewPass: { label: '手动审查通过', icon: 'check', code: call('handleSubmitCodeReview', task.id, true, false) },
     reviewReject: { label: '提交问题并打回', icon: 'undo', code: `if (document.getElementById('reviewIssuesInput').value.trim()) { ${call('handleSubmitCodeReview', task.id, false, false)} } else { showToast('请填写实际问题清单后再打回', true); document.getElementById('reviewIssuesInput').focus(); }` },
     merge: { label: '请求合并授权', icon: 'lock', code: call('handleRequestCriticalApproval', task.id, 'merge') },
@@ -1402,11 +1399,7 @@ function renderSelectedTaskThread() {
     const report = document.querySelector('#taskThreadContent details[data-section=report]');
     if (report && current && ['accepted', 'working'].includes(current.status) && APP_STATE.selectedTaskId === current.id) report.open = true;
   })`;
-  if (roundtableParent) {
-    actions.export = { ...actions.copy, label: '复制桌面端单次工单（手动执行）', readOnly: false };
-    actions.copy.readOnly = false;
-  }
-  const chosenExecution = channel === 'desktop' ? 'export' : ['web', 'subscription'].includes(channel) ? 'web' : ['api', 'cli'].includes(channel) ? 'run' : 'copy';
+  const chosenExecution = 'run';
   let primaryKeys = [];
   if (!terminal) {
     if (task.status === 'delivered') primaryKeys = ['accept', 'reject'];
@@ -1493,8 +1486,8 @@ function renderSelectedTaskThread() {
     <details class="detail-section${terminal ? ' hidden' : ''}" data-section="execution"${sectionOpen('execution')}>
       <summary>其他执行方式</summary>
       <div class="section-body">
-        <p class="detail-meta">干跑只演练路由，不代表真实完成。真调遵循模型、额度与降级限制；网页、桌面执行需实际回填结果。</p>
-        <div class="detail-actions">${secondaryActions(['run', 'dryrun', 'web', 'export', 'copy'])}</div>
+        <p class="detail-meta">点击「开始任务」后将由后台自动化脚本（API / CLI / 浏览器自动化）完成执行并自动抓回结果；干跑仅演练路由，不实际执行。</p>
+        <div class="detail-actions">${secondaryActions(['dryrun'])}</div>
       </div>
     </details>
 
@@ -2309,7 +2302,7 @@ async function handleRunAdapterTask(taskId, live = false) {
   if (!res) return;
   await openTaskPrivateThread(taskId);
   if (res) {
-    showToast(`🔌 ${res.mode === 'dry_run' ? 'AgentAdapter 干跑完成 (0消耗)' : '🚀 真实调用完成，结果已写入私聊窗！'}`);
+    showToast(`🔌 ${res.mode === 'dry_run' ? 'AgentAdapter 干跑完成 (0消耗)' : '🚀 自动化任务已执行完成，结果已写回私聊窗！'}`);
   }
 }
 
