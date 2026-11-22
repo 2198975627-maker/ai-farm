@@ -779,6 +779,52 @@ class OfficeAuthTests(unittest.TestCase):
         self.assertEqual(sub_b["status"], "completed")
         self.assertEqual(parent["roundtable_state"]["stage"], "C")
 
+    def test_auto_pair_issues_single_use_cookie_on_loopback_get_and_blocks_cross_site(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        srv = create_server("127.0.0.1", 0, state_path=Path(tmp.name) / "auto.json", auto_pair=True)
+        self.addCleanup(srv.server_close)
+        t = threading.Thread(target=srv.serve_forever, kwargs={"poll_interval": 0.01}, daemon=True)
+        t.start()
+        self.addCleanup(t.join, 5)
+        self.addCleanup(srv.shutdown)
+        port = srv.server_address[1]
+
+        # Cross-site GET / must NOT auto-pair.
+        conn_evil = http.client.HTTPConnection("127.0.0.1", port, timeout=5)
+        try:
+            conn_evil.request("GET", "/", headers={"Host": f"127.0.0.1:{port}", "Sec-Fetch-Site": "cross-site"})
+            r_evil = conn_evil.getresponse()
+            r_evil.read()
+            self.assertEqual(r_evil.status, 200)
+            self.assertIsNone(r_evil.getheader("Set-Cookie"))
+        finally:
+            conn_evil.close()
+
+        # First same-origin / direct GET / auto-pairs once and sets HttpOnly farm_session cookie.
+        conn1 = http.client.HTTPConnection("127.0.0.1", port, timeout=5)
+        try:
+            conn1.request("GET", "/", headers={"Host": f"127.0.0.1:{port}", "Sec-Fetch-Site": "none"})
+            r1 = conn1.getresponse()
+            r1.read()
+            self.assertEqual(r1.status, 200)
+            sc = r1.getheader("Set-Cookie") or ""
+            self.assertIn("farm_session=", sc)
+            self.assertIn("HttpOnly", sc)
+        finally:
+            conn1.close()
+
+        # Second unauthenticated GET / must NOT receive another Set-Cookie (single-use pair_code consumed).
+        conn2 = http.client.HTTPConnection("127.0.0.1", port, timeout=5)
+        try:
+            conn2.request("GET", "/", headers={"Host": f"127.0.0.1:{port}", "Sec-Fetch-Site": "none"})
+            r2 = conn2.getresponse()
+            r2.read()
+            self.assertEqual(r2.status, 200)
+            self.assertIsNone(r2.getheader("Set-Cookie"))
+        finally:
+            conn2.close()
+
 
 if __name__ == "__main__":
     unittest.main()

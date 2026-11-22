@@ -163,9 +163,27 @@ class OfficeHTTPHandler(BaseHTTPRequestHandler):
                 return
             content = target.read_bytes()
             mime, _ = mimetypes.guess_type(str(target))
+            auto_cookie = None
+            if (path in ("/", "/index.html")
+                    and getattr(self.server, "auto_pair", False)
+                    and self.headers.get("Sec-Fetch-Site") != "cross-site"):
+                has_valid_session = False
+                try:
+                    self._principal()
+                    has_valid_session = True
+                except AccessDenied:
+                    pass
+                if not has_valid_session and self.access.pair_code:
+                    try:
+                        session = self.access.pair_owner(self.access.pair_code)
+                        auto_cookie = f"farm_session={session['token']}; HttpOnly; SameSite=Strict; Path=/; Max-Age=28800"
+                    except AccessDenied:
+                        pass
             self.send_response(200)
             self.send_header("Content-Type", f"{mime or 'application/octet-stream'}; charset=utf-8")
             self.send_header("Content-Length", str(len(content)))
+            if auto_cookie:
+                self.send_header("Set-Cookie", auto_cookie)
             self.send_header("Cache-Control", "no-store")
             self.send_header("X-Content-Type-Options", "nosniff")
             self.send_header("X-Frame-Options", "DENY")
@@ -229,7 +247,7 @@ class OfficeHTTPHandler(BaseHTTPRequestHandler):
             self._json(500, {"ok": False, "error": "操作未确认完成，请核查任务状态；不要盲目重试。"})
 
 
-def create_server(host: str = "127.0.0.1", port: int = 8765, state_path: Path | None = None) -> ThreadingHTTPServer:
+def create_server(host: str = "127.0.0.1", port: int = 8765, state_path: Path | None = None, auto_pair: bool = False) -> ThreadingHTTPServer:
     if host not in ("127.0.0.1", "localhost"):
         raise ValueError("办公室只能绑定本机 loopback 地址。")
     store = OfficeStore(state_path=state_path)
@@ -258,6 +276,7 @@ def create_server(host: str = "127.0.0.1", port: int = 8765, state_path: Path | 
     server.access = BoundHandler.access
     server.event_clients = 0
     server.events_closed = False
+    server.auto_pair = bool(auto_pair)
     return server
 
 
@@ -280,15 +299,18 @@ def _copy_to_clipboard(text: str) -> bool:
     return False
 
 
-def run_office_server(host: str = "127.0.0.1", port: int = 8765, state_path: Path | None = None, open_browser: bool = True) -> None:
+def run_office_server(host: str = "127.0.0.1", port: int = 8765, state_path: Path | None = None, open_browser: bool = True, auto_pair: bool = True) -> None:
     import webbrowser
-    server = create_server(host, port, state_path)
+    server = create_server(host, port, state_path, auto_pair=auto_pair)
     url = f"http://{host}:{server.server_address[1]}"
-    copied = _copy_to_clipboard(server.access.pair_code)
     print(f"AI 农场办公室已启动: {url}", flush=True)
-    print(f"本机一次性配对码（10 分钟有效，不要分享）: {server.access.pair_code}", flush=True)
-    if copied:
-        print("配对码已自动复制到剪贴板，打开网页后点击「从剪贴板一键配对」或直接 Ctrl+V 即可进入。", flush=True)
+    if auto_pair:
+        print("已开启本机打开即自动配对（无需手动输入配对码）。", flush=True)
+    else:
+        copied = _copy_to_clipboard(server.access.pair_code)
+        print(f"本机一次性配对码（10 分钟有效，不要分享）: {server.access.pair_code}", flush=True)
+        if copied:
+            print("配对码已自动复制到剪贴板。", flush=True)
     print("按 Ctrl+C 停止服务。", flush=True)
     if open_browser:
         try:
