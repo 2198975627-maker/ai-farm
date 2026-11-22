@@ -26,6 +26,7 @@
       <button type="button" class="btn btn-ghost mobile-roster-toggle" id="mobileRosterToggle" aria-expanded="false" onclick="toggleMobileRoster()">成员 <span id="navTeamCount" class="nav-count">0</span></button>
       <button type="button" class="btn btn-ghost" onclick="openRecruitModal()">+ 招募成员</button>
       <button class="btn btn-primary new-task-trigger" onclick="openNewTaskModal()"><svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg>发布任务</button>
+      <button type="button" class="btn btn-ghost" id="historyToggleBtn" onclick="toggleHistoryPopover()" title="岗位调动与任务历史">历史</button>
       <button class="btn btn-ghost approval-badge-btn" id="approvalBadgeBtn" aria-label="待人工授权" onclick="toggleApprovalDrawer()" title="待人工授权的关键操作">
         <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
         <span class="approval-badge-count hidden" id="approvalBadgeCount">0</span>
@@ -634,6 +635,22 @@
         <button type="button" class="btn btn-primary" onclick="closeAutomationGuideModal()">我知道了</button>
       </div>
     </div>
+  </div>
+  <div class="history-float-wrap">
+    <div id="historyMiniToast" class="wechat-mini-toast hidden" role="status" onclick="openHistoryPopover('moves')">
+      <div class="wechat-mini-head"><span>岗位调动</span><small>点击查看历史</small></div>
+      <div id="historyMiniBody" class="wechat-mini-body"></div>
+    </div>
+    <section id="historyPopover" class="history-popover hidden" aria-label="岗位调动与任务历史">
+      <div class="history-pop-head">
+        <div class="history-pop-tabs">
+          <button type="button" class="r-tab active" id="histTabMoves" onclick="switchHistoryTab('moves')">岗位调动</button>
+          <button type="button" class="r-tab" id="histTabTasks" onclick="switchHistoryTab('tasks')">任务历史</button>
+        </div>
+        <button type="button" class="close-btn" onclick="closeHistoryPopover()" aria-label="关闭历史"><svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M18 6L6 18M6 6l12 12"/></svg></button>
+      </div>
+      <div id="historyPopBody" class="history-pop-body"></div>
+    </section>
   </div>
   <script src="app.js"></script>
 </body>

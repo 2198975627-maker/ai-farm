@@ -161,6 +161,7 @@ async function initOffice() {
     }
   ];
   renderAll();
+  checkHistoryNotifications();
   applyShotParams();
 }
 
@@ -306,6 +307,7 @@ function applySnapshot(snap) {
     APP_STATE.selectedTaskId = APP_STATE.tasks[0].id;
   }
   renderAll();
+  checkHistoryNotifications();
 
   for (const [id, top] of Object.entries(scrollState)) {
     const el = document.getElementById(id);
@@ -902,11 +904,92 @@ function renderTaskBoard() {
   strip.querySelectorAll('[data-open-task]').forEach(button => button.addEventListener('click', () => openTaskPrivateThread(button.dataset.openTask)));
 }
 
+function isMoveOrHistoryMessage(msg) {
+  const kind = msg.kind || '';
+  if (kind === 'transfer_notice') return true;
+  if (kind === 'system_notice' && /调动|换岗|替换|额度|楼层|休息/.test(msg.text || '')) return true;
+  return false;
+}
+
+let seenMoveMessageIds = null;
+let miniToastTimer = null;
+let activeHistoryTab = 'moves';
+
+function checkHistoryNotifications() {
+  const moves = (APP_STATE.groupMessages || []).filter(isMoveOrHistoryMessage);
+  if (seenMoveMessageIds === null) {
+    seenMoveMessageIds = new Set(moves.map(m => m.id));
+    return;
+  }
+  const fresh = moves.filter(m => !seenMoveMessageIds.has(m.id));
+  moves.forEach(m => seenMoveMessageIds.add(m.id));
+  if (fresh.length > 0) {
+    showWechatMiniToast(stripEmoji(fresh[fresh.length - 1].text || '成员岗位已更新'));
+  }
+  if (!document.getElementById('historyPopover')?.classList.contains('hidden')) {
+    renderHistoryPopover();
+  }
+}
+
+function showWechatMiniToast(text) {
+  const el = document.getElementById('historyMiniToast');
+  const body = document.getElementById('historyMiniBody');
+  if (!el || !body) return;
+  body.textContent = text;
+  el.classList.remove('hidden');
+  if (miniToastTimer) clearTimeout(miniToastTimer);
+  miniToastTimer = setTimeout(() => {
+    el.classList.add('hidden');
+  }, 4000);
+}
+
+function toggleHistoryPopover() {
+  const pop = document.getElementById('historyPopover');
+  if (!pop) return;
+  if (pop.classList.contains('hidden')) openHistoryPopover(activeHistoryTab);
+  else closeHistoryPopover();
+}
+
+function openHistoryPopover(tab = 'moves') {
+  activeHistoryTab = tab === 'tasks' ? 'tasks' : 'moves';
+  document.getElementById('historyMiniToast')?.classList.add('hidden');
+  document.getElementById('historyPopover')?.classList.remove('hidden');
+  switchHistoryTab(activeHistoryTab);
+}
+
+function closeHistoryPopover() {
+  document.getElementById('historyPopover')?.classList.add('hidden');
+}
+
+function switchHistoryTab(tab) {
+  activeHistoryTab = tab === 'tasks' ? 'tasks' : 'moves';
+  document.getElementById('histTabMoves')?.classList.toggle('active', activeHistoryTab === 'moves');
+  document.getElementById('histTabTasks')?.classList.toggle('active', activeHistoryTab === 'tasks');
+  renderHistoryPopover();
+}
+
+function renderHistoryPopover() {
+  const body = document.getElementById('historyPopBody');
+  if (!body) return;
+  if (activeHistoryTab === 'moves') {
+    const moves = (APP_STATE.groupMessages || []).filter(isMoveOrHistoryMessage).slice(-40).reverse();
+    body.innerHTML = moves.length
+      ? moves.map(m => `<div class="history-item"><div class="history-item-meta"><span>${escapeHTML(stripEmoji(m.sender_name || '系统'))}</span><span>${escapeHTML(m.created_at || '')}</span></div><div>${escapeHTML(stripEmoji(m.text || ''))}</div></div>`).join('')
+      : '<p class="detail-meta">暂无岗位调动记录。</p>';
+  } else {
+    const hist = (APP_STATE.tasks || []).slice().reverse().slice(0, 40);
+    body.innerHTML = hist.length
+      ? hist.map(t => `<div class="history-item" style="cursor:pointer;" onclick="openTaskPrivateThread('${escapeHTML(t.id)}'); closeHistoryPopover();"><div class="history-item-meta"><span>${escapeHTML(t.id)}</span><span>${escapeHTML(taskStatusLabel(t.status))}</span></div><div><strong>${escapeHTML(t.title)}</strong></div></div>`).join('')
+      : '<p class="detail-meta">暂无任务历史。</p>';
+  }
+}
+
 function renderGroupChat() {
   renderTaskBoard();
   const stream = document.getElementById("groupChatStream");
   const nearBottom = stream.scrollHeight - stream.scrollTop - stream.clientHeight < 100;
-  stream.innerHTML = APP_STATE.groupMessages.map(msg => {
+  const deliveryMessages = (APP_STATE.groupMessages || []).filter(msg => !isMoveOrHistoryMessage(msg));
+  stream.innerHTML = deliveryMessages.map(msg => {
     const isOwner = msg.sender_id === "owner" || msg.sender_id === "gao";
     const kind = msg.kind || 'chat';
     const task = msg.task_id ? APP_STATE.tasks.find(t => t.id === msg.task_id) : null;
