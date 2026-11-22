@@ -55,7 +55,10 @@
           <h2>工作成员</h2>
           <span class="rail-count" id="rosterTotalBadge" title="一个成员对应一个独立模型">0 成员</span>
         </div>
-        <button class="btn btn-xs btn-ghost" onclick="openRecruitModal()">+ 添加</button>
+        <div style="display:flex;gap:6px;">
+          <button type="button" class="btn btn-xs btn-ghost" onclick="handleSyncProfiles()" title="实时核对可用 API 额度与网页登录状态">刷新额度</button>
+          <button type="button" class="btn btn-xs btn-ghost" onclick="openRecruitModal()">+ 添加</button>
+        </div>
       </div>
       <div class="roster-toolbar">
         <input type="search" id="agentSearchInput" aria-label="搜索模型、厂商或特长" class="search-input" placeholder="搜索成员、模型或厂商" oninput="renderRoster()" />

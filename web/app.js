@@ -700,7 +700,7 @@ function renderAgentCardHTML(agent) {
       <span class="agent-name">${escapeHTML(agent.name)}</span><div class="agent-subline">${escapeHTML(agent.model)} · ${escapeHTML(truthStatus)}</div>
     </div></div>
     <div class="agent-summary">${escapeHTML(agent.specialty || '尚未填写擅长的工作')}</div>
-    <div class="agent-card-footer"><span>${escapeHTML(agent.badge || agent.access_kind)}</span><span class="${quotaClass}">${hasQuota ? '剩余 ' + escapeHTML(agent.quota_percent) + '%' : '额度未填'}</span></div>
+    <div class="agent-card-footer"><span>${escapeHTML(agent.badge || agent.access_kind)}</span><span class="${quotaClass}">${hasQuota ? '剩余 ' + escapeHTML(agent.quota_percent) + '%' : (Number(agent.tokens_used || 0) > 0 ? '已用 ' + escapeHTML(agent.tokens_used) + ' tok' : '额度未填')}</span></div>
   </div>`;
 }
 
