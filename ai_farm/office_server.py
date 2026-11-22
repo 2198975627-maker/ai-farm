@@ -139,6 +139,25 @@ class OfficeHTTPHandler(BaseHTTPRequestHandler):
         try:
             self._origin()
             path = urlparse(self.path).path
+            if path.startswith("/api/icons/"):
+                principal = self._principal()
+                self.access.require_owner(principal)
+                fname = Path(unquote(path[len("/api/icons/"):])).name
+                icons_root = (self.store.state_path.parent / "icons").resolve()
+                icon_file = (icons_root / fname).resolve()
+                if not fname or icon_file.parent != icons_root or not icon_file.is_file():
+                    self._json(404, {"ok": False, "error": "Icon not found"})
+                    return
+                data = icon_file.read_bytes()
+                mime, _ = mimetypes.guess_type(str(icon_file))
+                self.send_response(200)
+                self.send_header("Content-Type", mime or "image/png")
+                self.send_header("Content-Length", str(len(data)))
+                self.send_header("Cache-Control", "public, max-age=3600")
+                self.send_header("X-Content-Type-Options", "nosniff")
+                self.end_headers()
+                self.wfile.write(data)
+                return
             if path.startswith("/api/"):
                 principal = self._principal()
                 if path == "/api/session":

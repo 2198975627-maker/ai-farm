@@ -625,6 +625,7 @@ class OfficeStore(AutomationMixin, RoundtableMixin):
                 json.dumps({"id": slug_id, "vendor": vendor, "login_url": login_url, "logged_in_at": _now_iso()}, ensure_ascii=False),
                 encoding="utf-8",
             )
+        self._schedule_vendor_icon_fetch(agent)
         self.state["agents"].append(agent)
         chief = self._chief_agent()
         self._append_group_msg(
@@ -1969,6 +1970,7 @@ class OfficeStore(AutomationMixin, RoundtableMixin):
             agent["login_state"] = login["state"]
             agent["login_detail"] = login["detail"]
             agent["login_channel"] = login["channel"]
+            self._schedule_vendor_icon_fetch(agent)
         self.save()
         return {"synced_at": now, "count": len(synced), "details": synced}
 
@@ -4411,6 +4413,93 @@ class OfficeStore(AutomationMixin, RoundtableMixin):
     }
     _IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".webp", ".gif"}
     _TEXT_EXTS = {".txt", ".md", ".py", ".js", ".ts", ".json", ".csv", ".log", ".yaml", ".yml", ".html", ".css"}
+
+    _VENDOR_DOMAINS = {
+        "deepseek": "chat.deepseek.com",
+        "openai": "chatgpt.com",
+        "chatgpt": "chatgpt.com",
+        "anthropic": "claude.ai",
+        "claude": "claude.ai",
+        "gemini": "gemini.google.com",
+        "google": "gemini.google.com",
+        "qwen": "qianwen.com",
+        "千问": "qianwen.com",
+        "kimi": "kimi.moonshot.cn",
+        "doubao": "www.doubao.com",
+        "豆包": "www.doubao.com",
+        "glm": "chatglm.cn",
+        "grok": "grok.com",
+        "mistral": "chat.mistral.ai",
+        "perplexity": "www.perplexity.ai",
+        "cohere": "cohere.com",
+    }
+
+    def _vendor_icon_domain(self, agent: dict[str, Any]) -> str:
+        from urllib.parse import urlparse
+        for key in ("login_url", "usage_url", "base_url"):
+            raw = str(agent.get(key) or "").strip()
+            if raw.startswith(("http://", "https://")):
+                host = (urlparse(raw).hostname or "").lower()
+                if host and not host.endswith(".invalid") and host not in ("localhost", "127.0.0.1"):
+                    if key == "base_url" and host.startswith("api."):
+                        host = host[4:]
+                    return host
+        hay = f"{agent.get('vendor', '')} {agent.get('name', '')}".lower()
+        for k, dom in self._VENDOR_DOMAINS.items():
+            if k in hay:
+                return dom
+        return ""
+
+    def _schedule_vendor_icon_fetch(self, agent: dict[str, Any]) -> None:
+        if agent.get("access_kind") == "chief" or agent.get("id") in ("chief", "muse"):
+            return
+        safe_slug = re.sub(r"[^a-z0-9._-]", "-", str(agent.get("vendor") or agent.get("id") or "ai").lower()).strip("-") or "ai"
+        icons_dir = self.state_path.parent / "icons"
+        for ext in ("png", "svg", "ico"):
+            existing = icons_dir / f"{safe_slug}.{ext}"
+            if existing.is_file() and existing.stat().st_size > 100:
+                agent["icon_url"] = f"/api/icons/{existing.name}"
+                return
+        domain = self._vendor_icon_domain(agent)
+        if not domain:
+            return
+
+        def _fetch():
+            import urllib.request
+            for url in (
+                f"https://www.google.com/s2/favicons?domain={domain}&sz=64",
+                f"https://{domain}/favicon.ico",
+            ):
+                try:
+                    req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+                    with urllib.request.urlopen(req, timeout=4) as resp:
+                        data = resp.read(262_145)
+                    if len(data) < 100 or len(data) > 262_144:
+                        continue
+                    if data[:4] == b"\x89PNG":
+                        ext = "png"
+                    elif data[:4] == b"\x00\x00\x01\x00":
+                        ext = "ico"
+                    elif b"<svg" in data[:300].lower():
+                        ext = "svg"
+                    else:
+                        continue
+                    icons_dir.mkdir(parents=True, exist_ok=True)
+                    dest = icons_dir / f"{safe_slug}.{ext}"
+                    dest.write_bytes(data)
+                    with self._lock:
+                        for a in self.state.get("agents", []):
+                            if a.get("id") == agent.get("id"):
+                                a["icon_url"] = f"/api/icons/{dest.name}"
+                        try:
+                            self.save()
+                        except Exception:
+                            pass
+                    return
+                except Exception:
+                    continue
+
+        threading.Thread(target=_fetch, name=f"icon-{safe_slug}", daemon=True).start()
 
     def openweblogin(self, payload: dict[str, Any]) -> dict[str, Any]:
         from .adapters.web import open_web_login_browser

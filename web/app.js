@@ -549,6 +549,7 @@ const LOCAL_VENDOR_ICONS = [
 ];
 
 function getLocalVendorIcon(agent) {
+  if (agent.icon_url) return agent.icon_url;
   const hay = `${agent.vendor || ''} ${agent.name || ''} ${agent.brand || ''}`.toLowerCase();
   for (const [key, src] of LOCAL_VENDOR_ICONS) {
     if (hay.includes(key)) return src;
