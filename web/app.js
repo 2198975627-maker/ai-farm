@@ -530,29 +530,30 @@ function recruitWizardGo(delta) {
 // =========================================================================
 // 头像生成（严守铁律：Muse 是白底圆角方块 + 蓝色手写一笔 M，绝非 Claude 星芒；其他用诚实文字标识）
 // =========================================================================
-const VENDOR_BADGE_THEMES = {
-  deepseek: { bg: '#eef2ff', fg: '#4f46e5', bd: '#c7d2fe', mark: 'DS', svg: '<path d="M9 12a3 3 0 1 1 6 0c0 2-3 4-3 4s-3-2-3-4z" fill="currentColor"/><circle cx="12" cy="11" r="1.1" fill="#eef2ff"/>' },
-  openai: { bg: '#ecfdf5', fg: '#059669', bd: '#a7f3d0', mark: 'OA', svg: '<circle cx="12" cy="12" r="5.5" stroke="currentColor" stroke-width="1.8" fill="none"/><path d="M12 6.5v11M7.2 9.2l9.6 5.6M16.8 9.2l-9.6 5.6" stroke="currentColor" stroke-width="1.4"/>' },
-  chatgpt: { bg: '#ecfdf5', fg: '#059669', bd: '#a7f3d0', mark: 'GPT', svg: '<circle cx="12" cy="12" r="5.5" stroke="currentColor" stroke-width="1.8" fill="none"/><path d="M12 6.5v11M7.2 9.2l9.6 5.6M16.8 9.2l-9.6 5.6" stroke="currentColor" stroke-width="1.4"/>' },
-  gemini: { bg: '#eff6ff', fg: '#2563eb', bd: '#bfdbfe', mark: 'Ge', svg: '<path d="M12 5l1.9 5.1L19 12l-5.1 1.9L12 19l-1.9-5.1L5 12l5.1-1.9z" fill="currentColor"/>' },
-  google: { bg: '#eff6ff', fg: '#2563eb', bd: '#bfdbfe', mark: 'G', svg: '<path d="M12 5l1.9 5.1L19 12l-5.1 1.9L12 19l-1.9-5.1L5 12l5.1-1.9z" fill="currentColor"/>' },
-  qwen: { bg: '#f5f3ff', fg: '#7c3aed', bd: '#ddd6fe', mark: 'Qw', svg: '<path d="M12 6a6 6 0 1 0 4.2 10.2L18.5 18.5" stroke="currentColor" stroke-width="2" fill="none" stroke-linecap="round"/><circle cx="12" cy="12" r="2.2" fill="currentColor"/>' },
-  grok: { bg: '#f4f4f5', fg: '#18181b', bd: '#d4d4d8', mark: 'Gk', svg: '<path d="M7 17L17 7M9 7h8v8" stroke="currentColor" stroke-width="2" fill="none" stroke-linecap="round" stroke-linejoin="round"/>' },
-  kimi: { bg: '#f0f9ff', fg: '#0284c7', bd: '#bae6fd', mark: 'Km', svg: '<path d="M8 6v12M16 6l-6 6 6 6" stroke="currentColor" stroke-width="2.1" fill="none" stroke-linecap="round" stroke-linejoin="round"/>' },
-  doubao: { bg: '#fff1f2', fg: '#e11d48', bd: '#fecdd3', mark: '豆', svg: '<circle cx="12" cy="12" r="5.5" stroke="currentColor" stroke-width="1.8" fill="none"/><circle cx="10" cy="11.2" r="1" fill="currentColor"/><circle cx="14" cy="11.2" r="1" fill="currentColor"/><path d="M9.5 14.2c1.5 1 3.5 1 5 0" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" fill="none"/>' },
-  glm: { bg: '#eef2ff', fg: '#1d4ed8', bd: '#bfdbfe', mark: 'Z', svg: '<path d="M7.5 8h9l-9 8h9" stroke="currentColor" stroke-width="2" fill="none" stroke-linecap="round" stroke-linejoin="round"/>' },
-  anthropic: { bg: '#fff7ed', fg: '#c2410c', bd: '#fed7aa', mark: 'Cl', svg: '<path d="M12 6l4.8 12M12 6L7.2 18M9 14h6" stroke="currentColor" stroke-width="1.9" fill="none" stroke-linecap="round"/>' },
-  workbuddy: { bg: '#ecfeff', fg: '#0e7490', bd: '#a5f3fc', mark: 'WB', svg: '<rect x="7" y="8" width="10" height="8" rx="2" stroke="currentColor" stroke-width="1.8" fill="none"/><path d="M10 12h4" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/>' },
-  dola: { bg: '#fdf4ff', fg: '#a21caf', bd: '#f5d0fe', mark: 'Do', svg: '<circle cx="12" cy="12" r="5.5" stroke="currentColor" stroke-width="1.8" fill="none"/><circle cx="12" cy="12" r="2" fill="currentColor"/>' },
-  exaone: { bg: '#fef2f2', fg: '#b91c1c', bd: '#fecaca', mark: 'EX', svg: '<path d="M8 8l8 8M16 8l-8 8" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>' },
-};
+const LOCAL_VENDOR_ICONS = [
+  ['deepseek', '/icons/deepseek.png'],
+  ['openai', '/icons/openai.png'],
+  ['chatgpt', '/icons/openai.png'],
+  ['gpt', '/icons/openai.png'],
+  ['gemini', '/icons/gemini.svg'],
+  ['google', '/icons/gemini.svg'],
+  ['qwen', '/icons/qwen.png'],
+  ['千问', '/icons/qwen.png'],
+  ['grok', '/icons/grok.png'],
+  ['kimi', '/icons/kimi.png'],
+  ['doubao', '/icons/doubao.png'],
+  ['豆包', '/icons/doubao.png'],
+  ['glm', '/icons/glm.png'],
+  ['anthropic', '/icons/anthropic.png'],
+  ['claude', '/icons/anthropic.png'],
+];
 
-function getVendorTheme(agent) {
+function getLocalVendorIcon(agent) {
   const hay = `${agent.vendor || ''} ${agent.name || ''} ${agent.brand || ''}`.toLowerCase();
-  for (const [k, theme] of Object.entries(VENDOR_BADGE_THEMES)) {
-    if (hay.includes(k)) return theme;
+  for (const [key, src] of LOCAL_VENDOR_ICONS) {
+    if (hay.includes(key)) return src;
   }
-  return { bg: '#f1f5f9', fg: '#334155', bd: '#cbd5e1', mark: (agent.vendor || agent.name || 'AI').slice(0, 2).toUpperCase(), svg: '' };
+  return '';
 }
 
 function renderAvatarHTML(agent) {
@@ -571,13 +572,12 @@ function renderAvatarHTML(agent) {
       </div>
     `;
   }
-  const theme = getVendorTheme(agent);
-  const inner = theme.svg
-    ? `<svg width="18" height="18" viewBox="0 0 24 24" aria-hidden="true">${theme.svg}</svg>`
-    : `<span data-preserve-text>${escapeHTML(theme.mark)}</span>`;
+  const iconSrc = getLocalVendorIcon(agent);
+  const shortLabel = (agent.vendor || agent.name || "AI").slice(0, 2).toUpperCase();
+  const imgTag = iconSrc ? `<img class="vendor-favicon" src="${escapeHTML(iconSrc)}" alt="${escapeHTML(agent.vendor || '')}" onerror="this.remove()" />` : '';
   return `
-    <div class="agent-avatar" style="background:${theme.bg};color:${theme.fg};border-color:${theme.bd};" onmouseenter="showAgentHoverCard(event, '${escapeHTML(agent.id)}')" onmouseleave="hideAgentHoverCard()">
-      ${inner}
+    <div class="agent-avatar" onmouseenter="showAgentHoverCard(event, '${escapeHTML(agent.id)}')" onmouseleave="hideAgentHoverCard()">
+      <span data-preserve-text>${escapeHTML(shortLabel)}</span>${imgTag}
       <span class="status-dot ${dotClass}"></span>${corner}
     </div>
   `;

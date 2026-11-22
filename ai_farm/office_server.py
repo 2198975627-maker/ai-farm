@@ -180,7 +180,10 @@ class OfficeHTTPHandler(BaseHTTPRequestHandler):
                     except AccessDenied:
                         pass
             self.send_response(200)
-            self.send_header("Content-Type", f"{mime or 'application/octet-stream'}; charset=utf-8")
+            ct = mime or "application/octet-stream"
+            if ct.startswith("text/") or ct in ("application/javascript", "application/json"):
+                ct = f"{ct}; charset=utf-8"
+            self.send_header("Content-Type", ct)
             self.send_header("Content-Length", str(len(content)))
             if auto_cookie:
                 self.send_header("Set-Cookie", auto_cookie)
