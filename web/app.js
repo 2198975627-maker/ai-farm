@@ -899,7 +899,7 @@ function renderGroupChat() {
     const task = msg.task_id ? APP_STATE.tasks.find(t => t.id === msg.task_id) : null;
     const senderIcon = ({ task_card: 'box', big_task_card: 'users', private_report_lock: 'lock', final_delivery_card: 'check', error: 'alert', bus_error: 'alert', automation_status: 'check' })[kind] || (isOwner ? 'user' : 'chat');
     const bodyText = kind === 'private_report_lock' && task
-      ? `${stripEmoji(msg.sender_name)} 已提交结论（${task.title}）`
+      ? `${stripEmoji(msg.sender_name)} 已拉回/提交结果（${task.title}）：\n${task.latest_report_summary || msg.text || ''}`
       : (msg.text || '');
     const fullText = formatChatTextWithMentions(bodyText);
     return `<article class="chat-bubble ${isOwner ? 'from-gao' : ''} kind-${escapeHTML(kind)}">
@@ -1495,20 +1495,21 @@ function renderRoundtablePanel(container, task, sectionOpen) {
       <p class="detail-meta" data-preserve-text>${escapeHTML(task.goal || '未填写总目标')}</p>
     </header>
     <ol class="roundtable-progress" aria-label="圆桌五阶段">${ROUNDTABLE_STAGES.map((label, index) => `<li class="${index < gate.stage ? 'done' : index === gate.stage ? 'current' : ''}"${index === gate.stage ? ' aria-current="step"' : ''}><span>Stage ${index}</span><strong>${label}</strong></li>`).join('')}</ol>
-    <p class="detail-meta roundtable-pass">已用 Pass ${escapeHTML(state.passes_used ?? '未提供')} / 2 · 固定 1 轮对抗 + 1 轮对比 · 自动调用 ${escapeHTML(state.calls_used ?? '未提供')} / 5</p>
-    <p class="detail-meta">Stage 4：A、B 各不超过 3 条短评，reply_hint=false；只传结论、问题清单和增量差异，不重写全文。</p>
-    <dl class="roundtable-seats">${['A', 'B', 'C'].map(seat => { const a = roundtableSeat(state, seat); return `<div><dt>经理 ${seat}</dt><dd data-preserve-text>${escapeHTML(a.name || a.id)}<small>${escapeHTML(a.vendor)} / ${escapeHTML(a.model)} · ${['web', 'subscription', 'desktop'].includes(a.access_kind) ? '人工回填' : escapeHTML(a.access_kind || '通道未标注')}</small></dd></div>`; }).join('')}</dl>
-    <div class="roundtable-notice" role="status"><p>${notice}</p>${local.notice ? `<p data-preserve-text>${escapeHTML(local.notice)}</p>` : ''}${local.busy ? '<p>请求处理中，操作已锁定。请勿重复提交。</p>' : ''}</div>
+    <dl class="roundtable-seats">${['A', 'B', 'C'].map(seat => { const a = roundtableSeat(state, seat); return `<div><dt>经理 ${seat}</dt><dd data-preserve-text>${escapeHTML(a.name || a.id)}<small>${escapeHTML(a.vendor)} / ${escapeHTML(a.model)}</small></dd></div>`; }).join('')}</dl>
+    <div class="roundtable-notice" role="status"><p>${notice}</p>${local.notice ? `<p data-preserve-text>${escapeHTML(local.notice)}</p>` : ''}${local.busy ? '<p>处理中…</p>' : ''}</div>
     <fieldset class="roundtable-controls"${local.busy ? ' disabled' : ''}><legend class="roundtable-sr-only">圆桌操作</legend>
       <div class="detail-actions">
         <button type="button" class="btn btn-primary" data-rt-action="auto_start"${['running', 'waiting_manual'].includes(task.automation?.status) ? ' disabled' : ''}>一键自动运行</button>
-        ${['running', 'waiting_manual'].includes(task.automation?.status) ? '<button type="button" class="btn btn-danger" data-rt-action="auto_stop">停止自动</button>' : ''}
-        <button type="button" class="btn btn-ghost" data-rt-action="step"${canRun ? '' : ' disabled'}>${gate.manual ? '准备当前席位交接' : '推进单步'}</button>
-        <button type="button" class="btn btn-ghost" data-rt-action="plan">干跑预览</button>
-        <button type="button" class="btn btn-ghost" data-rt-action="refresh">刷新</button>
+        ${['running', 'waiting_manual'].includes(task.automation?.status) ? '<button type="button" class="btn btn-danger" data-rt-action="auto_stop">停止</button>' : ''}
       </div>
-      ${task.automation?.status ? `<p class="detail-meta">自动编排状态：<strong>${escapeHTML(task.automation.status)}</strong>（${escapeHTML(task.automation.reason || '')} · 已用 ${escapeHTML(task.automation.calls_used || 0)} / ${escapeHTML(task.automation.max_calls || 0)} 次）</p>` : ''}
-      <p class="detail-meta">不自动轮询、不自动重发。API Key 仅读环境变量；额度未知时以「额度未填」为准。</p>
+      <details class="detail-section"><summary>单步与刷新</summary>
+        <div class="detail-actions" style="margin-top:8px;">
+          <button type="button" class="btn btn-xs btn-ghost" data-rt-action="step"${canRun ? '' : ' disabled'}>${gate.manual ? '准备当前席位交接' : '推进单步'}</button>
+          <button type="button" class="btn btn-xs btn-ghost" data-rt-action="plan">干跑预览</button>
+          <button type="button" class="btn btn-xs btn-ghost" data-rt-action="refresh">刷新状态</button>
+        </div>
+      </details>
+      ${task.automation?.status ? `<p class="detail-meta">自动进度：<strong>${escapeHTML(task.automation.status)}</strong>（${escapeHTML(task.automation.reason || '')}）</p>` : ''}
       ${local.plan ? `<details class="detail-section" data-section="rt-plan"${sectionOpen('rt-plan', true)}><summary>干跑计划 · 未调用模型，未生成任何成果</summary>${roundtableOutput(local.plan)}</details>` : ''}
       <details class="detail-section" data-section="rt-basket"${sectionOpen('rt-basket', gate.stage === 0)}><summary>Stage 0 · 资料篮与 1F 子单</summary><div class="section-body">
         <p class="detail-meta">资料篮只收【结论】【改动文件】【测试结果】，不把 1F 对话全文带上圆桌。点开子单，沿用原执行与汇报流程。</p>

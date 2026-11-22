@@ -24,27 +24,24 @@
     </div>
     <div class="topbar-actions">
       <button type="button" class="btn btn-ghost mobile-roster-toggle" id="mobileRosterToggle" aria-expanded="false" onclick="toggleMobileRoster()">成员 <span id="navTeamCount" class="nav-count">0</span></button>
-      <button class="btn btn-primary new-task-trigger" onclick="openNewTaskModal()"><svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg>新任务</button>
-      <button class="btn btn-ghost approval-badge-btn" id="approvalBadgeBtn" aria-label="待人工授权" onclick="toggleApprovalDrawer()" title="待人工授权的关键操作（合并/删代码/部署）">
+      <button type="button" class="btn btn-ghost" onclick="openRecruitModal()">+ 招募成员</button>
+      <button class="btn btn-primary new-task-trigger" onclick="openNewTaskModal()"><svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg>发布任务</button>
+      <button class="btn btn-ghost approval-badge-btn" id="approvalBadgeBtn" aria-label="待人工授权" onclick="toggleApprovalDrawer()" title="待人工授权的关键操作">
         <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
         <span class="approval-badge-count hidden" id="approvalBadgeCount">0</span>
       </button>
 
-      <!-- 低频配置、额度、连接与技能收进「更多」 -->
+      <!-- 极简辅助菜单 -->
       <details class="topbar-dropdown" id="toolsDropdown">
         <summary class="btn btn-ghost dropdown-trigger">更多 <svg class="icon icon-sm" viewBox="0 0 24 24" aria-hidden="true"><path d="M6 9l6 6 6-6"/></svg></summary>
         <div class="dropdown-menu dropdown-menu-tools">
-          <button type="button" class="btn btn-ghost dropdown-item" onclick="closeTopbarDropdown('toolsDropdown'); openRecruitModal()">添加 / 配置成员</button>
-          <button type="button" class="btn btn-ghost dropdown-item" id="tabBtnSkills" onclick="closeTopbarDropdown('toolsDropdown'); switchMainView('skills')">技能库与裁判</button>
-          <button type="button" class="btn btn-ghost dropdown-item" onclick="closeTopbarDropdown('toolsDropdown'); openConnections()">任务范围连接与撤销</button>
-          <button type="button" class="btn btn-ghost dropdown-item" onclick="closeTopbarDropdown('toolsDropdown'); openBigTaskModal()">拆分大任务</button>
-          <button type="button" class="btn btn-ghost dropdown-item" id="autoExecuteToggleBtn" onclick="handleToggleAutoExecute()" title="低风险任务自动执行开关（默认关闭；关键操作永远先人工授权）">自动执行低风险: 关</button>
-          <button type="button" class="btn btn-ghost dropdown-item" onclick="closeTopbarDropdown('toolsDropdown'); handleSyncProfiles()">同步全队资料 / 额度</button>
+          <button type="button" class="btn btn-ghost dropdown-item" id="tabBtnSkills" onclick="closeTopbarDropdown('toolsDropdown'); switchMainView('skills')">技能库</button>
+          <button type="button" class="btn btn-ghost dropdown-item" onclick="closeTopbarDropdown('toolsDropdown'); openConnections()">连接与授权</button>
+          <button type="button" class="btn btn-ghost dropdown-item" id="autoExecuteToggleBtn" onclick="handleToggleAutoExecute()">自动执行低风险: 关</button>
+          <button type="button" class="btn btn-ghost dropdown-item" onclick="closeTopbarDropdown('toolsDropdown'); handleLoadSampleTeam()">载入示例团队</button>
           <button type="button" class="btn btn-ghost dropdown-item" onclick="closeTopbarDropdown('toolsDropdown'); handleSeedExampleTask()">塞入示例任务</button>
-          <button type="button" class="btn btn-ghost dropdown-item" onclick="closeTopbarDropdown('toolsDropdown'); handleLoadSampleTeam()">载入示例团队（体验分工）</button>
-          <button type="button" class="btn btn-ghost dropdown-item" onclick="closeTopbarDropdown('toolsDropdown'); openAutomationGuideModal()">调用与自动化指南</button>
           <div class="dropdown-divider"></div>
-          <button type="button" class="btn btn-ghost dropdown-item dropdown-item-danger" onclick="closeTopbarDropdown('toolsDropdown'); handleResetDemo()">重置为空白工作台</button>
+          <button type="button" class="btn btn-ghost dropdown-item dropdown-item-danger" onclick="closeTopbarDropdown('toolsDropdown'); handleResetDemo()">重置工作台</button>
         </div>
       </details>
     </div>
@@ -100,11 +97,11 @@
     <section class="center-stage" id="paneChat" aria-label="群工作对话与任务">
       <div class="workspace-toolbar">
         <div class="workspace-tabs" aria-label="任务切换">
-          <span class="stage-title-compact">群工作对话</span>
+          <span class="stage-title-compact">模型交互与任务交付</span>
           <span class="workspace-date" id="workspaceDate"></span>
           <span class="task-count-pill">任务 <strong id="taskTotalCount">0</strong></span>
         </div>
-        <button class="btn btn-link" onclick="toggleWorkspaceOverview()" id="overviewToggle" aria-expanded="false" aria-controls="workspaceOverview">工作概况 <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M6 9l6 6 6-6"/></svg></button>
+        <button class="btn btn-link hidden" onclick="toggleWorkspaceOverview()" id="overviewToggle" aria-expanded="false" aria-controls="workspaceOverview">概况</button>
       </div>
       <div id="workspaceOverview" class="workspace-overview hidden">
         <div class="top-progress" id="topProgressStats">

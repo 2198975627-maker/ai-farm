@@ -665,6 +665,13 @@ class AutomationRunner:
                 self._check(parent_id)
                 attempt = self._record(parent_id)["attempts"][key]
                 attempt.update(status="completed", result=copy.deepcopy(result))
+                if kind == "manager":
+                    stage_key = data.get("stage_key", "")
+                    self.store._append_group_msg(
+                        sender_id=agent["id"], sender_name=agent["name"], sender_role="manager",
+                        kind="roundtable_step", task_id=parent_id,
+                        text=f"阶段 {stage_key} 已完成（{agent['name']} · {agent.get('model', '')}），已交棒下一席。",
+                    )
                 self.store.save()
             return True
         except Exception as exc:
