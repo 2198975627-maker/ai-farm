@@ -170,13 +170,22 @@ function launchFarmEntry() {
   }
   window.addEventListener("pointermove", onWindowPointerMove, { passive: true });
 
-  // Three.js Setup
-  const renderer = new THREE.WebGLRenderer({
-    canvas,
-    antialias: true,
-    powerPreference: "high-performance",
-    alpha: false
-  });
+  // Three.js Setup (with graceful fallback if WebGL is unavailable)
+  let renderer;
+  try {
+    renderer = new THREE.WebGLRenderer({
+      canvas,
+      antialias: true,
+      powerPreference: "high-performance",
+      alpha: false
+    });
+  } catch (_) {
+    window.__farmEntryActive = false;
+    window.removeEventListener("pointermove", onWindowPointerMove);
+    stage.remove();
+    window.dispatchEvent(new Event("farmEntryClosed"));
+    return;
+  }
   renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
   renderer.setSize(window.innerWidth, window.innerHeight);
   renderer.toneMapping = THREE.ACESFilmicToneMapping;

@@ -1745,11 +1745,6 @@ class OfficeStore(AutomationMixin, RoundtableMixin):
             })
             return {"mode": "dry_run", "worker": worker["name"], "text": dry_text}
 
-        if worker.get("access_kind") in ("web", "subscription", "desktop"):
-            raise RuntimeError(
-                f"{worker['name']} 属于「{worker['badge']}」通道：网页端请点「🌐 打开网页 + 复制指令」，"
-                "桌面应用端请点「📂 导出 .md + 复制 @触发句」。「🚀 真调执行」仅用于 API 直连与 CLI 命令行通道。"
-            )
         workspace_dir = self._validate_safe_workspace(payload.get("workspace_dir") or worker.get("workspace") or ".")
 
         # Idempotent live execution: a retry / double-click of the SAME task at the
@@ -1799,7 +1794,10 @@ class OfficeStore(AutomationMixin, RoundtableMixin):
         for cand in worker_candidates:
             try:
                 adapter = self._build_adapter(cand, workspace_dir=workspace_dir)
-                reply = adapter.chat(prompt)
+                cand_reply = adapter.chat(prompt)
+                if not (cand_reply.text or "").strip():
+                    raise RuntimeError(f"{cand['name']} ({cand_reply.model}) 返回空内容（可能推理 token 耗尽）")
+                reply = cand_reply
                 chosen_agent = cand
                 break
             except Exception as e:  # noqa: BLE001 - fall back to next worker
