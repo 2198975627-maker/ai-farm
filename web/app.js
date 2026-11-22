@@ -530,26 +530,80 @@ function recruitWizardGo(delta) {
 // =========================================================================
 // 头像生成（严守铁律：Muse 是白底圆角方块 + 蓝色手写一笔 M，绝非 Claude 星芒；其他用诚实文字标识）
 // =========================================================================
+const VENDOR_ICON_URLS = {
+  deepseek: 'https://chat.deepseek.com/favicon.ico',
+  openai: 'https://chatgpt.com/favicon.ico',
+  chatgpt: 'https://chatgpt.com/favicon.ico',
+  gemini: 'https://gemini.google.com/favicon.ico',
+  google: 'https://gemini.google.com/favicon.ico',
+  qwen: 'https://www.qianwen.com/favicon.ico',
+  kimi: 'https://kimi.moonshot.cn/favicon.ico',
+  doubao: 'https://www.doubao.com/favicon.ico',
+  grok: 'https://grok.com/favicon.ico',
+  anthropic: 'https://claude.ai/favicon.ico',
+  glm: 'https://chatglm.cn/favicon.ico',
+};
+
+function getVendorFavicon(agent) {
+  const v = String(agent.vendor || '').toLowerCase();
+  for (const [k, url] of Object.entries(VENDOR_ICON_URLS)) {
+    if (v.includes(k)) return url;
+  }
+  return '';
+}
+
 function renderAvatarHTML(agent) {
   const dotClass = agent.status || "ready";
+  const fl = agent.floor || "worker";
+  const roleChar = fl === "manager" ? "经" : (fl === "rest" ? "休" : "员");
+  const corner = `<span class="role-corner role-${escapeHTML(fl)}" title="${fl === 'manager' ? '经理' : fl === 'rest' ? '休息' : '员工'}">${roleChar}</span>`;
   if (agent.icon_kind === "muse" || agent.id === "muse") {
     return `
-      <div class="agent-avatar muse-official-icon" title="Meta Muse (白底圆角方块 + 蓝色手写一笔 M，绝非 Claude)">
-        <svg width="24" height="24" viewBox="0 0 32 32" fill="none" aria-label="Muse Logo">
+      <div class="agent-avatar muse-official-icon" onmouseenter="showAgentHoverCard(event, '${escapeHTML(agent.id)}')" onmouseleave="hideAgentHoverCard()">
+        <svg width="20" height="20" viewBox="0 0 32 32" fill="none" aria-label="Muse Logo">
           <path d="M5.5 23.5 C6.8 14.5, 9.2 8.5, 11.2 8.8 C13.0 9.1, 13.6 18.2, 15.6 18.2 C17.6 18.2, 20.2 8.5, 22.4 8.8 C24.4 9.1, 24.8 19.8, 26.8 22.8"
                 stroke="#1d4ed8" stroke-width="3.2" stroke-linecap="round" stroke-linejoin="round" fill="none"/>
         </svg>
-        <span class="status-dot ${dotClass}"></span>
+        <span class="status-dot ${dotClass}"></span>${corner}
       </div>
     `;
   }
-  const shortLabel = (agent.vendor || agent.name || "AI").slice(0, 4);
+  const shortLabel = (agent.vendor || agent.name || "AI").slice(0, 2).toUpperCase();
+  const favicon = getVendorFavicon(agent);
+  const imgTag = favicon ? `<img class="vendor-favicon" src="${escapeHTML(favicon)}" alt="" onerror="this.remove()" />` : '';
   return `
-    <div class="agent-avatar" title="${escapeHTML(agent.brand)} · 诚实文字标识（不凭印象画假Logo）">
-      <span data-preserve-text>${escapeHTML(shortLabel)}</span>
-      <span class="status-dot ${dotClass}"></span>
+    <div class="agent-avatar" onmouseenter="showAgentHoverCard(event, '${escapeHTML(agent.id)}')" onmouseleave="hideAgentHoverCard()">
+      <span data-preserve-text>${escapeHTML(shortLabel)}</span>${imgTag}
+      <span class="status-dot ${dotClass}"></span>${corner}
     </div>
   `;
+}
+
+function showAgentHoverCard(event, agentId) {
+  const agent = APP_STATE.agents.find(a => a.id === agentId);
+  if (!agent) return;
+  let card = document.getElementById('agentHoverCard');
+  if (!card) {
+    card = document.createElement('div');
+    card.id = 'agentHoverCard';
+    card.className = 'agent-hover-card hidden';
+    document.body.appendChild(card);
+  }
+  const balance = parseAgentBalance(agent);
+  const quotaText = balance ? `余额 ${balance}` : (agent.quota_percent != null ? `剩余 ${agent.quota_percent}%` : (Number(agent.tokens_used || 0) > 0 ? `已用 ${agent.tokens_used} tok` : '额度未填'));
+  const truth = getTruthfulAgentState(agent);
+  card.innerHTML = `<h4>${escapeHTML(agent.name)}</h4>
+    <div class="hover-meta">${escapeHTML(agent.vendor)} · ${escapeHTML(agent.model)} · ${escapeHTML(agent.access_kind)}</div>
+    <div>状态：<strong>${escapeHTML(truth)}</strong> · ${escapeHTML(quotaText)}</div>
+    <div style="margin-top:4px;color:var(--text-secondary);">${escapeHTML(agent.specialty || '暂无专长说明')}</div>`;
+  const rect = event.currentTarget.getBoundingClientRect();
+  card.style.left = `${Math.min(window.innerWidth - 270, rect.right + 14)}px`;
+  card.style.top = `${Math.max(12, Math.min(window.innerHeight - 150, rect.top - 10))}px`;
+  card.classList.remove('hidden');
+}
+
+function hideAgentHoverCard() {
+  document.getElementById('agentHoverCard')?.classList.add('hidden');
 }
 
 // =========================================================================
@@ -703,19 +757,18 @@ function renderAgentCardHTML(agent) {
     ? (balNum <= 0 ? 'quota-low' : 'quota-known')
     : (hasQuota ? (Number(agent.quota_percent) <= 10 ? 'quota-low' : 'quota-known') : '');
   const quotaLabel = balance
-    ? `余额 ${escapeHTML(balance)}`
-    : (hasQuota ? `剩余 ${escapeHTML(agent.quota_percent)}%` : (Number(agent.tokens_used || 0) > 0 ? `已用 ${escapeHTML(agent.tokens_used)} tok` : '额度未填'));
+    ? escapeHTML(balance)
+    : (hasQuota ? `${escapeHTML(agent.quota_percent)}%` : (Number(agent.tokens_used || 0) > 0 ? `${escapeHTML(agent.tokens_used)}t` : '未填'));
   const selected = agent.id === APP_STATE.selectedAgentId && !document.getElementById('paneDetail').classList.contains('hidden');
-  const truthStatus = getTruthfulAgentState(agent);
+  const displayName = (agent.model && !/待|unknown/i.test(agent.model)) ? agent.model : agent.name;
   return `<div class="agent-card ${selected ? 'selected' : ''}" draggable="true" role="button" tabindex="0"
     ondragstart="onAgentDragStart(event, '${escapeHTML(agent.id)}')" onclick="selectAgent('${escapeHTML(agent.id)}')"
     onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();selectAgent('${escapeHTML(agent.id)}')}"
     aria-label="查看 ${escapeHTML(agent.name)} 的档案">
     <div class="agent-row-top">${renderAvatarHTML(agent)}<div class="agent-meta">
-      <span class="agent-name">${escapeHTML(agent.name)}</span><div class="agent-subline">${escapeHTML(agent.model)} · ${escapeHTML(truthStatus)}</div>
+      <span class="agent-name" data-preserve-text>${escapeHTML(displayName)}</span>
+      <span class="agent-quota-mini ${quotaClass}">${quotaLabel}</span>
     </div></div>
-    <div class="agent-summary">${escapeHTML(agent.specialty || '尚未填写擅长的工作')}</div>
-    <div class="agent-card-footer"><span>${escapeHTML(agent.badge || agent.access_kind)}</span><span class="${quotaClass}">${quotaLabel}</span></div>
   </div>`;
 }
 
