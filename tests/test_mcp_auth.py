@@ -255,6 +255,50 @@ class MCPAuthTests(unittest.TestCase):
                 if prop:
                     self.assertIn("cannot impersonate", prop["description"])
 
+    def test_http_mcp_endpoint_requires_bearer_and_allows_tunnel_host(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            server = create_server("127.0.0.1", 0, Path(tmp) / "office.json")
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            try:
+                port = server.server_address[1]
+                access = server.access
+                owner = access.authenticate(access.pair_owner(access.pair_code)["token"])
+                agent = access.store.createagent({"name": "MCP Worker", "vendor": "OpenAI", "model": "gpt-4o-mini", "access_kind": "api", "floor": "worker", "key_env": "OPENAI_API_KEY", "base_url": "https://api.openai.com/v1"})
+                task = access.store.createtask({"title": "remote mcp", "goal": "check", "assigned_to": agent["id"]})
+                member = access.issue_member(owner, {"agent_id": agent["id"], "kind": "mcp", "task_ids": [task["id"]]})
+
+                import http.client
+                conn = http.client.HTTPConnection("127.0.0.1", port, timeout=5)
+                try:
+                    # Valid member Bearer on /mcp works even with external tunnel Host.
+                    conn.request("POST", "/mcp", body=json.dumps({"jsonrpc": "2.0", "id": 1, "method": "initialize"}),
+                                 headers={"Host": "demo.trycloudflare.com", "Content-Type": "application/json",
+                                          "Authorization": f"Bearer {member['token']}"})
+                    r_ok = conn.getresponse()
+                    data = json.loads(r_ok.read().decode("utf-8"))
+                    self.assertEqual(r_ok.status, 200)
+                    self.assertEqual(data["result"]["serverInfo"]["name"], "ai-farm-mcp-relay")
+
+                    # Tunnel Host without Bearer on /mcp is rejected.
+                    conn.request("POST", "/mcp", body=json.dumps({"jsonrpc": "2.0", "id": 2, "method": "initialize"}),
+                                 headers={"Host": "demo.trycloudflare.com", "Content-Type": "application/json"})
+                    r_no_auth = conn.getresponse()
+                    r_no_auth.read()
+                    self.assertEqual(r_no_auth.status, 403)
+
+                    # Tunnel Host on /api/state is still blocked even with Bearer.
+                    conn.request("GET", "/api/state",
+                                 headers={"Host": "demo.trycloudflare.com", "Authorization": f"Bearer {member['token']}"})
+                    r_api = conn.getresponse()
+                    r_api.read()
+                    self.assertEqual(r_api.status, 403)
+                finally:
+                    conn.close()
+            finally:
+                server.shutdown()
+                server.server_close()
+
 
 if __name__ == "__main__":
     unittest.main()

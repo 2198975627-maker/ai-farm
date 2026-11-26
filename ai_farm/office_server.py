@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import unquote, urlparse
 
+from .mcp_relay import FarmMCPRelay
 from .office_auth import AccessDenied, OfficeAccess
 from .office_store import OfficeStore
 
@@ -30,7 +31,9 @@ class OfficeHTTPHandler(BaseHTTPRequestHandler):
         port = self.server.server_address[1]
         hosts = {f"127.0.0.1:{port}", f"localhost:{port}"}
         host = self.headers.get("Host", "")
-        if host not in hosts:
+        path = urlparse(self.path).path
+        mcp_bearer = path == "/mcp" and self.headers.get("Authorization", "").startswith("Bearer ")
+        if host not in hosts and not mcp_bearer:
             raise AccessDenied("Forbidden Host")
         origin = self.headers.get("Origin")
         allowed = {f"http://{host}"}
@@ -239,7 +242,17 @@ class OfficeHTTPHandler(BaseHTTPRequestHandler):
             request = json.loads(self.rfile.read(length).decode("utf-8"))
             if not isinstance(request, dict):
                 raise ValueError("Expected a JSON object")
-            if path == "/api/auto-pair":
+            if path == "/mcp":
+                if not self.headers.get("Authorization", "").startswith("Bearer "):
+                    raise AccessDenied("MCP HTTP 端点必须提供成员 Bearer 凭据。")
+                resp = FarmMCPRelay(_PrincipalMCPBackend(self.access, principal)).handle_request(request)
+                if resp is None:
+                    self.send_response(202)
+                    self.send_header("Content-Length", "0")
+                    self.end_headers()
+                else:
+                    self._json(200, resp)
+            elif path == "/api/auto-pair":
                 if not self._can_auto_pair():
                     raise AccessDenied("自动配对仅限本机回环访问。")
                 session = self.access.auto_pair_owner()
@@ -275,6 +288,20 @@ class OfficeHTTPHandler(BaseHTTPRequestHandler):
             self._json(400, {"ok": False, "error": str(error)})
         except Exception:
             self._json(500, {"ok": False, "error": "操作未确认完成，请核查任务状态；不要盲目重试。"})
+
+
+class _PrincipalMCPBackend:
+    """Adapts OfficeAccess + authenticated member principal for HTTP MCPRelay."""
+
+    def __init__(self, access: OfficeAccess, principal: dict[str, Any]):
+        self._access = access
+        self._principal = principal
+
+    def snapshot(self) -> dict[str, Any]:
+        return self._access.snapshot(self._principal)
+
+    def action(self, name: str, payload: dict[str, Any]) -> Any:
+        return self._access.action(self._principal, name, payload)
 
 
 def create_server(host: str = "127.0.0.1", port: int = 8765, state_path: Path | None = None, auto_pair: bool = False) -> ThreadingHTTPServer:
